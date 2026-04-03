@@ -1,0 +1,25 @@
+# Rust
+/target
+
+# GTFS data files
+/data/*.txt
+
+# Node / Portal
+portal/node_modules
+portal/dist
+
+# IDE / Editor
+.vscode
+.idea
+*.swp
+*.swo
+
+# Vite
+.vite
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code
+.claude

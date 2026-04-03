@@ -1,0 +1,20 @@
+# Glove configuration
+
+# Server
+bind: "0.0.0.0"
+port: 8080
+
+# GTFS data directory
+data_dir: "data"
+
+# Routing
+max_journeys: 5
+max_transfers: 5
+default_transfer_time: 120  # seconds
+max_duration: 10800         # 3 hours in seconds
+
+# Server workers (0 = auto, uses number of logical CPUs)
+workers: 0
+
+# Logging (trace, debug, info, warn, error)
+log_level: "info"
