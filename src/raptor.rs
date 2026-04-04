@@ -20,7 +20,9 @@
 //! The algorithm terminates when no stop is improved or the maximum number
 //! of rounds is reached.
 
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use tracing::info;
 
 use crate::gtfs::{self, GtfsData};
@@ -38,7 +40,7 @@ const MAX_ROUNDS: usize = 8;
 ///
 /// Contains the interned service index (for calendar lookup) and the
 /// pre-parsed stop times as (arrival_secs, departure_secs) tuples.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PatternTrip {
     #[allow(dead_code)]
     pub trip_id: String,
@@ -54,7 +56,7 @@ pub struct PatternTrip {
 ///
 /// Trips within the same pattern visit the exact same stops in the same order.
 /// They are sorted by departure time at the first stop.
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Pattern {
     pub route_id: String,
     /// Ordered numeric stop indices for this pattern.
@@ -64,6 +66,7 @@ pub struct Pattern {
 }
 
 /// Aggregate statistics captured during GTFS loading and RAPTOR index build.
+#[derive(Serialize, Deserialize)]
 pub struct GtfsStats {
     pub agencies: usize,
     pub routes: usize,
@@ -79,6 +82,7 @@ pub struct GtfsStats {
 }
 
 /// Pre-computed entry for the stop name autocomplete index.
+#[derive(Serialize, Deserialize)]
 pub struct SearchEntry {
     pub stop_idx: usize,
     /// Lowercased, diacritics-stripped name for fuzzy matching.
@@ -87,6 +91,7 @@ pub struct SearchEntry {
 
 /// The complete RAPTOR data structure, built once from GTFS and shared
 /// across all request handlers via [`ArcSwap`](arc_swap::ArcSwap).
+#[derive(Serialize, Deserialize)]
 pub struct RaptorData {
     /// stop_id (String) → numeric index.
     pub stop_index: HashMap<String, usize>,
@@ -355,6 +360,58 @@ impl RaptorData {
     }
 
     // -----------------------------------------------------------------------
+    // Cache persistence
+    // -----------------------------------------------------------------------
+
+    /// Save the RAPTOR index to a binary cache file.
+    pub fn save(
+        &self,
+        cache_dir: &Path,
+        fingerprint: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        std::fs::create_dir_all(cache_dir)?;
+        let bin_path = cache_dir.join("raptor.bin");
+        let fp_path = cache_dir.join("raptor.fingerprint");
+
+        let encoded = bincode::serialize(self)?;
+        std::fs::write(&bin_path, &encoded)?;
+        std::fs::write(&fp_path, fingerprint)?;
+
+        info!(
+            "RAPTOR index saved to {} ({:.1} MB)",
+            bin_path.display(),
+            encoded.len() as f64 / 1_048_576.0
+        );
+        Ok(())
+    }
+
+    /// Load the RAPTOR index from cache if the fingerprint matches.
+    ///
+    /// Returns `None` if the cache does not exist or the fingerprint is stale.
+    pub fn load_cached(cache_dir: &Path, fingerprint: &str) -> Option<Self> {
+        let bin_path = cache_dir.join("raptor.bin");
+        let fp_path = cache_dir.join("raptor.fingerprint");
+
+        let cached_fp = std::fs::read_to_string(&fp_path).ok()?;
+        if cached_fp.trim() != fingerprint {
+            info!("RAPTOR cache fingerprint mismatch, rebuilding");
+            return None;
+        }
+
+        let bytes = std::fs::read(&bin_path).ok()?;
+        match bincode::deserialize(&bytes) {
+            Ok(data) => {
+                info!("RAPTOR index loaded from cache ({})", bin_path.display());
+                Some(data)
+            }
+            Err(e) => {
+                info!("RAPTOR cache corrupted, rebuilding: {e}");
+                None
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Service calendar
     // -----------------------------------------------------------------------
 
@@ -484,36 +541,7 @@ impl RaptorData {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Text normalization
-// ---------------------------------------------------------------------------
-
-/// Normalize a string for fuzzy search: lowercase, strip French diacritics,
-/// replace hyphens and apostrophes with spaces.
-#[allow(clippy::collapsible_str_replace)]
-fn normalize(s: &str) -> String {
-    s.to_lowercase()
-        .replace('é', "e")
-        .replace('è', "e")
-        .replace('ê', "e")
-        .replace('ë', "e")
-        .replace('à', "a")
-        .replace('â', "a")
-        .replace('ä', "a")
-        .replace('ô', "o")
-        .replace('ö', "o")
-        .replace('ù', "u")
-        .replace('û', "u")
-        .replace('ü', "u")
-        .replace('î', "i")
-        .replace('ï', "i")
-        .replace('ç', "c")
-        .replace('œ', "oe")
-        .replace('æ', "ae")
-        .replace(['-', '\''], " ")
-        .replace('\u{2019}', " ")
-        .replace('\u{2018}', " ")
-}
+use crate::text::normalize;
 
 /// Approximate squared distance between two points (sufficient for ranking).
 fn haversine_approx(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {

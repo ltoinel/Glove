@@ -7,11 +7,12 @@ use actix_web::{HttpResponse, get, web};
 use arc_swap::ArcSwap;
 use chrono::Timelike;
 use serde::{Deserialize, Serialize};
+use utoipa::{IntoParams, ToSchema};
 
 use crate::config::AppConfig;
 use crate::raptor::{self, RaptorData, SectionType};
 
-use super::{Section, StopDateTime, make_place, make_stop_point};
+use crate::api::{Section, StopDateTime, make_place, make_stop_point};
 
 // ---------------------------------------------------------------------------
 // Query parameters
@@ -21,7 +22,7 @@ use super::{Section, StopDateTime, make_place, make_stop_point};
 ///
 /// Mirrors the Navitia `/journeys` API parameters. Most fields are optional
 /// and fall back to values from [`AppConfig`].
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
 #[allow(dead_code)]
 pub struct JourneysQuery {
     pub from: Option<String>,
@@ -88,14 +89,14 @@ pub struct JourneysQuery {
     pub language: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DatetimeRepresents {
     Departure,
     Arrival,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DataFreshness {
     BaseSchedule,
@@ -108,13 +109,13 @@ pub enum DataFreshness {
 // ---------------------------------------------------------------------------
 
 /// Top-level response for `GET /api/journeys`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct JourneysResponse {
     pub journeys: Vec<Journey>,
 }
 
 /// A complete journey from origin to destination.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct Journey {
     pub departure_date_time: String,
     pub arrival_date_time: String,
@@ -126,7 +127,7 @@ pub struct Journey {
 }
 
 /// Display information for a public transport section.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct DisplayInfo {
     pub network: String,
     pub direction: String,
@@ -145,7 +146,17 @@ pub struct DisplayInfo {
 /// Runs RAPTOR iteratively, each time excluding the route patterns used by
 /// previously found journeys, to produce diverse alternatives sorted by
 /// duration (fastest first).
-#[get("/api/journeys")]
+#[utoipa::path(
+    get,
+    path = "/api/journeys/public_transport",
+    params(JourneysQuery),
+    responses(
+        (status = 200, description = "Journey alternatives", body = JourneysResponse),
+        (status = 400, description = "Invalid parameters"),
+    ),
+    tag = "Journeys"
+)]
+#[get("/api/journeys/public_transport")]
 pub async fn get_journeys(
     query: web::Query<JourneysQuery>,
     shared: web::Data<ArcSwap<RaptorData>>,

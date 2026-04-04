@@ -6,28 +6,97 @@ import {
 } from '@mui/material'
 import {
   Search, SwapVert, DirectionsBus, Train, Tram, Subway,
-  ExpandMore, ExpandLess, TransferWithinAStation,
+  ExpandMore, ExpandLess, TransferWithinAStation, DirectionsWalk,
   NearMe, ArrowRightAlt, Place, AccessTime, Settings,
-  Route, Timer, MultipleStop, Storage, CalendarMonth, Close, Language,
+  Route, Timer, MultipleStop, Storage, CalendarMonth, Close, Language, Api,
+  DirectionsBike, DirectionsCar,
 } from '@mui/icons-material'
+import SwaggerUI from 'swagger-ui-react'
+import 'swagger-ui-react/swagger-ui.css'
 import { MapContainer, TileLayer, Polyline, CircleMarker, Marker, Tooltip as LTooltip, useMap } from 'react-leaflet'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import { useI18n } from './i18n.jsx'
 
-function flagIcon(color) {
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="28" height="40" viewBox="0 0 28 40">
-    <line x1="6" y1="4" x2="6" y2="38" stroke="${color}" stroke-width="2.5" stroke-linecap="round"/>
-    <path d="M6 4 L24 10 L6 18 Z" fill="${color}" opacity="0.9"/>
-    <circle cx="6" cy="38" r="3" fill="${color}"/>
-  </svg>`
-  return L.divIcon({ html: svg, iconSize: [28, 40], iconAnchor: [6, 38], className: '' })
+// Origin marker — pulsing radar dot
+const originIcon = L.divIcon({
+  html: `<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 40 40">
+    <defs>
+      <radialGradient id="og" cx="50%" cy="50%" r="50%">
+        <stop offset="0%" stop-color="#00e676" stop-opacity="0.35"/>
+        <stop offset="100%" stop-color="#00e676" stop-opacity="0"/>
+      </radialGradient>
+    </defs>
+    <circle cx="20" cy="20" r="18" fill="url(#og)">
+      <animate attributeName="r" values="10;18;10" dur="2.5s" repeatCount="indefinite"/>
+      <animate attributeName="opacity" values="1;0.4;1" dur="2.5s" repeatCount="indefinite"/>
+    </circle>
+    <circle cx="20" cy="20" r="8" fill="#0a0a12" stroke="#00e676" stroke-width="2.5"/>
+    <circle cx="20" cy="20" r="4" fill="#00e676"/>
+  </svg>`,
+  iconSize: [40, 40], iconAnchor: [20, 20], className: '',
+})
+
+// Destination marker — modern teardrop pin
+const destinationIcon = L.divIcon({
+  html: `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="44" viewBox="0 0 32 44">
+    <defs>
+      <linearGradient id="dg" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="#ff5252"/>
+        <stop offset="100%" stop-color="#d32f2f"/>
+      </linearGradient>
+      <filter id="ds" x="-20%" y="-10%" width="140%" height="130%">
+        <feDropShadow dx="0" dy="2" stdDeviation="2.5" flood-color="#000" flood-opacity="0.4"/>
+      </filter>
+    </defs>
+    <g filter="url(#ds)">
+      <path d="M16 2C8.82 2 3 7.82 3 15c0 9.75 13 25 13 25s13-15.25 13-25C29 7.82 23.18 2 16 2z" fill="url(#dg)"/>
+      <circle cx="16" cy="15" r="5.5" fill="#0a0a12"/>
+      <circle cx="16" cy="15" r="2.5" fill="#fff"/>
+    </g>
+  </svg>`,
+  iconSize: [32, 44], iconAnchor: [16, 42], className: '',
+})
+const DEFAULT_CENTER = [48.8566, 2.3522]
+const DEFAULT_ZOOM = 11
+
+// --- Polyline smoothing (Catmull-Rom spline) ---
+
+function smoothLine(coords, numPoints = 6) {
+  if (coords.length < 3) return coords
+  const result = []
+  const pts = [coords[0], ...coords, coords[coords.length - 1]]
+  for (let i = 1; i < pts.length - 2; i++) {
+    const p0 = pts[i - 1], p1 = pts[i], p2 = pts[i + 1], p3 = pts[i + 2]
+    for (let t = 0; t < numPoints; t++) {
+      const f = t / numPoints
+      const f2 = f * f, f3 = f2 * f
+      const lat = 0.5 * ((2 * p1[0]) + (-p0[0] + p2[0]) * f + (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * f2 + (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * f3)
+      const lon = 0.5 * ((2 * p1[1]) + (-p0[1] + p2[1]) * f + (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * f2 + (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * f3)
+      result.push([lat, lon])
+    }
+  }
+  result.push(coords[coords.length - 1])
+  return result
 }
 
-const originIcon = flagIcon('#22c55e')
-const destinationIcon = flagIcon('#ef4444')
-const IDF_CENTER = [48.8566, 2.3522]
-const IDF_ZOOM = 11
+// --- Decode Valhalla encoded polyline (precision 6) ---
+
+function decodePolyline(encoded, precision = 6) {
+  const factor = Math.pow(10, precision)
+  const result = []
+  let index = 0, lat = 0, lng = 0
+  while (index < encoded.length) {
+    let shift = 0, byte, val = 0
+    do { byte = encoded.charCodeAt(index++) - 63; val |= (byte & 0x1f) << shift; shift += 5 } while (byte >= 0x20)
+    lat += (val & 1) ? ~(val >> 1) : (val >> 1)
+    shift = 0; val = 0
+    do { byte = encoded.charCodeAt(index++) - 63; val |= (byte & 0x1f) << shift; shift += 5 } while (byte >= 0x20)
+    lng += (val & 1) ? ~(val >> 1) : (val >> 1)
+    result.push([lat / factor, lng / factor])
+  }
+  return result
+}
 
 // --- Utilities ---
 
@@ -71,11 +140,11 @@ function modeIcon(mode) {
 function modeColor(mode, color) {
   if (color) return `#${color}`
   switch (mode) {
-    case 'metro': return '#003ca6'
-    case 'rail': return '#333'
-    case 'tramway': return '#6b9c2a'
-    case 'bus': return '#95c11f'
-    default: return '#757575'
+    case 'metro': return '#4fc3f7'
+    case 'rail': return '#e0e0e0'
+    case 'tramway': return '#66bb6a'
+    case 'bus': return '#aed581'
+    default: return '#90a4ae'
   }
 }
 
@@ -142,10 +211,7 @@ function PlaceAutocomplete({ label, value, onChange, icon, placeholder }) {
           <Box component="li" key={key} {...rest}
             sx={{ display: 'flex', alignItems: 'center', gap: 1.5, py: 1 }}>
             <Place fontSize="small" sx={{ color: 'primary.main' }} />
-            <Box>
-              <Typography variant="body2" fontWeight={500}>{option.name}</Typography>
-              <Typography variant="caption" color="text.secondary">{option.id}</Typography>
-            </Box>
+            <Typography variant="body2" fontWeight={500}>{option.name}</Typography>
           </Box>
         )
       }}
@@ -223,12 +289,12 @@ function extractMapData(journey) {
 // --- Journey card ---
 
 const TAG_COLORS = {
-  fastest: '#16a34a',
-  least_transfers: '#2563eb',
-  least_walking: '#9333ea',
+  fastest: '#00e5ff',
+  least_transfers: '#ffb800',
+  least_walking: '#b388ff',
 }
 
-function JourneyCard({ journey, rank, selected, onSelect }) {
+function JourneyCard({ journey, rank, selected, onSelect, animDelay }) {
   const { t } = useI18n()
   const [open, setOpen] = useState(false)
   const ptSections = journey.sections.filter(s => s.type === 'public_transport' && s.display_informations)
@@ -236,12 +302,20 @@ function JourneyCard({ journey, rank, selected, onSelect }) {
   return (
     <Card
       sx={{
-        mb: 1.5, border: '2px solid',
-        borderColor: selected ? 'primary.main' : 'transparent',
-        bgcolor: selected ? (th) => alpha(th.palette.primary.main, 0.04) : 'background.paper',
-        '&:hover': { boxShadow: 4, transform: 'translateY(-1px)' },
+        mb: 1.5,
+        border: '1px solid',
+        borderColor: selected ? 'rgba(0, 229, 255, 0.4)' : 'rgba(255, 255, 255, 0.04)',
+        bgcolor: selected ? 'rgba(0, 229, 255, 0.06)' : 'rgba(20, 20, 35, 0.5)',
+        boxShadow: selected ? '0 0 24px rgba(0, 229, 255, 0.1), inset 0 1px 0 rgba(255,255,255,0.05)' : 'inset 0 1px 0 rgba(255,255,255,0.03)',
+        '&:hover': {
+          borderColor: selected ? 'rgba(0, 229, 255, 0.5)' : 'rgba(255, 255, 255, 0.1)',
+          bgcolor: selected ? 'rgba(0, 229, 255, 0.08)' : 'rgba(20, 20, 35, 0.7)',
+          transform: 'translateY(-1px)',
+        },
+        animation: 'cardSlideIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) both',
+        animationDelay: `${animDelay}ms`,
       }}
-      elevation={selected ? 2 : 0}
+      elevation={0}
     >
       <CardActionArea onClick={() => { setOpen(!open); onSelect() }}>
         <CardContent sx={{ py: 1.5, px: 2.5 }}>
@@ -249,17 +323,19 @@ function JourneyCard({ journey, rank, selected, onSelect }) {
             <Box sx={{
               width: 36, height: 36, borderRadius: '50%',
               display: 'flex', alignItems: 'center', justifyContent: 'center',
-              bgcolor: rank === 1 ? 'primary.main' : (th) => alpha(th.palette.text.secondary, 0.1),
-              color: rank === 1 ? 'white' : 'text.secondary',
+              bgcolor: rank === 1 ? 'rgba(0, 229, 255, 0.15)' : 'rgba(255, 255, 255, 0.04)',
+              color: rank === 1 ? '#00e5ff' : 'text.secondary',
+              border: rank === 1 ? '1px solid rgba(0, 229, 255, 0.3)' : '1px solid rgba(255,255,255,0.06)',
               fontWeight: 700, fontSize: 14, flexShrink: 0,
+              fontFamily: '"Syne", sans-serif',
             }}>
               {rank}
             </Box>
 
             <Box sx={{ flex: 1, minWidth: 0 }}>
-              <Typography variant="body2" fontWeight={600}>
+              <Typography variant="body2" fontWeight={600} sx={{ fontFamily: '"Syne", sans-serif' }}>
                 {formatTime(journey.departure_date_time)}
-                <ArrowRightAlt sx={{ verticalAlign: 'middle', mx: 0.5, opacity: 0.5 }} fontSize="small" />
+                <ArrowRightAlt sx={{ verticalAlign: 'middle', mx: 0.5, opacity: 0.3 }} fontSize="small" />
                 {formatTime(journey.arrival_date_time)}
               </Typography>
               <Stack direction="row" spacing={0.5} sx={{ mt: 0.5 }} flexWrap="wrap" useFlexGap>
@@ -272,8 +348,11 @@ function JourneyCard({ journey, rank, selected, onSelect }) {
                       {i > 0 && <Typography variant="caption" sx={{ color: 'text.disabled', mx: 0.2 }}>›</Typography>}
                       <Chip icon={modeIcon(di.commercial_mode)} label={di.label || di.commercial_mode}
                         size="small"
-                        sx={{ bgcolor: bg, color: fg, fontWeight: 700, fontSize: 11, height: 24,
-                          '& .MuiChip-icon': { color: fg, ml: 0.5 } }} />
+                        sx={{
+                          bgcolor: bg, color: fg, fontWeight: 700, fontSize: 11, height: 24,
+                          boxShadow: `0 0 8px ${alpha(bg, 0.3)}`,
+                          '& .MuiChip-icon': { color: fg, ml: 0.5 },
+                        }} />
                     </Box>
                   )
                 })}
@@ -286,7 +365,8 @@ function JourneyCard({ journey, rank, selected, onSelect }) {
                     if (!color) return null
                     return (
                       <Chip key={tag} label={label} size="small" variant="outlined"
-                        sx={{ height: 20, fontSize: 10, fontWeight: 600, color, borderColor: color }} />
+                        sx={{ height: 20, fontSize: 10, fontWeight: 600, color, borderColor: alpha(color, 0.4),
+                          bgcolor: alpha(color, 0.06) }} />
                     )
                   })}
                 </Stack>
@@ -294,42 +374,48 @@ function JourneyCard({ journey, rank, selected, onSelect }) {
             </Box>
 
             <Box sx={{ textAlign: 'right', flexShrink: 0, pl: 1 }}>
-              <Typography variant="body1" fontWeight={800} lineHeight={1.2} color="text.primary">
+              <Typography variant="body1" fontWeight={800} lineHeight={1.2} color="text.primary"
+                sx={{ fontFamily: '"Syne", sans-serif' }}>
                 {formatDuration(journey.duration)}
               </Typography>
               {journey.nb_transfers > 0 && (
-                <Typography variant="caption" sx={{ color: '#f59e0b' }} fontWeight={600}>
+                <Typography variant="caption" sx={{ color: '#ffb800' }} fontWeight={600}>
                   {journey.nb_transfers} {t('transfers')}
                 </Typography>
               )}
             </Box>
-            {open ? <ExpandLess fontSize="small" color="action" /> : <ExpandMore fontSize="small" color="action" />}
+            {open ? <ExpandLess fontSize="small" sx={{ color: 'text.secondary' }} />
+              : <ExpandMore fontSize="small" sx={{ color: 'text.secondary' }} />}
           </Box>
         </CardContent>
       </CardActionArea>
 
       <Collapse in={open}>
-        <Divider />
+        <Divider sx={{ borderColor: 'rgba(255,255,255,0.04)' }} />
         <Box sx={{ px: 2.5, py: 1.5 }}>
           {journey.sections.map((s, i) => {
             const isPt = s.type === 'public_transport'
             const di = s.display_informations
-            const lineColor = isPt ? modeColor(di?.commercial_mode, di?.color) : '#e2e8f0'
+            const lineColor = isPt ? modeColor(di?.commercial_mode, di?.color) : 'rgba(255,255,255,0.08)'
             return (
               <Box key={i} sx={{
                 display: 'flex', gap: 1.5, py: 1,
                 borderBottom: i < journey.sections.length - 1 ? '1px solid' : 'none',
-                borderColor: 'divider',
+                borderColor: 'rgba(255,255,255,0.04)',
               }}>
-                <Typography variant="caption" fontWeight={600} sx={{ width: 40, flexShrink: 0, pt: 0.2, color: 'text.primary' }}>
+                <Typography variant="caption" fontWeight={600}
+                  sx={{ width: 40, flexShrink: 0, pt: 0.2, color: 'primary.main', fontFamily: '"Syne", sans-serif' }}>
                   {formatTime(s.departure_date_time)}
                 </Typography>
-                <Box sx={{ width: 4, borderRadius: 2, bgcolor: lineColor, flexShrink: 0 }} />
+                <Box sx={{
+                  width: 3, borderRadius: 2, bgcolor: lineColor, flexShrink: 0,
+                  boxShadow: isPt ? `0 0 6px ${alpha(lineColor, 0.4)}` : 'none',
+                }} />
                 <Box sx={{ flex: 1, minWidth: 0 }}>
                   <Typography variant="caption" fontWeight={600} color="text.primary">
                     {isPt ? <>{di?.commercial_mode} <strong>{di?.label}</strong></> : (
                       <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
-                        <TransferWithinAStation sx={{ fontSize: 14 }} color="action" /> {t('transfer')}
+                        <TransferWithinAStation sx={{ fontSize: 14, color: '#ffb800' }} /> {t('transfer')}
                       </Box>
                     )}
                   </Typography>
@@ -337,12 +423,13 @@ function JourneyCard({ journey, rank, selected, onSelect }) {
                     {s.from.name} → {s.to.name}
                   </Typography>
                   {isPt && di?.direction && (
-                    <Typography variant="caption" color="text.disabled" display="block" fontStyle="italic" noWrap>
+                    <Typography variant="caption" color="text.disabled" display="block" fontStyle="italic" noWrap
+                      sx={{ opacity: 0.6 }}>
                       {t('direction')} {di.direction}
                     </Typography>
                   )}
                 </Box>
-                <Typography variant="caption" color="text.secondary" sx={{ flexShrink: 0, pt: 0.2 }}>
+                <Typography variant="caption" color="text.secondary" sx={{ flexShrink: 0, pt: 0.2, opacity: 0.7 }}>
                   {formatDuration(s.duration)}
                 </Typography>
               </Box>
@@ -350,6 +437,161 @@ function JourneyCard({ journey, rank, selected, onSelect }) {
           })}
         </Box>
       </Collapse>
+    </Card>
+  )
+}
+
+function WalkCard({ journey, selected, onSelect }) {
+  const { t } = useI18n()
+  const distKm = (journey.distance / 1000).toFixed(1)
+
+  return (
+    <Card
+      sx={{
+        mb: 1.5,
+        border: '1px solid',
+        borderColor: selected ? 'rgba(255, 184, 0, 0.4)' : 'rgba(255, 184, 0, 0.15)',
+        bgcolor: selected ? 'rgba(255, 184, 0, 0.08)' : 'rgba(255, 184, 0, 0.04)',
+        boxShadow: selected ? '0 0 24px rgba(255, 184, 0, 0.1), inset 0 1px 0 rgba(255,255,255,0.05)' : 'inset 0 1px 0 rgba(255,255,255,0.03)',
+        '&:hover': {
+          borderColor: selected ? 'rgba(255, 184, 0, 0.5)' : 'rgba(255, 184, 0, 0.3)',
+          bgcolor: selected ? 'rgba(255, 184, 0, 0.1)' : 'rgba(255, 184, 0, 0.06)',
+          transform: 'translateY(-1px)',
+        },
+        transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)',
+        cursor: 'pointer',
+      }}
+      elevation={0}
+    >
+      <CardActionArea onClick={onSelect}>
+        <CardContent sx={{ py: 1.5, px: 2.5 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+            <Box sx={{
+              width: 36, height: 36, borderRadius: '50%',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              bgcolor: selected ? 'rgba(255, 184, 0, 0.2)' : 'rgba(255, 184, 0, 0.12)',
+              border: '1px solid',
+              borderColor: selected ? 'rgba(255, 184, 0, 0.4)' : 'rgba(255, 184, 0, 0.25)',
+            }}>
+              <DirectionsWalk sx={{ fontSize: 20, color: '#ffb800' }} />
+            </Box>
+            <Box sx={{ flex: 1, minWidth: 0 }}>
+              <Typography variant="body2" fontWeight={600} sx={{ fontFamily: '"Syne", sans-serif' }}>
+                {t('walkJourney')}
+              </Typography>
+              <Typography variant="caption" color="text.secondary">
+                {t('walkDistance')}: {distKm} km
+              </Typography>
+            </Box>
+            <Box sx={{ textAlign: 'right', flexShrink: 0 }}>
+              <Typography variant="body1" fontWeight={800} lineHeight={1.2} sx={{ fontFamily: '"Syne", sans-serif', color: '#ffb800' }}>
+                {formatDuration(journey.duration)}
+              </Typography>
+            </Box>
+          </Box>
+        </CardContent>
+      </CardActionArea>
+    </Card>
+  )
+}
+
+function BikeCard({ journey, selected, onSelect }) {
+  const { t } = useI18n()
+  const distKm = (journey.distance / 1000).toFixed(1)
+  const isEbike = journey.type === 'ebike'
+  const color = isEbike ? '#66bb6a' : '#4caf50'
+
+  return (
+    <Card
+      sx={{
+        border: '1px solid',
+        borderColor: selected ? `${color}66` : `${color}26`,
+        bgcolor: selected ? `${color}14` : `${color}0a`,
+        boxShadow: selected ? `0 0 24px ${color}1a, inset 0 1px 0 rgba(255,255,255,0.05)` : 'inset 0 1px 0 rgba(255,255,255,0.03)',
+        '&:hover': {
+          borderColor: selected ? `${color}80` : `${color}4d`,
+          bgcolor: selected ? `${color}1a` : `${color}0f`,
+          transform: 'translateY(-1px)',
+        },
+        transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)',
+        cursor: 'pointer',
+      }}
+      elevation={0}
+    >
+      <CardActionArea onClick={onSelect}>
+        <CardContent sx={{ py: 1.5, px: 2.5 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+            <Box sx={{
+              width: 36, height: 36, borderRadius: '50%',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              bgcolor: selected ? `${color}33` : `${color}1f`,
+              border: '1px solid',
+              borderColor: selected ? `${color}66` : `${color}40`,
+            }}>
+              <DirectionsBike sx={{ fontSize: 20, color }} />
+            </Box>
+            <Box sx={{ flex: 1, minWidth: 0 }}>
+              <Typography variant="body2" fontWeight={600} sx={{ fontFamily: '"Syne", sans-serif' }}>
+                {isEbike ? t('bikeEbike') : t('bikeClassic')}
+              </Typography>
+              <Typography variant="caption" color="text.secondary">
+                {distKm} km · ↑{journey.elevation_gain}m ↓{journey.elevation_loss}m
+              </Typography>
+            </Box>
+            <Box sx={{ textAlign: 'right', flexShrink: 0 }}>
+              <Typography variant="body1" fontWeight={800} lineHeight={1.2} sx={{ fontFamily: '"Syne", sans-serif', color }}>
+                {formatDuration(journey.duration)}
+              </Typography>
+            </Box>
+          </Box>
+        </CardContent>
+      </CardActionArea>
+    </Card>
+  )
+}
+
+function CarCard({ journey }) {
+  const { t } = useI18n()
+  const distKm = (journey.distance / 1000).toFixed(1)
+  const color = '#42a5f5'
+
+  return (
+    <Card
+      sx={{
+        border: '1px solid',
+        borderColor: `${color}66`,
+        bgcolor: `${color}14`,
+        boxShadow: `0 0 24px ${color}1a, inset 0 1px 0 rgba(255,255,255,0.05)`,
+        transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)',
+      }}
+      elevation={0}
+    >
+      <CardContent sx={{ py: 1.5, px: 2.5 }}>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+          <Box sx={{
+            width: 36, height: 36, borderRadius: '50%',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            bgcolor: `${color}33`,
+            border: '1px solid',
+            borderColor: `${color}66`,
+          }}>
+            <DirectionsCar sx={{ fontSize: 20, color }} />
+          </Box>
+          <Box sx={{ flex: 1, minWidth: 0 }}>
+            <Typography variant="body2" fontWeight={600} sx={{ fontFamily: '"Syne", sans-serif' }}>
+              {t('carJourney')}
+            </Typography>
+            <Typography variant="caption" color="text.secondary">
+              {distKm} km
+            </Typography>
+          </Box>
+          <Box sx={{ textAlign: 'right', flexShrink: 0 }}>
+            <Typography variant="body1" fontWeight={800} lineHeight={1.2} sx={{ fontFamily: '"Syne", sans-serif', color }}>
+              {formatDuration(journey.duration)}
+            </Typography>
+          </Box>
+        </Box>
+      </CardContent>
     </Card>
   )
 }
@@ -398,7 +640,7 @@ function SettingsPanel({ status, onReload }) {
 
   if (!status) return (
     <Box sx={{ p: 4, textAlign: 'center' }}>
-      <CircularProgress size={28} />
+      <CircularProgress size={28} sx={{ color: '#00e5ff' }} />
       <Typography variant="body2" color="text.secondary" sx={{ mt: 1.5 }}>{t('loadingStatus')}</Typography>
     </Box>
   )
@@ -406,37 +648,47 @@ function SettingsPanel({ status, onReload }) {
   return (
     <Box sx={{ overflow: 'auto', flex: 1 }}>
       <Box sx={{ px: 2.5, pt: 2, pb: 0.5 }}>
-        <Typography variant="overline" color="text.secondary" fontWeight={700} letterSpacing={1}>
+        <Typography variant="overline" color="primary.main" fontWeight={700} letterSpacing={2} fontSize={10}>
           {t('gtfsData')}
         </Typography>
       </Box>
       {items.map((item, i) => (
-        <Box key={i} sx={{ display: 'flex', alignItems: 'center', gap: 1.5, px: 2.5, py: 0.8 }}>
-          <Box sx={{ color: 'primary.main', display: 'flex' }}>{item.icon}</Box>
-          <Typography variant="body2" sx={{ flex: 1 }}>{item.label}</Typography>
-          <Typography variant="body2" fontWeight={700}>{item.value?.toLocaleString() ?? '—'}</Typography>
+        <Box key={i} sx={{
+          display: 'flex', alignItems: 'center', gap: 1.5, px: 2.5, py: 0.8,
+          '&:hover': { bgcolor: 'rgba(255,255,255,0.02)' },
+          transition: 'background 0.15s',
+        }}>
+          <Box sx={{ color: 'primary.main', display: 'flex', opacity: 0.7 }}>{item.icon}</Box>
+          <Typography variant="body2" sx={{ flex: 1, color: 'text.secondary' }}>{item.label}</Typography>
+          <Typography variant="body2" fontWeight={700}
+            sx={{ fontFamily: '"Syne", sans-serif' }}>{item.value?.toLocaleString() ?? '—'}</Typography>
         </Box>
       ))}
 
-      <Divider sx={{ my: 1.5, mx: 2 }} />
+      <Divider sx={{ my: 1.5, mx: 2, borderColor: 'rgba(255,255,255,0.04)' }} />
 
       <Box sx={{ px: 2.5, pb: 0.5 }}>
-        <Typography variant="overline" color="text.secondary" fontWeight={700} letterSpacing={1}>
+        <Typography variant="overline" color="secondary.main" fontWeight={700} letterSpacing={2} fontSize={10}>
           {t('raptorIndex')}
         </Typography>
       </Box>
       {raptorItems.map((item, i) => (
-        <Box key={i} sx={{ display: 'flex', alignItems: 'center', gap: 1.5, px: 2.5, py: 0.8 }}>
-          <Box sx={{ color: 'secondary.main', display: 'flex' }}>{item.icon}</Box>
-          <Typography variant="body2" sx={{ flex: 1 }}>{item.label}</Typography>
-          <Typography variant="body2" fontWeight={700}>{item.value?.toLocaleString() ?? '—'}</Typography>
+        <Box key={i} sx={{
+          display: 'flex', alignItems: 'center', gap: 1.5, px: 2.5, py: 0.8,
+          '&:hover': { bgcolor: 'rgba(255,255,255,0.02)' },
+          transition: 'background 0.15s',
+        }}>
+          <Box sx={{ color: 'secondary.main', display: 'flex', opacity: 0.7 }}>{item.icon}</Box>
+          <Typography variant="body2" sx={{ flex: 1, color: 'text.secondary' }}>{item.label}</Typography>
+          <Typography variant="body2" fontWeight={700}
+            sx={{ fontFamily: '"Syne", sans-serif' }}>{item.value?.toLocaleString() ?? '—'}</Typography>
         </Box>
       ))}
 
-      <Divider sx={{ my: 1.5, mx: 2 }} />
+      <Divider sx={{ my: 1.5, mx: 2, borderColor: 'rgba(255,255,255,0.04)' }} />
 
       <Box sx={{ px: 2.5, pb: 1 }}>
-        <Typography variant="overline" color="text.secondary" fontWeight={700} letterSpacing={1}>
+        <Typography variant="overline" color="text.secondary" fontWeight={700} letterSpacing={2} fontSize={10}>
           {t('lastLoaded')}
         </Typography>
         <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
@@ -444,11 +696,13 @@ function SettingsPanel({ status, onReload }) {
             ? new Date(status.loaded_at).toLocaleString(undefined, { dateStyle: 'full', timeStyle: 'medium' })
             : '—'}
         </Typography>
-        <Chip label={status.status || '—'} size="small" color="success" variant="outlined"
-          sx={{ mt: 1, fontWeight: 600, textTransform: 'uppercase', fontSize: 11 }} />
+        <Chip label={status.status || '—'} size="small" variant="outlined"
+          sx={{ mt: 1, fontWeight: 600, textTransform: 'uppercase', fontSize: 11,
+            color: '#00e676', borderColor: 'rgba(0, 230, 118, 0.3)', bgcolor: 'rgba(0, 230, 118, 0.06)',
+            fontFamily: '"Syne", sans-serif' }} />
       </Box>
 
-      <Divider sx={{ my: 1.5, mx: 2 }} />
+      <Divider sx={{ my: 1.5, mx: 2, borderColor: 'rgba(255,255,255,0.04)' }} />
 
       <Box sx={{ px: 2.5, pb: 2 }}>
         {reloadMsg && (
@@ -458,22 +712,70 @@ function SettingsPanel({ status, onReload }) {
           startIcon={reloading ? <CircularProgress size={18} color="inherit" /> : <Storage />}
           sx={{
             py: 1.2,
-            background: 'linear-gradient(135deg, #0ea5e9 0%, #6366f1 100%)',
-            '&:hover': { background: 'linear-gradient(135deg, #0284c7 0%, #4f46e5 100%)' },
+            bgcolor: 'rgba(0, 229, 255, 0.1)',
+            color: '#00e5ff',
+            border: '1px solid rgba(0, 229, 255, 0.25)',
+            boxShadow: 'none',
+            '&:hover': {
+              bgcolor: 'rgba(0, 229, 255, 0.18)',
+              boxShadow: '0 0 20px rgba(0, 229, 255, 0.15)',
+            },
           }}>
           {reloading ? t('reloading') : t('reloadGtfs')}
         </Button>
       </Box>
 
-      <Divider sx={{ my: 1, mx: 2 }} />
+      <Divider sx={{ my: 1, mx: 2, borderColor: 'rgba(255,255,255,0.04)' }} />
 
       <Box sx={{ px: 2.5, py: 1.5 }}>
-        <Typography variant="overline" color="text.secondary" fontWeight={700} letterSpacing={1}>
+        <Typography variant="overline" color="text.secondary" fontWeight={700} letterSpacing={2} fontSize={10}>
           {t('about')}
         </Typography>
         <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>{t('aboutDesc')}</Typography>
-        <Typography variant="caption" color="text.disabled">{t('aboutTech')}</Typography>
+        <Typography variant="caption" sx={{ color: 'text.disabled', opacity: 0.5 }}>{t('aboutTech')}</Typography>
       </Box>
+    </Box>
+  )
+}
+
+// --- Swagger panel ---
+
+function SwaggerPanel() {
+  return (
+    <Box sx={{
+      flex: 1, overflow: 'auto',
+      '& .swagger-ui': {
+        fontFamily: '"Figtree", sans-serif',
+      },
+      '& .swagger-ui .topbar': { display: 'none' },
+      '& .swagger-ui .info': { margin: '12px 0' },
+      '& .swagger-ui .info .title': {
+        fontFamily: '"Syne", sans-serif',
+        color: '#e8e6f0',
+      },
+      '& .swagger-ui .info p, & .swagger-ui .info li': { color: '#8b89a0' },
+      '& .swagger-ui .scheme-container': { background: 'transparent', boxShadow: 'none', padding: 0 },
+      '& .swagger-ui .opblock-tag': { color: '#e8e6f0', borderColor: 'rgba(255,255,255,0.06)' },
+      '& .swagger-ui .opblock': { borderColor: 'rgba(255,255,255,0.06)', background: 'rgba(255,255,255,0.02)' },
+      '& .swagger-ui .opblock .opblock-summary-method': { borderRadius: '6px', fontFamily: '"Syne", sans-serif' },
+      '& .swagger-ui .opblock .opblock-summary-description': { color: '#8b89a0' },
+      '& .swagger-ui .opblock .opblock-summary-path': { color: '#e8e6f0' },
+      '& .swagger-ui .opblock-body pre': { background: 'rgba(0,0,0,0.3)', color: '#e8e6f0' },
+      '& .swagger-ui .model-box, & .swagger-ui .model': { color: '#8b89a0' },
+      '& .swagger-ui table thead tr th': { color: '#8b89a0', borderColor: 'rgba(255,255,255,0.06)' },
+      '& .swagger-ui table tbody tr td': { color: '#e8e6f0', borderColor: 'rgba(255,255,255,0.06)' },
+      '& .swagger-ui .parameter__name': { color: '#00e5ff' },
+      '& .swagger-ui .parameter__type': { color: '#8b89a0' },
+      '& .swagger-ui .responses-inner h4, & .swagger-ui .responses-inner h5': { color: '#e8e6f0' },
+      '& .swagger-ui .response-col_status': { color: '#00e676' },
+      '& .swagger-ui .btn': { borderColor: 'rgba(255,255,255,0.1)', color: '#8b89a0' },
+      '& .swagger-ui select': { background: 'rgba(20,20,35,0.8)', color: '#e8e6f0', borderColor: 'rgba(255,255,255,0.1)' },
+      '& .swagger-ui input[type=text]': { background: 'rgba(20,20,35,0.8)', color: '#e8e6f0', borderColor: 'rgba(255,255,255,0.1)' },
+      '& .swagger-ui .opblock-tag:hover': { color: '#00e5ff' },
+      '& .swagger-ui .opblock.opblock-get .opblock-summary-method': { bgcolor: '#00e5ff', color: '#0a0a12' },
+      '& .swagger-ui .opblock.opblock-post .opblock-summary-method': { bgcolor: '#ffb800', color: '#0a0a12' },
+    }}>
+      <SwaggerUI url="/api-docs/openapi.json" docExpansion="list" defaultModelsExpandDepth={-1} />
     </Box>
   )
 }
@@ -487,10 +789,18 @@ export default function App() {
   const [to, setTo] = useState(null)
   const [datetime, setDatetime] = useState(defaultDatetime())
   const [journeys, setJourneys] = useState(null)
+  const [walkJourney, setWalkJourney] = useState(null)
+  const [bikeJourneys, setBikeJourneys] = useState(null)
+  const [carJourney, setCarJourney] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [status, setStatus] = useState(null)
   const [selectedJourney, setSelectedJourney] = useState(0)
+  const [ptTime, setPtTime] = useState(null)
+  const [walkTime, setWalkTime] = useState(null)
+  const [bikeTime, setBikeTime] = useState(null)
+  const [carTime, setCarTime] = useState(null)
+  const [resultTab, setResultTab] = useState('pt')
   const [view, setView] = useState('search')
 
   const refreshStatus = () => {
@@ -498,7 +808,7 @@ export default function App() {
   }
   useEffect(() => { refreshStatus() }, [])
 
-  const clearResults = () => { setJourneys(null); setSelectedJourney(0); setError(null) }
+  const clearResults = () => { setJourneys(null); setWalkJourney(null); setBikeJourneys(null); setCarJourney(null); setSelectedJourney(0); setResultTab('pt'); setError(null); setPtTime(null); setWalkTime(null); setBikeTime(null); setCarTime(null) }
   const handleFromChange = (v) => { setFrom(v); clearResults() }
   const handleToChange = (v) => { setTo(v); clearResults() }
   const swap = () => { setFrom(to); setTo(from); clearResults() }
@@ -506,21 +816,65 @@ export default function App() {
   const search = async (e) => {
     e.preventDefault()
     if (!from || !to) return
-    setLoading(true); setError(null); setJourneys(null); setSelectedJourney(0)
+    setLoading(true); setError(null); setJourneys(null); setWalkJourney(null); setBikeJourneys(null); setCarJourney(null); setSelectedJourney(0); setResultTab('pt'); setPtTime(null); setWalkTime(null); setBikeTime(null); setCarTime(null)
     try {
-      const params = new URLSearchParams({ from: from.id, to: to.id, datetime: toApiDatetime(datetime) })
-      const res = await fetch(`/api/journeys?${params}`)
-      const data = await res.json()
-      if (data.error) setError(data.error.message)
-      else setJourneys(data.journeys)
+      const ptParams = new URLSearchParams({ from: from.id, to: to.id, datetime: toApiDatetime(datetime) })
+      const ptT0 = performance.now()
+      const ptFetch = fetch(`/api/journeys/public_transport?${ptParams}`)
+        .then(r => r.json())
+        .then(data => { setPtTime(Math.round(performance.now() - ptT0)); return data })
+
+      // Walk, bike and car requests use lon;lat coordinates
+      const fromCoord = from.stop_point?.coord || from.coord
+      const toCoord = to.stop_point?.coord || to.coord
+      let walkFetch = null
+      let bikeFetch = null
+      let carFetch = null
+      if (fromCoord && toCoord) {
+        const coordParams = new URLSearchParams({
+          from: `${fromCoord.lon};${fromCoord.lat}`,
+          to: `${toCoord.lon};${toCoord.lat}`,
+        })
+        const walkT0 = performance.now()
+        walkFetch = fetch(`/api/journeys/walk?${coordParams}`)
+          .then(r => r.ok ? r.json() : null)
+          .then(data => { setWalkTime(Math.round(performance.now() - walkT0)); return data })
+          .catch(() => null)
+        const bikeT0 = performance.now()
+        bikeFetch = fetch(`/api/journeys/bike?${coordParams}`)
+          .then(r => r.ok ? r.json() : null)
+          .then(data => { setBikeTime(Math.round(performance.now() - bikeT0)); return data })
+          .catch(() => null)
+        const carT0 = performance.now()
+        carFetch = fetch(`/api/journeys/car?${coordParams}`)
+          .then(r => r.ok ? r.json() : null)
+          .then(data => { setCarTime(Math.round(performance.now() - carT0)); return data })
+          .catch(() => null)
+      }
+
+      const [ptData, walkData, bikeData, carData] = await Promise.all([ptFetch, walkFetch, bikeFetch, carFetch])
+
+      if (ptData.error) setError(ptData.error.message)
+      else setJourneys(ptData.journeys)
+
+      if (walkData?.journeys?.[0]) setWalkJourney(walkData.journeys[0])
+      if (bikeData?.journeys?.length > 0) setBikeJourneys(bikeData.journeys)
+      if (carData?.journeys?.[0]) setCarJourney(carData.journeys[0])
     } catch (err) {
       setError(err.message)
     } finally { setLoading(false) }
   }
 
-  const selectedJ = journeys?.[selectedJourney]
+  const isWalkSelected = resultTab === 'walk'
+  const isBikeSelected = resultTab === 'bike'
+  const isCarSelected = resultTab === 'car'
+  const selectedBike = isBikeSelected ? bikeJourneys?.[selectedJourney] || bikeJourneys?.[0] : null
+  const selectedJ = (isWalkSelected || isBikeSelected || isCarSelected) ? null : journeys?.[selectedJourney]
   const mapData = selectedJ ? extractMapData(selectedJ) : { lines: [], stopPoints: [], labeledStops: [] }
-  const allCoords = mapData.lines.flatMap(l => l.coords)
+  const walkCoords = (isWalkSelected && walkJourney?.shape) ? decodePolyline(walkJourney.shape) : []
+  const bikeCoords = (isBikeSelected && selectedBike?.shape) ? decodePolyline(selectedBike.shape) : []
+  const carCoords = (isCarSelected && carJourney?.shape) ? decodePolyline(carJourney.shape) : []
+  const allCoords = isWalkSelected ? walkCoords : isBikeSelected ? bikeCoords : isCarSelected ? carCoords : mapData.lines.flatMap(l => l.coords)
   const hasResults = allCoords.length >= 2
   const fromPos = from?.coord ? [from.coord.lat, from.coord.lon] : null
   const toPos = to?.coord ? [to.coord.lat, to.coord.lon] : null
@@ -536,63 +890,154 @@ export default function App() {
     : null
 
   return (
-    <Box sx={{ display: 'flex', height: '100vh', overflow: 'hidden' }}>
-      {/* Left panel */}
+    <Box sx={{ display: 'flex', height: '100vh', overflow: 'hidden', bgcolor: '#0a0a12' }}>
+      {/* Left panel — floating glass sidebar */}
       <Box sx={{
-        width: 480, minWidth: 480, bgcolor: 'background.default',
+        width: 460, minWidth: 460,
         display: 'flex', flexDirection: 'column',
-        borderRight: '1px solid', borderColor: 'divider',
         zIndex: 1200, overflow: 'hidden',
+        position: 'relative',
+        bgcolor: 'rgba(10, 10, 18, 0.92)',
+        backdropFilter: 'blur(24px)',
+        borderRight: '1px solid rgba(255, 255, 255, 0.04)',
       }}>
         {/* Header */}
         <Box sx={{
           px: 3, py: 2,
-          background: 'linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)',
-          color: 'white',
+          background: 'linear-gradient(135deg, rgba(0, 229, 255, 0.08) 0%, rgba(255, 184, 0, 0.05) 100%)',
+          borderBottom: '1px solid rgba(255, 255, 255, 0.06)',
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
           flexShrink: 0,
+          position: 'relative',
+          overflow: 'hidden',
         }}>
-          <Stack direction="row" alignItems="center" spacing={1} sx={{ cursor: 'pointer' }}
+          {/* Subtle gradient accent line */}
+          <Box sx={{
+            position: 'absolute', bottom: 0, left: 0, right: 0, height: '1px',
+            background: 'linear-gradient(90deg, #00e5ff 0%, transparent 40%, transparent 60%, #ffb800 100%)',
+            opacity: 0.5,
+          }} />
+
+          <Stack direction="row" alignItems="center" spacing={1.5} sx={{ cursor: 'pointer' }}
             onClick={() => setView('search')}>
-            <NearMe fontSize="small" />
-            <Typography variant="h6">Glove</Typography>
+            <Box sx={{
+              width: 32, height: 32, borderRadius: '8px', display: 'flex', alignItems: 'center', justifyContent: 'center',
+              background: 'linear-gradient(135deg, #00e5ff 0%, #00b8d4 100%)',
+              boxShadow: '0 0 16px rgba(0, 229, 255, 0.25)',
+            }}>
+              <NearMe sx={{ fontSize: 18, color: '#0a0a12' }} />
+            </Box>
+            <Typography variant="h6" sx={{
+              fontFamily: '"Syne", sans-serif',
+              fontWeight: 800,
+              fontSize: '1.25rem',
+              letterSpacing: '-0.03em',
+              background: 'linear-gradient(135deg, #e8e6f0 0%, #8b89a0 100%)',
+              backgroundClip: 'text',
+              WebkitBackgroundClip: 'text',
+              WebkitTextFillColor: 'transparent',
+            }}>
+              Glove
+            </Typography>
           </Stack>
+
           <Stack direction="row" spacing={0.5}>
             <Tooltip title={lang === 'fr' ? 'English' : 'Français'}>
               <IconButton onClick={toggleLang} size="small"
-                sx={{ color: 'rgba(255,255,255,0.8)', '&:hover': { color: 'white', bgcolor: 'rgba(255,255,255,0.15)' } }}>
+                sx={{
+                  color: 'text.secondary',
+                  '&:hover': { color: '#00e5ff', bgcolor: 'rgba(0, 229, 255, 0.08)' },
+                  transition: 'all 0.2s',
+                }}>
                 <Language fontSize="small" />
+              </IconButton>
+            </Tooltip>
+            <Tooltip title="API">
+              <IconButton
+                onClick={() => setView(view === 'swagger' ? 'search' : 'swagger')}
+                size="small"
+                sx={{
+                  color: view === 'swagger' ? '#00e5ff' : 'text.secondary',
+                  '&:hover': { color: '#00e5ff', bgcolor: 'rgba(0, 229, 255, 0.08)' },
+                  transition: 'all 0.2s',
+                }}>
+                {view === 'swagger' ? <Close fontSize="small" /> : <Api fontSize="small" />}
               </IconButton>
             </Tooltip>
             <Tooltip title={view === 'settings' ? t('search') : t('settings')}>
               <IconButton
                 onClick={() => setView(view === 'settings' ? 'search' : 'settings')}
                 size="small"
-                sx={{ color: 'rgba(255,255,255,0.8)', '&:hover': { color: 'white', bgcolor: 'rgba(255,255,255,0.15)' } }}>
+                sx={{
+                  color: view === 'settings' ? '#00e5ff' : 'text.secondary',
+                  '&:hover': { color: '#00e5ff', bgcolor: 'rgba(0, 229, 255, 0.08)' },
+                  transition: 'all 0.2s',
+                }}>
                 {view === 'settings' ? <Close fontSize="small" /> : <Settings fontSize="small" />}
               </IconButton>
             </Tooltip>
           </Stack>
         </Box>
 
-        {view === 'settings' ? (
+        {view === 'swagger' ? (
+          <SwaggerPanel />
+        ) : view === 'settings' ? (
           <SettingsPanel status={status} onReload={refreshStatus} />
         ) : (
           <>
             {/* Search form */}
             <Box sx={{ p: 2.5, flexShrink: 0 }}>
-              <Paper component="form" onSubmit={search} sx={{ p: 2.5 }} elevation={0} variant="outlined">
+              <Paper component="form" onSubmit={search}
+                sx={{
+                  p: 2.5,
+                  bgcolor: 'rgba(20, 20, 35, 0.5)',
+                  border: '1px solid rgba(255, 255, 255, 0.06)',
+                  position: 'relative',
+                  overflow: 'hidden',
+                }}
+                elevation={0}
+              >
+                {/* Decorative corner accent */}
+                <Box sx={{
+                  position: 'absolute', top: 0, left: 0, width: 40, height: 2,
+                  background: 'linear-gradient(90deg, #00e5ff, transparent)',
+                  opacity: 0.6,
+                }} />
+                <Box sx={{
+                  position: 'absolute', top: 0, left: 0, width: 2, height: 40,
+                  background: 'linear-gradient(180deg, #00e5ff, transparent)',
+                  opacity: 0.6,
+                }} />
+
                 <Stack spacing={2}>
                   <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
                     <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 1.5 }}>
                       <PlaceAutocomplete label={t('departure')} value={from} onChange={handleFromChange}
-                        icon={<Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: '#22c55e', ml: 1 }} />} />
+                        icon={<Box sx={{
+                          width: 10, height: 10, borderRadius: '50%', ml: 1,
+                          bgcolor: '#0a0a12', border: '2px solid #00e676',
+                          boxShadow: '0 0 8px rgba(0, 230, 118, 0.5), inset 0 0 0 1.5px #00e676',
+                        }} />} />
                       <PlaceAutocomplete label={t('arrival')} value={to} onChange={handleToChange}
-                        icon={<Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: '#ef4444', ml: 1 }} />} />
+                        icon={<Box sx={{
+                          width: 10, height: 10, borderRadius: '50%', ml: 1, position: 'relative',
+                          background: 'linear-gradient(135deg, #ff5252, #d32f2f)',
+                          boxShadow: '0 0 8px rgba(255, 82, 82, 0.5)',
+                        }} />} />
                     </Box>
                     <Tooltip title={t('swap')}>
                       <IconButton onClick={swap} size="small"
-                        sx={{ border: '1px solid', borderColor: 'divider', borderRadius: 2, p: 0.8 }}>
+                        sx={{
+                          border: '1px solid rgba(255, 255, 255, 0.08)',
+                          borderRadius: 2, p: 0.8,
+                          color: 'text.secondary',
+                          '&:hover': {
+                            borderColor: 'rgba(0, 229, 255, 0.3)',
+                            color: '#00e5ff',
+                            bgcolor: 'rgba(0, 229, 255, 0.06)',
+                          },
+                          transition: 'all 0.2s',
+                        }}>
                         <SwapVert fontSize="small" />
                       </IconButton>
                     </Tooltip>
@@ -613,8 +1058,19 @@ export default function App() {
                     startIcon={loading ? <CircularProgress size={18} color="inherit" /> : <Search />}
                     sx={{
                       py: 1.3,
-                      background: 'linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)',
-                      '&:hover': { background: 'linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%)' },
+                      bgcolor: '#00e5ff',
+                      color: '#0a0a12',
+                      fontWeight: 700,
+                      '&:hover': {
+                        bgcolor: '#00b8d4',
+                        boxShadow: '0 0 24px rgba(0, 229, 255, 0.3)',
+                      },
+                      '&:disabled': {
+                        bgcolor: 'rgba(0, 229, 255, 0.1)',
+                        color: 'rgba(0, 229, 255, 0.3)',
+                      },
+                      animation: from && to ? 'glowPulse 3s ease-in-out infinite' : 'none',
+                      transition: 'all 0.25s cubic-bezier(0.4, 0, 0.2, 1)',
                     }}>
                     {loading ? t('searching') : t('search')}
                   </Button>
@@ -626,20 +1082,111 @@ export default function App() {
             <Box sx={{ flex: 1, overflow: 'auto', px: 2.5, pb: 2.5 }}>
               {error && <Alert severity="error" sx={{ mb: 1.5, borderRadius: 2 }}>{error}</Alert>}
 
-              {journeys && journeys.length === 0 && (
+              {journeys && journeys.length === 0 && !walkJourney && !bikeJourneys && !carJourney && (
                 <Alert severity="info" sx={{ borderRadius: 2 }}>{t('noResults')}</Alert>
               )}
 
-              {journeys && journeys.length > 0 && (
+              {(journeys?.length > 0 || walkJourney || bikeJourneys || carJourney) && (
                 <>
-                  <Typography variant="caption" color="text.secondary" sx={{ mb: 1, display: 'block' }}>
-                    {resultsText}
-                  </Typography>
-                  {journeys.map((j, i) => (
-                    <JourneyCard key={i} journey={j} rank={i + 1}
-                      selected={i === selectedJourney}
-                      onSelect={() => setSelectedJourney(i)} />
-                  ))}
+                  {/* Mode tabs */}
+                  <Box sx={{ display: 'flex', gap: 0.75, mb: 1.5 }}>
+                    {[
+                      { key: 'pt', icon: <DirectionsBus sx={{ fontSize: 18 }} />, label: t('tabPublicTransport'),
+                        duration: journeys?.[0]?.duration, disabled: false },
+                      { key: 'walk', icon: <DirectionsWalk sx={{ fontSize: 18 }} />, label: t('tabWalk'),
+                        duration: walkJourney?.duration, disabled: false },
+                      { key: 'bike', icon: <DirectionsBike sx={{ fontSize: 18 }} />, label: t('tabBike'),
+                        duration: bikeJourneys?.[0]?.duration, disabled: false },
+                      { key: 'car', icon: <DirectionsCar sx={{ fontSize: 18 }} />, label: t('tabCar'),
+                        duration: carJourney?.duration, disabled: false },
+                    ].map(tab => {
+                      const active = resultTab === tab.key
+                      const hasData = tab.key === 'pt' ? journeys?.length > 0 : tab.key === 'walk' ? !!walkJourney : tab.key === 'bike' ? !!bikeJourneys : tab.key === 'car' ? !!carJourney : false
+                      return (
+                        <Tooltip key={tab.key} title={tab.disabled ? t('comingSoon') : ''} arrow>
+                          <Box
+                            component="button"
+                            onClick={() => {
+                              if (tab.disabled || !hasData) return
+                              setResultTab(tab.key)
+                              if (tab.key === 'pt' || tab.key === 'bike') setSelectedJourney(0)
+                            }}
+                            sx={{
+                              flex: 1,
+                              display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 0.25,
+                              py: 1, px: 0.5,
+                              border: '1px solid',
+                              borderColor: active ? 'rgba(0, 229, 255, 0.4)' : 'rgba(255,255,255,0.08)',
+                              borderRadius: 2,
+                              bgcolor: active ? 'rgba(0, 229, 255, 0.1)' : 'transparent',
+                              color: tab.disabled ? 'text.disabled' : active ? '#00e5ff' : 'text.secondary',
+                              cursor: tab.disabled || !hasData ? 'default' : 'pointer',
+                              opacity: tab.disabled ? 0.4 : !hasData ? 0.5 : 1,
+                              transition: 'all 0.2s ease',
+                              '&:hover': !tab.disabled && hasData ? {
+                                borderColor: 'rgba(0, 229, 255, 0.3)',
+                                bgcolor: 'rgba(0, 229, 255, 0.05)',
+                              } : {},
+                              fontFamily: '"Syne", sans-serif',
+                            }}
+                          >
+                            {tab.icon}
+                            <Typography sx={{ fontSize: '0.6rem', fontFamily: 'inherit', letterSpacing: '0.03em', lineHeight: 1 }}>
+                              {tab.label}
+                            </Typography>
+                            <Typography sx={{ fontSize: '0.7rem', fontWeight: 700, fontFamily: 'inherit', lineHeight: 1, mt: 0.25 }}>
+                              {tab.disabled ? '—' : tab.duration != null ? formatDuration(tab.duration) : '—'}
+                            </Typography>
+                          </Box>
+                        </Tooltip>
+                      )
+                    })}
+                  </Box>
+
+                  {/* PT results */}
+                  {resultTab === 'pt' && journeys?.length > 0 && (
+                    <>
+                      <Typography variant="caption" color="text.secondary"
+                        sx={{ mb: 1.5, display: 'block', fontFamily: '"Syne", sans-serif', letterSpacing: '0.05em' }}>
+                        {resultsText}
+                      </Typography>
+                      {journeys.map((j, i) => (
+                        <JourneyCard key={i} journey={j} rank={i + 1}
+                          selected={i === selectedJourney}
+                          onSelect={() => setSelectedJourney(i)}
+                          animDelay={i * 80} />
+                      ))}
+                    </>
+                  )}
+
+                  {/* Walk results */}
+                  {resultTab === 'walk' && walkJourney && (
+                    <WalkCard journey={walkJourney} selected={true} onSelect={() => {}} />
+                  )}
+
+                  {/* Bike results */}
+                  {resultTab === 'bike' && bikeJourneys && (
+                    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+                      {bikeJourneys.map((bj, i) => (
+                        <BikeCard key={bj.type} journey={bj}
+                          selected={i === selectedJourney}
+                          onSelect={() => setSelectedJourney(i)} />
+                      ))}
+                    </Box>
+                  )}
+
+                  {/* Car results */}
+                  {resultTab === 'car' && carJourney && (
+                    <CarCard journey={carJourney} />
+                  )}
+
+                  {((resultTab === 'pt' && ptTime != null) || (resultTab === 'walk' && walkTime != null) || (resultTab === 'bike' && bikeTime != null) || (resultTab === 'car' && carTime != null)) && (
+                    <Typography variant="caption"
+                      sx={{ display: 'block', textAlign: 'right', mt: 0.5, color: 'text.disabled',
+                        fontFamily: '"Syne", sans-serif', fontSize: '0.65rem', letterSpacing: '0.04em' }}>
+                      {{ pt: ptTime, walk: walkTime, bike: bikeTime, car: carTime }[resultTab]} ms
+                    </Typography>
+                  )}
                 </>
               )}
             </Box>
@@ -649,11 +1196,17 @@ export default function App() {
 
       {/* Map */}
       <Box sx={{ flex: 1, position: 'relative' }}>
-        <MapContainer center={IDF_CENTER} zoom={IDF_ZOOM}
+        {/* Vignette overlay on map edges near sidebar */}
+        <Box sx={{
+          position: 'absolute', top: 0, left: 0, bottom: 0, width: 60, zIndex: 500,
+          background: 'linear-gradient(90deg, rgba(10, 10, 18, 0.4) 0%, transparent 100%)',
+          pointerEvents: 'none',
+        }} />
+        <MapContainer center={status?.map?.center || DEFAULT_CENTER} zoom={status?.map?.zoom || DEFAULT_ZOOM}
           style={{ height: '100%', width: '100%' }} zoomControl={false}>
           <TileLayer
             attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; <a href="https://carto.com/">CARTO</a>'
-            url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager_nolabels/{z}/{x}/{y}{r}.png"
+            url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png"
           />
 
           {fitBounds && <FitBounds bounds={fitBounds} />}
@@ -661,17 +1214,32 @@ export default function App() {
 
           {fromPos && toPos && !hasResults && (
             <Polyline positions={[fromPos, toPos]}
-              pathOptions={{ color: '#94a3b8', weight: 2, opacity: 0.7, dashArray: '8, 8' }} />
+              pathOptions={{ color: '#56546a', weight: 2, opacity: 0.7, dashArray: '8, 8' }} />
           )}
 
           {mapData.lines.map((line, i) => (
-            <Polyline key={`line-${i}`} positions={line.coords}
-              pathOptions={{ color: line.color, weight: 5, opacity: 0.85 }} />
+            <Polyline key={`line-${i}`} positions={smoothLine(line.coords)}
+              pathOptions={{ color: line.color, weight: 5, opacity: 0.9, lineCap: 'round', lineJoin: 'round' }} />
           ))}
+
+          {isWalkSelected && walkCoords.length >= 2 && (
+            <Polyline positions={walkCoords}
+              pathOptions={{ color: '#ffb800', weight: 4, opacity: 0.9, dashArray: '8, 6', lineCap: 'round', lineJoin: 'round' }} />
+          )}
+
+          {isBikeSelected && bikeCoords.length >= 2 && (
+            <Polyline positions={bikeCoords}
+              pathOptions={{ color: '#4caf50', weight: 4, opacity: 0.9, lineCap: 'round', lineJoin: 'round' }} />
+          )}
+
+          {isCarSelected && carCoords.length >= 2 && (
+            <Polyline positions={carCoords}
+              pathOptions={{ color: '#42a5f5', weight: 4, opacity: 0.9, lineCap: 'round', lineJoin: 'round' }} />
+          )}
 
           {mapData.stopPoints.map((sp, i) => (
             <CircleMarker key={`sp-${i}`} center={sp.pos} radius={4}
-              pathOptions={{ color: '#fff', fillColor: sp.color, fillOpacity: 1, weight: 2 }}>
+              pathOptions={{ color: '#0a0a12', fillColor: sp.color, fillOpacity: 1, weight: 2 }}>
               <LTooltip direction="top" offset={[0, -6]}>
                 <span style={{ fontSize: 12 }}>{sp.name}</span>
               </LTooltip>
@@ -682,7 +1250,7 @@ export default function App() {
             .filter(ls => ls.type === 'transfer')
             .map((ls, i) => (
               <CircleMarker key={`tr-${i}`} center={ls.pos} radius={8}
-                pathOptions={{ color: '#fff', fillColor: '#6366f1', fillOpacity: 1, weight: 3 }}>
+                pathOptions={{ color: '#0a0a12', fillColor: '#00e5ff', fillOpacity: 1, weight: 3 }}>
                 <LTooltip direction="top" offset={[0, -10]} permanent className="stop-label">
                   <span>{ls.name}</span>
                 </LTooltip>

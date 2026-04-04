@@ -7,15 +7,18 @@
 //! GTFS files via `POST /api/reload` without restarting the server.
 
 mod api;
+mod ban;
 mod config;
 mod gtfs;
 mod raptor;
+mod text;
 
 use actix_web::{App, HttpServer, web};
 use arc_swap::ArcSwap;
 use std::path::Path;
 use std::sync::Arc;
 use tracing::info;
+use utoipa::OpenApi;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -32,20 +35,28 @@ async fn main() -> std::io::Result<()> {
 
     info!(?config);
 
-    // Load raw GTFS CSV files into memory
-    let gtfs = match gtfs::GtfsData::load(Path::new(&config.data_dir)) {
-        Ok(data) => data,
-        Err(e) => {
-            eprintln!("Failed to load GTFS data: {e}");
-            std::process::exit(1);
-        }
-    };
+    // Try loading RAPTOR index from cache, or build from GTFS
+    let data_dir = Path::new(&config.data_dir);
+    let cache_dir = Path::new(&config.raptor_dir);
+    let fingerprint = gtfs::gtfs_fingerprint(data_dir);
 
-    // Build the RAPTOR index from GTFS data (patterns, transfers, search index)
-    let raptor_data = Arc::new(raptor::RaptorData::build(
-        gtfs,
-        config.default_transfer_time,
-    ));
+    let raptor_data = if let Some(cached) = raptor::RaptorData::load_cached(cache_dir, &fingerprint)
+    {
+        Arc::new(cached)
+    } else {
+        let gtfs = match gtfs::GtfsData::load(data_dir) {
+            Ok(data) => data,
+            Err(e) => {
+                eprintln!("Failed to load GTFS data: {e}");
+                std::process::exit(1);
+            }
+        };
+        let data = raptor::RaptorData::build(gtfs, config.default_transfer_time);
+        if let Err(e) = data.save(cache_dir, &fingerprint) {
+            tracing::warn!("Failed to save RAPTOR cache: {e}");
+        }
+        Arc::new(data)
+    };
     info!(
         "{} patterns, {} stops",
         raptor_data.patterns.len(),
@@ -55,6 +66,20 @@ async fn main() -> std::io::Result<()> {
     // Wrap in ArcSwap for lock-free hot-reload support
     let shared_data = web::Data::new(ArcSwap::from(raptor_data));
 
+    // Load BAN address data (from cache or CSV)
+    let ban_dir = Path::new(&config.ban_dir);
+    let ban_fingerprint = ban::BanData::fingerprint(ban_dir);
+    let ban_data = if let Some(cached) = ban::BanData::load_cached(cache_dir, &ban_fingerprint) {
+        Arc::new(cached)
+    } else {
+        let data = ban::BanData::load(ban_dir);
+        if let Err(e) = data.save(cache_dir, &ban_fingerprint) {
+            tracing::warn!("Failed to save BAN cache: {e}");
+        }
+        Arc::new(data)
+    };
+    let shared_ban = web::Data::new(ban_data);
+
     info!("Starting server on http://{}:{}", config.bind, config.port);
 
     let bind = config.bind.clone();
@@ -62,14 +87,80 @@ async fn main() -> std::io::Result<()> {
     let workers = config.workers;
     let config = web::Data::new(config);
 
+    #[derive(OpenApi)]
+    #[openapi(
+        info(
+            title = "Glove API",
+            description = "GTFS journey planner — Navitia-compatible REST API powered by the RAPTOR algorithm",
+            version = "0.1.0",
+        ),
+        paths(
+            api::get_journeys,
+            api::get_walk,
+            api::get_bike,
+            api::get_car,
+            api::get_places,
+            api::get_status,
+            api::post_reload,
+        ),
+        components(schemas(
+            api::journeys::public_transport::JourneysResponse,
+            api::journeys::public_transport::Journey,
+            api::journeys::public_transport::DisplayInfo,
+            api::journeys::public_transport::DatetimeRepresents,
+            api::journeys::public_transport::DataFreshness,
+            api::journeys::walk::WalkResponse,
+            api::journeys::walk::WalkJourney,
+            api::journeys::walk::Maneuver,
+            api::journeys::bike::BikeResponse,
+            api::journeys::bike::BikeJourney,
+            api::journeys::bike::Maneuver,
+            api::journeys::car::CarResponse,
+            api::journeys::car::CarJourney,
+            api::journeys::car::Maneuver,
+            api::places::PlacesResponse,
+            api::places::PlaceResult,
+            api::status::StatusResponse,
+            api::status::ReloadResponse,
+            api::status::GtfsStats,
+            api::status::RaptorStats,
+            api::Section,
+            api::Place,
+            api::StopPointRef,
+            api::StopDateTime,
+            api::Coord,
+        )),
+        tags(
+            (name = "Journeys", description = "Journey planning"),
+            (name = "Places", description = "Stop autocomplete search"),
+            (name = "Status", description = "Engine status and data reload"),
+        )
+    )]
+    struct ApiDoc;
+
+    let openapi_json = web::Data::new(ApiDoc::openapi().to_json().unwrap());
+
     let mut server = HttpServer::new(move || {
         App::new()
             .app_data(shared_data.clone())
+            .app_data(shared_ban.clone())
             .app_data(config.clone())
+            .app_data(openapi_json.clone())
             .service(api::get_places)
             .service(api::get_status)
+            .service(api::get_walk)
+            .service(api::get_bike)
+            .service(api::get_car)
             .service(api::get_journeys)
             .service(api::post_reload)
+            .route(
+                "/api-docs/openapi.json",
+                web::get().to(|spec: web::Data<String>| async move {
+                    actix_web::HttpResponse::Ok()
+                        .content_type("application/json")
+                        .body(spec.get_ref().clone())
+                }),
+            )
     });
 
     // Use configured worker count, or let actix auto-detect (one per logical CPU)

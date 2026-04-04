@@ -4,13 +4,14 @@
 //! into in-memory structures. Each file is parsed with flexible CSV handling
 //! to tolerate minor format variations in real-world feeds.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::Path;
 use tracing::{info, warn};
 
 /// A transit agency (operator).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct Agency {
     pub agency_id: String,
@@ -20,7 +21,7 @@ pub struct Agency {
 }
 
 /// A transit route (line), e.g. "Metro 1" or "Bus 72".
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Route {
     pub route_id: String,
     #[allow(dead_code)]
@@ -40,7 +41,7 @@ pub struct Route {
 }
 
 /// A physical stop point where passengers board/alight.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Stop {
     pub stop_id: String,
     #[serde(default)]
@@ -56,7 +57,7 @@ pub struct Stop {
 }
 
 /// A single vehicle trip on a route.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Trip {
     pub route_id: String,
     pub service_id: String,
@@ -67,7 +68,7 @@ pub struct Trip {
 }
 
 /// A scheduled arrival/departure at a stop within a trip.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct StopTime {
     pub trip_id: String,
     /// Arrival time in HH:MM:SS format (may exceed 24:00:00).
@@ -80,7 +81,7 @@ pub struct StopTime {
 }
 
 /// Weekly service pattern with validity period.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Calendar {
     pub service_id: String,
     pub monday: u8,
@@ -97,7 +98,7 @@ pub struct Calendar {
 }
 
 /// Exception to the regular calendar (added or removed service on a date).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CalendarDate {
     pub service_id: String,
     /// Date in YYYYMMDD format.
@@ -107,7 +108,7 @@ pub struct CalendarDate {
 }
 
 /// A possible transfer between two stops (walking connection).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Transfer {
     pub from_stop_id: String,
     pub to_stop_id: String,
@@ -225,4 +226,30 @@ pub fn parse_time(time_str: &str) -> Option<u32> {
     let m: u32 = parts[1].parse().ok()?;
     let s: u32 = parts[2].parse().ok()?;
     Some(h * 3600 + m * 60 + s)
+}
+
+/// Compute a SHA-256 fingerprint of the GTFS directory based on file sizes.
+///
+/// This is a fast way to detect changes without reading file contents.
+/// Returns a hex-encoded hash string.
+pub fn gtfs_fingerprint(data_dir: &Path) -> String {
+    let files = [
+        "agency.txt",
+        "routes.txt",
+        "stops.txt",
+        "trips.txt",
+        "stop_times.txt",
+        "calendar.txt",
+        "calendar_dates.txt",
+        "transfers.txt",
+    ];
+    let mut hasher = Sha256::new();
+    for name in &files {
+        let path = data_dir.join(name);
+        if let Ok(meta) = std::fs::metadata(&path) {
+            hasher.update(name.as_bytes());
+            hasher.update(meta.len().to_le_bytes());
+        }
+    }
+    format!("{:x}", hasher.finalize())
 }

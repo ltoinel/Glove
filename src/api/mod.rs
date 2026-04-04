@@ -1,33 +1,37 @@
 //! HTTP API handlers for the Glove journey planner.
 //!
 //! Split by domain:
-//! - [`journeys`] — `GET /api/journeys` (route planning, Navitia-compatible)
+//! - [`journeys`] — Journey planning by mode (`public_transport`, `walk`, `bike`)
 //! - [`places`]   — `GET /api/places` (stop name autocomplete)
 //! - [`status`]   — `GET /api/status` + `POST /api/reload` (engine health & hot-reload)
 
-mod journeys;
-mod places;
-mod status;
+pub mod journeys;
+pub mod places;
+pub mod status;
 
-pub use journeys::get_journeys;
-pub use places::get_places;
-pub use status::{get_status, post_reload};
+pub use journeys::{__path_get_bike, get_bike};
+pub use journeys::{__path_get_car, get_car};
+pub use journeys::{__path_get_journeys, get_journeys};
+pub use journeys::{__path_get_walk, get_walk};
+pub use places::{__path_get_places, get_places};
+pub use status::{__path_get_status, __path_post_reload, get_status, post_reload};
 
 use serde::Serialize;
+use utoipa::ToSchema;
 
 // ---------------------------------------------------------------------------
 // Shared response types used across handlers
 // ---------------------------------------------------------------------------
 
 /// A geographic coordinate.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct Coord {
     pub lon: f64,
     pub lat: f64,
 }
 
 /// A reference to a stop point with name and coordinates.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct StopPointRef {
     pub id: String,
     pub name: String,
@@ -35,7 +39,7 @@ pub struct StopPointRef {
 }
 
 /// A place (origin, destination, or intermediate stop).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct Place {
     pub id: String,
     pub name: String,
@@ -44,7 +48,7 @@ pub struct Place {
 }
 
 /// A section of a journey (public transport leg or transfer).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct Section {
     #[serde(rename = "type")]
     pub section_type: String,
@@ -60,7 +64,7 @@ pub struct Section {
 }
 
 /// A stop visit within a public transport section.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct StopDateTime {
     pub stop_point: StopPointRef,
     pub arrival_date_time: String,

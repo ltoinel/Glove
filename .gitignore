@@ -1,8 +1,8 @@
 # Rust
 /target
 
-# GTFS data files
-/data/*.txt
+# Data directory for GTFS and other data files
+/data/*
 
 # Node / Portal
 portal/node_modules

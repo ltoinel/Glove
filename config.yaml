@@ -4,8 +4,20 @@
 bind: "0.0.0.0"
 port: 8080
 
-# GTFS data directory
-data_dir: "data"
+# Data directories
+data_dir: "data/gtfs"
+osm_dir: "data/osm"
+ban_dir: "data/ban"
+sirene_dir: "data/sirene"
+
+# Download URLs
+gtfs_url: "https://data.iledefrance-mobilites.fr/explore/dataset/offre-horaires-tc-gtfs-idfm/files/a925e164271e4bca93433756d6a340d1/download/"
+osm_url: "https://download.geofabrik.de/europe/france/ile-de-france-latest.osm.pbf"
+ban_url: "https://adresse.data.gouv.fr/data/ban/adresses/latest/csv"
+sirene_url: "https://data.iledefrance.fr/api/explore/v2.1/catalog/datasets/base-sirene/exports/csv?lang=fr&timezone=Europe%2FBerlin&use_labels=true&delimiter=%3B"
+
+# Covered departments
+departments: [75, 77, 78, 91, 92, 93, 94, 95]
 
 # Routing
 max_journeys: 5
@@ -15,6 +27,15 @@ max_duration: 10800         # 3 hours in seconds
 
 # Server workers (0 = auto, uses number of logical CPUs)
 workers: 0
+
+# Valhalla routing engine
+valhalla_host: "localhost"
+valhalla_port: 8002
+
+# Map defaults
+map_center_lat: 48.8566
+map_center_lon: 2.3522
+map_zoom: 11
 
 # Logging (trace, debug, info, warn, error)
 log_level: "info"

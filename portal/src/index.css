@@ -1,31 +1,115 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=Figtree:wght@300;400;500;600;700&display=swap');
+
+:root {
+  --bg-deep: #0a0a12;
+  --bg-surface: #12121e;
+  --bg-card: rgba(20, 20, 35, 0.75);
+  --bg-glass: rgba(18, 18, 32, 0.65);
+  --border-subtle: rgba(255, 255, 255, 0.06);
+  --border-glow: rgba(0, 229, 255, 0.15);
+  --accent-cyan: #00e5ff;
+  --accent-amber: #ffb800;
+  --accent-green: #00e676;
+  --accent-red: #ff5252;
+  --text-primary: #e8e6f0;
+  --text-secondary: #8b89a0;
+  --text-muted: #56546a;
+  --noise-opacity: 0.03;
+}
 
 html, body, #root {
   margin: 0;
   padding: 0;
   height: 100%;
   overflow: hidden;
+  background: var(--bg-deep);
+  color: var(--text-primary);
 }
 
-/* Smooth scrollbar for sidebar */
-::-webkit-scrollbar { width: 6px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+/* Noise texture overlay via pseudo-element */
+#root::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9999;
+  opacity: var(--noise-opacity);
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size: 128px 128px;
+}
 
-/* Leaflet permanent labels for stops */
+/* Custom scrollbar — dark theme */
+::-webkit-scrollbar { width: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.08); border-radius: 10px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.15); }
+
+/* Leaflet permanent labels — dark theme */
 .stop-label {
-  background: rgba(255, 255, 255, 0.92) !important;
-  border: none !important;
-  box-shadow: 0 1px 4px rgba(0,0,0,0.15) !important;
-  border-radius: 6px !important;
-  padding: 3px 8px !important;
-  font-family: 'Inter', sans-serif !important;
-  font-size: 12px !important;
+  background: rgba(12, 12, 20, 0.88) !important;
+  backdrop-filter: blur(8px) !important;
+  border: 1px solid rgba(255, 255, 255, 0.1) !important;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5) !important;
+  border-radius: 8px !important;
+  padding: 4px 10px !important;
+  font-family: 'Figtree', sans-serif !important;
+  font-size: 11px !important;
   font-weight: 600 !important;
-  color: #1e293b !important;
+  color: var(--text-primary) !important;
   white-space: nowrap !important;
+  letter-spacing: 0.02em !important;
 }
 .stop-label::before {
-  border-top-color: rgba(255, 255, 255, 0.92) !important;
+  border-top-color: rgba(12, 12, 20, 0.88) !important;
+}
+
+/* Leaflet controls dark style */
+.leaflet-control-zoom a {
+  background: rgba(12, 12, 20, 0.85) !important;
+  backdrop-filter: blur(8px) !important;
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+  color: var(--text-primary) !important;
+}
+.leaflet-control-zoom a:hover {
+  background: rgba(20, 20, 35, 0.95) !important;
+  color: var(--accent-cyan) !important;
+}
+
+/* Stagger animation for journey cards */
+@keyframes cardSlideIn {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes subtlePulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% center; }
+  100% { background-position: 200% center; }
+}
+
+/* Glow keyframes for the search button */
+@keyframes glowPulse {
+  0%, 100% { box-shadow: 0 0 20px rgba(0, 229, 255, 0.15); }
+  50% { box-shadow: 0 0 30px rgba(0, 229, 255, 0.3); }
+}
+
+/* Subtle tweak on CARTO Dark Matter tiles */
+.leaflet-tile-pane {
+  filter: saturate(0.6) contrast(1.05);
+}
+
+/* Focus styles */
+*:focus-visible {
+  outline: 2px solid var(--accent-cyan);
+  outline-offset: 2px;
 }
