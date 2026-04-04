@@ -4,6 +4,8 @@ A fast public transit journey planner for Ile-de-France, built in Rust with a Re
 
 Glove loads GTFS data into memory, builds a RAPTOR index, and exposes a Navitia-compatible REST API for journey planning. The React portal provides an interactive map-based interface with autocomplete, route visualization, and multilingual support (FR/EN).
 
+![Glove screenshot](docs/screenshot.png)
+
 ## Features
 
 - **RAPTOR algorithm** — Round-based Public Transit Routing for optimal journey computation
