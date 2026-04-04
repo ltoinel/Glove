@@ -103,21 +103,24 @@ function PlaceAutocomplete({ label, value, onChange, icon, placeholder }) {
   const [loading, setLoading] = useState(false)
   const fetchPlaces = useDebouncedFetch()
 
-  useEffect(() => {
-    if (!inputValue || inputValue.length < 2) { setOptions(value ? [value] : []); return }
+  const handleInputChange = useCallback((_, newInput) => {
+    setInputValue(newInput)
+    if (!newInput || newInput.length < 2) { setOptions(value ? [value] : []); setLoading(false); return }
     setLoading(true)
-    fetchPlaces(inputValue, (results) => { setOptions(results); setLoading(false) })
-  }, [inputValue, fetchPlaces, value])
+    fetchPlaces(newInput, (results) => { setOptions(results); setLoading(false) })
+  }, [fetchPlaces, value])
+
+  const displayOptions = (!inputValue || inputValue.length < 2) ? (value ? [value] : []) : options
 
   return (
     <Autocomplete
-      fullWidth size="small" options={options}
+      fullWidth size="small" options={displayOptions}
       getOptionLabel={(opt) => typeof opt === 'string' ? opt : opt.name || ''}
       isOptionEqualToValue={(opt, val) => opt.id === val.id}
       filterOptions={(x) => x}
       value={value}
       onChange={(_, newVal) => onChange(newVal)}
-      onInputChange={(_, newInput) => setInputValue(newInput)}
+      onInputChange={handleInputChange}
       loading={loading}
       noOptionsText={t('typeToSearch')}
       loadingText={t('loadingSearch')}
