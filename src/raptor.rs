@@ -181,10 +181,12 @@ impl RaptorData {
         for st in &gtfs.stop_times {
             let arr = gtfs::parse_time(&st.arrival_time).unwrap_or(0);
             let dep = gtfs::parse_time(&st.departure_time).unwrap_or(0);
-            trip_stop_times
-                .entry(&st.trip_id)
-                .or_default()
-                .push((st.stop_sequence, arr, dep, &st.stop_id));
+            trip_stop_times.entry(&st.trip_id).or_default().push((
+                st.stop_sequence,
+                arr,
+                dep,
+                &st.stop_id,
+            ));
         }
         for times in trip_stop_times.values_mut() {
             times.sort_by_key(|t| t.0);
@@ -272,7 +274,10 @@ impl RaptorData {
         let mut parent_stops: HashMap<&str, Vec<usize>> = HashMap::new();
         for (idx, stop) in stops.iter().enumerate() {
             if !stop.parent_station.is_empty() {
-                parent_stops.entry(&stop.parent_station).or_default().push(idx);
+                parent_stops
+                    .entry(&stop.parent_station)
+                    .or_default()
+                    .push(idx);
             }
         }
         let mut parent_transfer_count = 0u64;
@@ -281,8 +286,7 @@ impl RaptorData {
                 continue;
             }
             for &a in siblings {
-                let existing: HashSet<usize> =
-                    stop_transfers[a].iter().map(|&(t, _)| t).collect();
+                let existing: HashSet<usize> = stop_transfers[a].iter().map(|&(t, _)| t).collect();
                 for &b in siblings {
                     if a != b && !existing.contains(&b) {
                         stop_transfers[a].push((b, default_transfer_time));
@@ -415,7 +419,11 @@ impl RaptorData {
                 0 // exact match
             } else if entry.name_lower.starts_with(&q) {
                 1 // prefix
-            } else if entry.name_lower.split_whitespace().any(|w| w.starts_with(&q)) {
+            } else if entry
+                .name_lower
+                .split_whitespace()
+                .any(|w| w.starts_with(&q))
+            {
                 2 // word starts with
             } else if entry.name_lower.contains(&q) {
                 3 // substring
@@ -434,7 +442,10 @@ impl RaptorData {
         // Sort by relevance, then by name length (shorter = more specific)
         results.sort_by_key(|r| (r.3, r.1.len()));
         results.truncate(limit);
-        results.into_iter().map(|(idx, name, id, _)| (idx, name, id)).collect()
+        results
+            .into_iter()
+            .map(|(idx, name, id, _)| (idx, name, id))
+            .collect()
     }
 
     /// Resolve a user-provided stop identifier to a numeric stop index.
@@ -465,7 +476,9 @@ impl RaptorData {
             .min_by(|(_, a), (_, b)| {
                 let dist_a = haversine_approx(lat, lon, a.stop_lat, a.stop_lon);
                 let dist_b = haversine_approx(lat, lon, b.stop_lat, b.stop_lon);
-                dist_a.partial_cmp(&dist_b).unwrap_or(std::cmp::Ordering::Equal)
+                dist_a
+                    .partial_cmp(&dist_b)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             })
             .map(|(idx, _)| idx)
     }
@@ -477,15 +490,26 @@ impl RaptorData {
 
 /// Normalize a string for fuzzy search: lowercase, strip French diacritics,
 /// replace hyphens and apostrophes with spaces.
+#[allow(clippy::collapsible_str_replace)]
 fn normalize(s: &str) -> String {
     s.to_lowercase()
-        .replace('é', "e").replace('è', "e").replace('ê', "e").replace('ë', "e")
-        .replace('à', "a").replace('â', "a").replace('ä', "a")
-        .replace('ô', "o").replace('ö', "o")
-        .replace('ù', "u").replace('û', "u").replace('ü', "u")
-        .replace('î', "i").replace('ï', "i")
+        .replace('é', "e")
+        .replace('è', "e")
+        .replace('ê', "e")
+        .replace('ë', "e")
+        .replace('à', "a")
+        .replace('â', "a")
+        .replace('ä', "a")
+        .replace('ô', "o")
+        .replace('ö', "o")
+        .replace('ù', "u")
+        .replace('û', "u")
+        .replace('ü', "u")
+        .replace('î', "i")
+        .replace('ï', "i")
         .replace('ç', "c")
-        .replace('œ', "oe").replace('æ', "ae")
+        .replace('œ', "oe")
+        .replace('æ', "ae")
         .replace(['-', '\''], " ")
         .replace('\u{2019}', " ")
         .replace('\u{2018}', " ")
@@ -513,10 +537,7 @@ enum Label {
         alight_pos: usize,
     },
     /// Reached by walking from another stop.
-    Transfer {
-        from_stop: usize,
-        duration: u32,
-    },
+    Transfer { from_stop: usize, duration: u32 },
 }
 
 /// Internal result of a RAPTOR query, containing arrival times and labels
@@ -690,7 +711,10 @@ pub fn raptor_query(
 
         // Early exit if target is reached and no marked stop can beat it
         if best[target] != INFINITY && !marked[target] {
-            let dominated = !marked.iter().enumerate().any(|(s, &m)| m && best[s] < best[target]);
+            let dominated = !marked
+                .iter()
+                .enumerate()
+                .any(|(s, &m)| m && best[s] < best[target]);
             if dominated {
                 break;
             }
@@ -890,7 +914,10 @@ fn reconstruct_for_round(
                 }
                 current_round -= 1;
             }
-            Some(Label::Transfer { from_stop, duration }) => {
+            Some(Label::Transfer {
+                from_stop,
+                duration,
+            }) => {
                 let arr = result.tau[current_round][current_stop];
                 sections.push(JourneySection {
                     section_type: SectionType::Transfer,
@@ -972,7 +999,11 @@ pub fn parse_datetime(input: &str) -> Option<(String, u32)> {
     let date = input.get(0..8)?;
 
     // Skip optional 'T' separator
-    let time_start = if input.as_bytes().get(8) == Some(&b'T') { 9 } else { 8 };
+    let time_start = if input.as_bytes().get(8) == Some(&b'T') {
+        9
+    } else {
+        8
+    };
     let time_part = input.get(time_start..)?;
 
     if time_part.is_empty() {

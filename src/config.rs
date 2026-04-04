@@ -47,15 +47,33 @@ pub struct AppConfig {
     pub log_level: String,
 }
 
-fn default_bind() -> String { "0.0.0.0".to_string() }
-fn default_port() -> u16 { 8080 }
-fn default_data_dir() -> String { "data".to_string() }
-fn default_max_journeys() -> usize { 5 }
-fn default_max_transfers() -> usize { 5 }
-fn default_transfer_time() -> u32 { 120 }
-fn default_max_duration() -> u32 { 10800 }
-fn default_workers() -> usize { 0 }
-fn default_log_level() -> String { "info".to_string() }
+fn default_bind() -> String {
+    "0.0.0.0".to_string()
+}
+fn default_port() -> u16 {
+    8080
+}
+fn default_data_dir() -> String {
+    "data".to_string()
+}
+fn default_max_journeys() -> usize {
+    5
+}
+fn default_max_transfers() -> usize {
+    5
+}
+fn default_transfer_time() -> u32 {
+    120
+}
+fn default_max_duration() -> u32 {
+    10800
+}
+fn default_workers() -> usize {
+    0
+}
+fn default_log_level() -> String {
+    "info".to_string()
+}
 
 impl Default for AppConfig {
     fn default() -> Self {

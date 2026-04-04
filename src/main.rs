@@ -11,7 +11,7 @@ mod config;
 mod gtfs;
 mod raptor;
 
-use actix_web::{web, App, HttpServer};
+use actix_web::{App, HttpServer, web};
 use arc_swap::ArcSwap;
 use std::path::Path;
 use std::sync::Arc;
@@ -42,7 +42,10 @@ async fn main() -> std::io::Result<()> {
     };
 
     // Build the RAPTOR index from GTFS data (patterns, transfers, search index)
-    let raptor_data = Arc::new(raptor::RaptorData::build(gtfs, config.default_transfer_time));
+    let raptor_data = Arc::new(raptor::RaptorData::build(
+        gtfs,
+        config.default_transfer_time,
+    ));
     info!(
         "{} patterns, {} stops",
         raptor_data.patterns.len(),

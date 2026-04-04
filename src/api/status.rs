@@ -1,6 +1,6 @@
 //! Engine status and GTFS hot-reload endpoints.
 
-use actix_web::{get, post, web, HttpResponse};
+use actix_web::{HttpResponse, get, post, web};
 use arc_swap::ArcSwap;
 use std::sync::Arc;
 

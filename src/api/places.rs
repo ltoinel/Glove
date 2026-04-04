@@ -1,6 +1,6 @@
 //! Stop name autocomplete endpoint.
 
-use actix_web::{get, web, HttpResponse};
+use actix_web::{HttpResponse, get, web};
 use arc_swap::ArcSwap;
 use serde::Deserialize;
 

@@ -161,15 +161,24 @@ impl GtfsData {
 
         let routes_vec: Vec<Route> = load_csv(&data_dir.join("routes.txt"))?;
         info!("{} routes", routes_vec.len());
-        let routes = routes_vec.into_iter().map(|r| (r.route_id.clone(), r)).collect();
+        let routes = routes_vec
+            .into_iter()
+            .map(|r| (r.route_id.clone(), r))
+            .collect();
 
         let stops_vec: Vec<Stop> = load_csv(&data_dir.join("stops.txt"))?;
         info!("{} stops", stops_vec.len());
-        let stops = stops_vec.into_iter().map(|s| (s.stop_id.clone(), s)).collect();
+        let stops = stops_vec
+            .into_iter()
+            .map(|s| (s.stop_id.clone(), s))
+            .collect();
 
         let trips_vec: Vec<Trip> = load_csv(&data_dir.join("trips.txt"))?;
         info!("{} trips", trips_vec.len());
-        let trips = trips_vec.into_iter().map(|t| (t.trip_id.clone(), t)).collect();
+        let trips = trips_vec
+            .into_iter()
+            .map(|t| (t.trip_id.clone(), t))
+            .collect();
 
         info!("Loading stop_times...");
         let stop_times: Vec<StopTime> = load_csv(&data_dir.join("stop_times.txt"))?;
@@ -177,7 +186,10 @@ impl GtfsData {
 
         let calendars_vec: Vec<Calendar> = load_csv(&data_dir.join("calendar.txt"))?;
         info!("{} calendars", calendars_vec.len());
-        let calendars = calendars_vec.into_iter().map(|c| (c.service_id.clone(), c)).collect();
+        let calendars = calendars_vec
+            .into_iter()
+            .map(|c| (c.service_id.clone(), c))
+            .collect();
 
         let calendar_dates: Vec<CalendarDate> = load_csv(&data_dir.join("calendar_dates.txt"))?;
         info!("{} calendar_dates", calendar_dates.len());

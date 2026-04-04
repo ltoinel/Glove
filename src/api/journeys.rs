@@ -3,7 +3,7 @@
 //! Runs RAPTOR iteratively with pattern exclusion to produce diverse
 //! route alternatives, sorted by duration and tagged with quality labels.
 
-use actix_web::{get, web, HttpResponse};
+use actix_web::{HttpResponse, get, web};
 use arc_swap::ArcSwap;
 use chrono::Timelike;
 use serde::{Deserialize, Serialize};
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::AppConfig;
 use crate::raptor::{self, RaptorData, SectionType};
 
-use super::{make_place, make_stop_point, Section, StopDateTime};
+use super::{Section, StopDateTime, make_place, make_stop_point};
 
 // ---------------------------------------------------------------------------
 // Query parameters
@@ -332,8 +332,14 @@ fn build_journey(data: &RaptorData, sections: &[raptor::JourneySection], date: &
                         let st = &data.stops[pattern.stops[pos]];
                         sdt.push(StopDateTime {
                             stop_point: make_stop_point(st),
-                            arrival_date_time: raptor::format_datetime(date, trip.stop_times[pos].0),
-                            departure_date_time: raptor::format_datetime(date, trip.stop_times[pos].1),
+                            arrival_date_time: raptor::format_datetime(
+                                date,
+                                trip.stop_times[pos].0,
+                            ),
+                            departure_date_time: raptor::format_datetime(
+                                date,
+                                trip.stop_times[pos].1,
+                            ),
                         });
                     }
                     stop_date_times = Some(sdt);
@@ -419,7 +425,10 @@ fn tag_journeys(journeys: &mut [Journey]) {
     }
 
     for tag in &["fastest", "least_transfers", "least_walking"] {
-        let count = journeys.iter().filter(|j| j.tags.iter().any(|t| t == tag)).count();
+        let count = journeys
+            .iter()
+            .filter(|j| j.tags.iter().any(|t| t == tag))
+            .count();
         if count == journeys.len() {
             for journey in journeys.iter_mut().skip(1) {
                 journey.tags.retain(|t| t != tag);
