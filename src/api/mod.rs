@@ -6,6 +6,7 @@
 //! - [`status`]   — `GET /api/status` + `POST /api/reload` (engine health & hot-reload)
 
 pub mod journeys;
+pub mod metrics;
 pub mod places;
 pub mod status;
 
@@ -13,6 +14,7 @@ pub use journeys::{__path_get_bike, get_bike};
 pub use journeys::{__path_get_car, get_car};
 pub use journeys::{__path_get_journeys, get_journeys};
 pub use journeys::{__path_get_walk, get_walk};
+pub use metrics::{__path_get_metrics, get_metrics};
 pub use places::{__path_get_places, get_places};
 pub use status::{__path_get_status, __path_post_reload, get_status, post_reload};
 
@@ -89,5 +91,43 @@ pub fn make_stop_point(stop: &crate::gtfs::Stop) -> StopPointRef {
             lon: stop.stop_lon,
             lat: stop.stop_lat,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gtfs::Stop;
+
+    fn test_stop() -> Stop {
+        Stop {
+            stop_id: "IDFM:22101".to_string(),
+            stop_name: "Châtelet".to_string(),
+            stop_lon: 2.347,
+            stop_lat: 48.858,
+            parent_station: String::new(),
+        }
+    }
+
+    #[test]
+    fn make_place_fields() {
+        let stop = test_stop();
+        let place = make_place(&stop);
+        assert_eq!(place.id, "IDFM:22101");
+        assert_eq!(place.name, "Châtelet");
+        assert!(place.stop_point.is_some());
+        let sp = place.stop_point.unwrap();
+        assert_eq!(sp.coord.lon, 2.347);
+        assert_eq!(sp.coord.lat, 48.858);
+    }
+
+    #[test]
+    fn make_stop_point_fields() {
+        let stop = test_stop();
+        let sp = make_stop_point(&stop);
+        assert_eq!(sp.id, "IDFM:22101");
+        assert_eq!(sp.name, "Châtelet");
+        assert_eq!(sp.coord.lon, 2.347);
+        assert_eq!(sp.coord.lat, 48.858);
     }
 }

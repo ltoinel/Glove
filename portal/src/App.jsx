@@ -9,7 +9,7 @@ import {
   ExpandMore, ExpandLess, TransferWithinAStation, DirectionsWalk,
   NearMe, ArrowRightAlt, Place, AccessTime, Settings,
   Route, Timer, MultipleStop, Storage, CalendarMonth, Close, Language, Api,
-  DirectionsBike, DirectionsCar,
+  DirectionsBike, DirectionsCar, MonitorHeart, Memory, Speed, Dns, Http,
 } from '@mui/icons-material'
 import SwaggerUI from 'swagger-ui-react'
 import 'swagger-ui-react/swagger-ui.css'
@@ -137,6 +137,47 @@ function modeIcon(mode) {
   }
 }
 
+// --- Elevation-colored segments for bike routes ---
+
+function elevationSegments(coords, heights) {
+  if (!heights || heights.length < 2 || coords.length < 2) return []
+  // Map heights to coords (heights are sampled, so interpolate indices)
+  const step = (coords.length - 1) / (heights.length - 1)
+  const segments = []
+  for (let i = 0; i < coords.length - 1; i++) {
+    const hIdx = i / step
+    const lo = Math.floor(hIdx)
+    const hi = Math.min(lo + 1, heights.length - 1)
+    const frac = hIdx - lo
+    const h0 = heights[lo] + frac * (heights[hi] - heights[lo])
+    const nextHIdx = (i + 1) / step
+    const nlo = Math.floor(nextHIdx)
+    const nhi = Math.min(nlo + 1, heights.length - 1)
+    const nfrac = nextHIdx - nlo
+    const h1 = heights[nlo] + nfrac * (heights[nhi] - heights[nlo])
+    const diff = h1 - h0
+    // Color by slope: green=descent, yellow=flat, orange/red=climb
+    let color
+    if (diff <= -2) color = '#4caf50'       // descent
+    else if (diff <= -0.5) color = '#66bb6a' // slight descent
+    else if (diff < 0.5) color = '#ffeb3b'   // flat
+    else if (diff < 2) color = '#ff9800'     // slight climb
+    else color = '#f44336'                   // steep climb
+    segments.push({ positions: [coords[i], coords[i + 1]], color })
+  }
+  // Merge consecutive segments with same color
+  const merged = [segments[0]]
+  for (let i = 1; i < segments.length; i++) {
+    const prev = merged[merged.length - 1]
+    if (segments[i].color === prev.color) {
+      prev.positions.push(segments[i].positions[1])
+    } else {
+      merged.push({ positions: [segments[i].positions[0], segments[i].positions[1]], color: segments[i].color })
+    }
+  }
+  return merged
+}
+
 function modeColor(mode, color) {
   if (color) return `#${color}`
   switch (mode) {
@@ -205,13 +246,45 @@ function PlaceAutocomplete({ label, value, onChange, icon, placeholder }) {
           }}
         />
       )}
+      groupBy={(option) => option.type === 'stop' ? 'stops' : 'addresses'}
+      renderGroup={(params) => (
+        <li key={params.key}>
+          <Box sx={{
+            px: 1.5, py: 0.5,
+            bgcolor: 'rgba(255,255,255,0.03)',
+            borderBottom: '1px solid rgba(255,255,255,0.04)',
+          }}>
+            <Typography variant="caption" sx={{
+              fontFamily: '"Syne", sans-serif', fontWeight: 700, fontSize: 10,
+              letterSpacing: 1.5, textTransform: 'uppercase',
+              color: params.group === 'stops' ? '#00e5ff' : '#ffb800',
+            }}>
+              {params.group === 'stops' ? t('stopsLabel') : t('addresses')}
+            </Typography>
+          </Box>
+          {params.children}
+        </li>
+      )}
       renderOption={(props, option) => {
         const { key, ...rest } = props
+        const isStop = option.type === 'stop'
         return (
           <Box component="li" key={key} {...rest}
-            sx={{ display: 'flex', alignItems: 'center', gap: 1.5, py: 1 }}>
-            <Place fontSize="small" sx={{ color: 'primary.main' }} />
-            <Typography variant="body2" fontWeight={500}>{option.name}</Typography>
+            sx={{ display: 'flex', alignItems: 'center', gap: 1.5, py: 0.8, px: 1.5 }}>
+            <Box sx={{
+              width: 28, height: 28, borderRadius: isStop ? '8px' : '50%',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              bgcolor: isStop ? 'rgba(0, 229, 255, 0.1)' : 'rgba(255, 184, 0, 0.1)',
+              border: '1px solid',
+              borderColor: isStop ? 'rgba(0, 229, 255, 0.25)' : 'rgba(255, 184, 0, 0.25)',
+              flexShrink: 0,
+            }}>
+              {isStop
+                ? <DirectionsBus sx={{ fontSize: 15, color: '#00e5ff' }} />
+                : <Place sx={{ fontSize: 15, color: '#ffb800' }} />
+              }
+            </Box>
+            <Typography variant="body2" fontWeight={500} noWrap>{option.name}</Typography>
           </Box>
         )
       }}
@@ -498,8 +571,9 @@ function WalkCard({ journey, selected, onSelect }) {
 function BikeCard({ journey, selected, onSelect }) {
   const { t } = useI18n()
   const distKm = (journey.distance / 1000).toFixed(1)
-  const isEbike = journey.type === 'ebike'
-  const color = isEbike ? '#66bb6a' : '#4caf50'
+  const bikeColors = { city: '#4caf50', ebike: '#00bcd4', road: '#ff9800' }
+  const bikeLabels = { city: t('bikeCity'), ebike: t('bikeEbike'), road: t('bikeRoad') }
+  const color = bikeColors[journey.type] || '#4caf50'
 
   return (
     <Card
@@ -532,7 +606,7 @@ function BikeCard({ journey, selected, onSelect }) {
             </Box>
             <Box sx={{ flex: 1, minWidth: 0 }}>
               <Typography variant="body2" fontWeight={600} sx={{ fontFamily: '"Syne", sans-serif' }}>
-                {isEbike ? t('bikeEbike') : t('bikeClassic')}
+                {bikeLabels[journey.type] || journey.type}
               </Typography>
               <Typography variant="caption" color="text.secondary">
                 {distKm} km · ↑{journey.elevation_gain}m ↓{journey.elevation_loss}m
@@ -780,6 +854,99 @@ function SwaggerPanel() {
   )
 }
 
+// --- Metrics panel ---
+
+function parsePrometheus(text) {
+  const metrics = {}
+  for (const line of text.split('\n')) {
+    if (line.startsWith('#') || !line.trim()) continue
+    const [name, value] = line.split(' ')
+    if (name && value !== undefined) metrics[name] = parseFloat(value)
+  }
+  return metrics
+}
+
+function formatBytes(bytes) {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`
+  if (bytes < 1073741824) return `${(bytes / 1048576).toFixed(1)} MB`
+  return `${(bytes / 1073741824).toFixed(2)} GB`
+}
+
+function formatUptime(seconds) {
+  const d = Math.floor(seconds / 86400)
+  const h = Math.floor((seconds % 86400) / 3600)
+  const m = Math.floor((seconds % 3600) / 60)
+  const s = Math.floor(seconds % 60)
+  if (d > 0) return `${d}d ${h}h ${m}m`
+  if (h > 0) return `${h}h ${m}m ${s}s`
+  return `${m}m ${s}s`
+}
+
+function MetricsPanel() {
+  const { t } = useI18n()
+  const [metrics, setMetrics] = useState(null)
+
+  useEffect(() => {
+    const load = () => fetch('/api/metrics').then(r => r.text()).then(t => setMetrics(parsePrometheus(t))).catch(() => {})
+    load()
+    const interval = setInterval(load, 5000)
+    return () => clearInterval(interval)
+  }, [])
+
+  if (!metrics) return (
+    <Box sx={{ p: 4, textAlign: 'center' }}>
+      <CircularProgress size={28} sx={{ color: '#00e5ff' }} />
+      <Typography variant="body2" color="text.secondary" sx={{ mt: 1.5 }}>{t('metricsLoadingMetrics')}</Typography>
+    </Box>
+  )
+
+  const processItems = [
+    { icon: <Speed fontSize="small" />, label: t('metricsCpu'), value: `${metrics.process_cpu_seconds_total?.toFixed(2)}s` },
+    { icon: <Memory fontSize="small" />, label: t('metricsMemoryRss'), value: formatBytes(metrics.process_resident_memory_bytes || 0) },
+    { icon: <Memory fontSize="small" />, label: t('metricsMemoryVirtual'), value: formatBytes(metrics.process_virtual_memory_bytes || 0) },
+    { icon: <Dns fontSize="small" />, label: t('metricsOpenFds'), value: metrics.process_open_fds?.toLocaleString() },
+    { icon: <Dns fontSize="small" />, label: t('metricsThreads'), value: metrics.process_threads?.toLocaleString() },
+    { icon: <Timer fontSize="small" />, label: t('metricsUptime'), value: formatUptime(metrics.process_uptime_seconds || 0) },
+  ]
+
+  const httpItems = [
+    { icon: <Http fontSize="small" />, label: t('metricsRequests'), value: metrics.glove_http_requests_total?.toLocaleString() },
+    { icon: <Http fontSize="small" />, label: t('metricsErrors'), value: metrics.glove_http_errors_total?.toLocaleString() },
+  ]
+
+  const renderSection = (title, items, color) => (
+    <>
+      <Box sx={{ px: 2.5, pt: 2, pb: 0.5 }}>
+        <Typography variant="overline" sx={{ color }} fontWeight={700} letterSpacing={2} fontSize={10}>
+          {title}
+        </Typography>
+      </Box>
+      {items.map((item, i) => (
+        <Box key={i} sx={{
+          display: 'flex', alignItems: 'center', gap: 1.5, px: 2.5, py: 0.8,
+          '&:hover': { bgcolor: 'rgba(255,255,255,0.02)' },
+          transition: 'background 0.15s',
+        }}>
+          {item.icon && <Box sx={{ color, display: 'flex', opacity: 0.7 }}>{item.icon}</Box>}
+          {!item.icon && <Box sx={{ width: 20 }} />}
+          <Typography variant="body2" sx={{ flex: 1, color: 'text.secondary' }}>{item.label}</Typography>
+          <Typography variant="body2" fontWeight={700}
+            sx={{ fontFamily: '"Syne", sans-serif' }}>{item.value?.toLocaleString() ?? '—'}</Typography>
+        </Box>
+      ))}
+      <Divider sx={{ my: 1.5, mx: 2, borderColor: 'rgba(255,255,255,0.04)' }} />
+    </>
+  )
+
+  return (
+    <Box sx={{ overflow: 'auto', flex: 1 }}>
+      {renderSection(t('metricsProcess'), processItems, '#00e5ff')}
+      {renderSection(t('metricsHttp'), httpItems, '#ffb800')}
+    </Box>
+  )
+}
+
 // --- Main App ---
 
 export default function App() {
@@ -873,6 +1040,8 @@ export default function App() {
   const mapData = selectedJ ? extractMapData(selectedJ) : { lines: [], stopPoints: [], labeledStops: [] }
   const walkCoords = (isWalkSelected && walkJourney?.shape) ? decodePolyline(walkJourney.shape) : []
   const bikeCoords = (isBikeSelected && selectedBike?.shape) ? decodePolyline(selectedBike.shape) : []
+  const bikeElevSegs = (isBikeSelected && bikeCoords.length >= 2 && selectedBike?.heights)
+    ? elevationSegments(bikeCoords, selectedBike.heights) : []
   const carCoords = (isCarSelected && carJourney?.shape) ? decodePolyline(carJourney.shape) : []
   const allCoords = isWalkSelected ? walkCoords : isBikeSelected ? bikeCoords : isCarSelected ? carCoords : mapData.lines.flatMap(l => l.coords)
   const hasResults = allCoords.length >= 2
@@ -964,6 +1133,18 @@ export default function App() {
                 {view === 'swagger' ? <Close fontSize="small" /> : <Api fontSize="small" />}
               </IconButton>
             </Tooltip>
+            <Tooltip title={view === 'metrics' ? t('search') : t('metrics')}>
+              <IconButton
+                onClick={() => setView(view === 'metrics' ? 'search' : 'metrics')}
+                size="small"
+                sx={{
+                  color: view === 'metrics' ? '#00e5ff' : 'text.secondary',
+                  '&:hover': { color: '#00e5ff', bgcolor: 'rgba(0, 229, 255, 0.08)' },
+                  transition: 'all 0.2s',
+                }}>
+                {view === 'metrics' ? <Close fontSize="small" /> : <MonitorHeart fontSize="small" />}
+              </IconButton>
+            </Tooltip>
             <Tooltip title={view === 'settings' ? t('search') : t('settings')}>
               <IconButton
                 onClick={() => setView(view === 'settings' ? 'search' : 'settings')}
@@ -981,6 +1162,8 @@ export default function App() {
 
         {view === 'swagger' ? (
           <SwaggerPanel />
+        ) : view === 'metrics' ? (
+          <MetricsPanel />
         ) : view === 'settings' ? (
           <SettingsPanel status={status} onReload={refreshStatus} />
         ) : (
@@ -1203,6 +1386,9 @@ export default function App() {
           pointerEvents: 'none',
         }} />
         <MapContainer center={status?.map?.center || DEFAULT_CENTER} zoom={status?.map?.zoom || DEFAULT_ZOOM}
+          minZoom={status?.map?.zoom || DEFAULT_ZOOM}
+          maxBounds={status?.map?.bounds || [[48.1, 1.4], [49.3, 3.6]]}
+          maxBoundsViscosity={1.0}
           style={{ height: '100%', width: '100%' }} zoomControl={false}>
           <TileLayer
             attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; <a href="https://carto.com/">CARTO</a>'
@@ -1227,9 +1413,13 @@ export default function App() {
               pathOptions={{ color: '#ffb800', weight: 4, opacity: 0.9, dashArray: '8, 6', lineCap: 'round', lineJoin: 'round' }} />
           )}
 
-          {isBikeSelected && bikeCoords.length >= 2 && (
+          {isBikeSelected && bikeElevSegs.length > 0 && bikeElevSegs.map((seg, i) => (
+            <Polyline key={`bike-seg-${i}`} positions={seg.positions}
+              pathOptions={{ color: seg.color, weight: 5, opacity: 0.9, lineCap: 'round', lineJoin: 'round' }} />
+          ))}
+          {isBikeSelected && bikeCoords.length >= 2 && bikeElevSegs.length === 0 && (
             <Polyline positions={bikeCoords}
-              pathOptions={{ color: '#4caf50', weight: 4, opacity: 0.9, lineCap: 'round', lineJoin: 'round' }} />
+              pathOptions={{ color: { city: '#4caf50', ebike: '#00bcd4', road: '#ff9800' }[selectedBike?.type] || '#4caf50', weight: 4, opacity: 0.9, lineCap: 'round', lineJoin: 'round' }} />
           )}
 
           {isCarSelected && carCoords.length >= 2 && (
@@ -1259,7 +1449,7 @@ export default function App() {
 
           {fromPos && (
             <Marker position={fromPos} icon={originIcon}>
-              <LTooltip direction="top" offset={[0, -40]} permanent className="stop-label">
+              <LTooltip direction="top" offset={[0, -40]} permanent className="origin-label">
                 <span>{from.name}</span>
               </LTooltip>
             </Marker>
@@ -1267,7 +1457,7 @@ export default function App() {
 
           {toPos && (
             <Marker position={toPos} icon={destinationIcon}>
-              <LTooltip direction="top" offset={[0, -40]} permanent className="stop-label">
+              <LTooltip direction="top" offset={[0, -40]} permanent className="dest-label">
                 <span>{to.name}</span>
               </LTooltip>
             </Marker>

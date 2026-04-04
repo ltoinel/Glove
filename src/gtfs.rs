@@ -253,3 +253,138 @@ pub fn gtfs_fingerprint(data_dir: &Path) -> String {
     }
     format!("{:x}", hasher.finalize())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    // --- parse_time ---
+
+    #[test]
+    fn parse_time_normal() {
+        assert_eq!(parse_time("08:30:00"), Some(30600));
+    }
+
+    #[test]
+    fn parse_time_midnight() {
+        assert_eq!(parse_time("00:00:00"), Some(0));
+    }
+
+    #[test]
+    fn parse_time_beyond_24h() {
+        // GTFS allows times past midnight of the next service day.
+        // 25*3600 + 30*60 + 0 = 91800
+        assert_eq!(parse_time("25:30:00"), Some(91800));
+    }
+
+    #[test]
+    fn parse_time_edge_end_of_day() {
+        // 23*3600 + 59*60 + 59 = 86399
+        assert_eq!(parse_time("23:59:59"), Some(86399));
+    }
+
+    #[test]
+    fn parse_time_missing_seconds() {
+        // Only 2 parts — not a valid GTFS time.
+        assert_eq!(parse_time("8:30"), None);
+    }
+
+    #[test]
+    fn parse_time_alpha() {
+        assert_eq!(parse_time("abc"), None);
+    }
+
+    #[test]
+    fn parse_time_empty() {
+        assert_eq!(parse_time(""), None);
+    }
+
+    #[test]
+    fn parse_time_two_parts_only() {
+        assert_eq!(parse_time("08:30"), None);
+    }
+
+    #[test]
+    fn parse_time_four_parts() {
+        assert_eq!(parse_time("08:30:00:00"), None);
+    }
+
+    #[test]
+    fn parse_time_non_numeric_parts() {
+        assert_eq!(parse_time("ab:cd:ef"), None);
+    }
+
+    // --- gtfs_fingerprint ---
+
+    #[test]
+    fn gtfs_fingerprint_is_hex_64_chars() {
+        let dir = TempDir::new().expect("failed to create temp dir");
+        let fp = gtfs_fingerprint(dir.path());
+        // SHA-256 produces a 32-byte digest → 64 hex characters.
+        assert_eq!(fp.len(), 64);
+        assert!(fp.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn gtfs_fingerprint_same_dir_is_deterministic() {
+        let dir = TempDir::new().expect("failed to create temp dir");
+        // Write a dummy GTFS file so the hasher has something to consume.
+        let stops_path = dir.path().join("stops.txt");
+        let mut f = std::fs::File::create(&stops_path).expect("create stops.txt");
+        writeln!(f, "stop_id,stop_name").expect("write header");
+
+        let fp1 = gtfs_fingerprint(dir.path());
+        let fp2 = gtfs_fingerprint(dir.path());
+        assert_eq!(fp1, fp2);
+    }
+
+    #[test]
+    fn gtfs_fingerprint_nonexistent_dir_is_deterministic() {
+        let missing = Path::new("/tmp/__glove_nonexistent_dir_for_test__");
+        // No files match, so the hasher finalises over an empty input both times.
+        let fp1 = gtfs_fingerprint(missing);
+        let fp2 = gtfs_fingerprint(missing);
+        assert_eq!(fp1, fp2);
+        // Still a valid 64-char hex string.
+        assert_eq!(fp1.len(), 64);
+    }
+
+    #[test]
+    fn gtfs_fingerprint_changes_when_file_size_changes() {
+        let dir = TempDir::new().expect("failed to create temp dir");
+        let stops_path = dir.path().join("stops.txt");
+
+        // Write a small file.
+        {
+            let mut f = std::fs::File::create(&stops_path).expect("create stops.txt");
+            writeln!(f, "stop_id,stop_name").expect("write header");
+        }
+        let fp_small = gtfs_fingerprint(dir.path());
+
+        // Append more content so the file size changes.
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&stops_path)
+                .expect("open stops.txt for append");
+            writeln!(f, "S1,Central Station").expect("append row");
+        }
+        let fp_large = gtfs_fingerprint(dir.path());
+
+        assert_ne!(fp_small, fp_large);
+    }
+
+    // --- GtfsData::load ---
+
+    #[test]
+    fn gtfs_load_nonexistent_dir_returns_error() {
+        let missing = Path::new("/tmp/__glove_nonexistent_gtfs_dir__");
+        let result = GtfsData::load(missing);
+        assert!(
+            result.is_err(),
+            "expected an error when loading from a non-existent directory"
+        );
+    }
+}

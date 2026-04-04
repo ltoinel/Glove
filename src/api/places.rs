@@ -52,8 +52,15 @@ pub async fn get_places(
     ban: web::Data<Arc<BanData>>,
 ) -> HttpResponse {
     let raptor_data = shared.load();
-    let q = query.q.as_deref().unwrap_or("");
+    let raw_q = query.q.as_deref().unwrap_or("");
     let limit = query.limit.unwrap_or(10).min(50);
+
+    // Strip leading/trailing digits and whitespace (e.g. "12 rue de Rivoli" → "rue de Rivoli")
+    let q: String = raw_q
+        .chars()
+        .filter(|c| !c.is_ascii_digit())
+        .collect::<String>();
+    let q = q.trim();
 
     if q.len() < 2 {
         return HttpResponse::Ok().json(serde_json::json!({ "places": [] }));
@@ -63,42 +70,40 @@ pub async fn get_places(
     let stop_results = raptor_data.search_stops(q, limit);
     let ban_results = ban.search(q, limit);
 
-    // Interleave: stops first (higher priority), then addresses, up to limit
+    // Stops first (higher priority), then addresses, up to limit
     let mut places: Vec<serde_json::Value> = Vec::with_capacity(limit);
 
-    let mut si = 0;
-    let mut bi = 0;
-    while places.len() < limit && (si < stop_results.len() || bi < ban_results.len()) {
-        // Alternate: add one stop, then one address
-        if si < stop_results.len() && places.len() < limit {
-            let (idx, name, _id) = &stop_results[si];
-            let stop = &raptor_data.stops[*idx];
-            places.push(serde_json::json!({
-                "id": stop.stop_id,
-                "name": name,
-                "type": "stop",
-                "coord": {
-                    "lon": stop.stop_lon,
-                    "lat": stop.stop_lat,
-                }
-            }));
-            si += 1;
+    for (idx, name, _id) in &stop_results {
+        if places.len() >= limit {
+            break;
         }
-        if bi < ban_results.len() && places.len() < limit {
-            let entry = &ban_results[bi];
-            // Use lon;lat as ID so resolve_stop() can find the nearest stop
-            let id = format!("{};{}", entry.lon, entry.lat);
-            places.push(serde_json::json!({
-                "id": id,
-                "name": entry.label,
-                "type": "address",
-                "coord": {
-                    "lon": entry.lon,
-                    "lat": entry.lat,
-                }
-            }));
-            bi += 1;
+        let stop = &raptor_data.stops[*idx];
+        places.push(serde_json::json!({
+            "id": stop.stop_id,
+            "name": name,
+            "type": "stop",
+            "coord": {
+                "lon": stop.stop_lon,
+                "lat": stop.stop_lat,
+            }
+        }));
+    }
+
+    for entry in &ban_results {
+        if places.len() >= limit {
+            break;
         }
+        // Use lon;lat as ID so resolve_stop() can find the nearest stop
+        let id = format!("{};{}", entry.lon, entry.lat);
+        places.push(serde_json::json!({
+            "id": id,
+            "name": entry.label,
+            "type": "address",
+            "coord": {
+                "lon": entry.lon,
+                "lat": entry.lat,
+            }
+        }));
     }
 
     HttpResponse::Ok().json(serde_json::json!({ "places": places }))

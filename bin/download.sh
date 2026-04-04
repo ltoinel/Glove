@@ -1,38 +1,72 @@
 #!/usr/bin/env bash
+# ---------------------------------------------------------------------------
+# download.sh — Download external data files required by Glove.
+#
+# Reads URLs and directory paths from config.yaml (nested YAML format),
+# then fetches GTFS, OSM and BAN data into the configured data directory.
+#
+# Usage:
+#   bin/download.sh all    # Download everything
+#   bin/download.sh gtfs   # GTFS transit schedules only
+#   bin/download.sh osm    # OpenStreetMap extract only
+#   bin/download.sh ban    # BAN address database only
+#
+# Each download is idempotent: if the target file already exists, the user
+# is prompted before overwriting.
+# ---------------------------------------------------------------------------
 set -e
 
+# Resolve the project root (parent of bin/)
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CONFIG="$ROOT/config.yaml"
 
+# --- Terminal colors ---
 GREEN='\033[0;32m'
 CYAN='\033[0;36m'
 RED='\033[0;31m'
 NC='\033[0m'
 
+# --- Logging helpers ---
 log()  { echo -e "${CYAN}[glove]${NC} $1"; }
 ok()   { echo -e "${GREEN}[glove]${NC} $1"; }
 fail() { echo -e "${RED}[glove]${NC} $1"; exit 1; }
 
+# Prompt the user for confirmation (accepts y/Y/o/O).
 confirm() {
     read -rp $'\033[0;36m[glove]\033[0m '"$1"' (y/N) ' answer
     [[ "$answer" =~ ^[yYoO]$ ]]
 }
 
+# Print usage and exit.
 usage() {
-    echo "Usage: $0 <all|osm|gtfs|ban|sirene>"
+    echo "Usage: $0 <all|osm|gtfs|ban>"
     echo ""
-    echo "  all    Download OSM, GTFS, BAN and SIRENE data"
+    echo "  all    Download OSM, GTFS and BAN data"
     echo "  osm    Download OSM data only"
     echo "  gtfs   Download GTFS data only"
     echo "  ban    Download BAN address data only"
-    echo "  sirene Download SIRENE company database only"
     exit 1
 }
 
-# Read a value from config.yaml (no defaults — exits if missing)
+# ---------------------------------------------------------------------------
+# YAML reader — supports nested keys via dot notation.
+#
+# Examples:
+#   yaml_val "data.dir"       → reads "dir:" under the "data:" section
+#   yaml_val "server.port"    → reads "port:" under the "server:" section
+# ---------------------------------------------------------------------------
 yaml_val() {
     local val
-    val=$(grep "^$1:" "$CONFIG" 2>/dev/null | sed 's/^[^:]*:[[:space:]]*//' | tr -d '"')
+    if [[ "$1" == *.* ]]; then
+        # Nested key: extract the section name and the key within it,
+        # then use sed to find the indented key under the section header.
+        local section="${1%%.*}"
+        local key="${1#*.}"
+        val=$(sed -n "/^${section}:/,/^[^ ]/{ s/^  *${key}:[[:space:]]*//p; }" "$CONFIG" | head -1 | tr -d '"')
+    else
+        # Top-level key: simple grep.
+        val=$(grep "^$1:" "$CONFIG" 2>/dev/null | sed 's/^[^:]*:[[:space:]]*//' | tr -d '"')
+    fi
     if [ -z "$val" ]; then
         fail "Missing key '$1' in $CONFIG"
     fi
@@ -46,24 +80,29 @@ command -v wget >/dev/null || fail "wget not found. Install it first."
 command -v unzip >/dev/null || fail "unzip not found. Install it first."
 command -v gunzip >/dev/null || fail "gunzip not found. Install it first."
 
-# --- Read config ---
-OSM_DIR="$ROOT/$(yaml_val osm_dir)"
-OSM_URL="$(yaml_val osm_url)"
+# --- Read configuration values ---
+# All data lives under a single root directory; sub-directories are implicit.
+DATA_DIR="$ROOT/$(yaml_val data.dir)"
+
+OSM_DIR="$DATA_DIR/osm"
+OSM_URL="$(yaml_val data.osm_url)"
 OSM_FILE="$OSM_DIR/$(basename "$OSM_URL")"
 
-GTFS_DIR="$ROOT/$(yaml_val data_dir)"
-GTFS_URL="$(yaml_val gtfs_url)"
+GTFS_DIR="$DATA_DIR/gtfs"
+GTFS_URL="$(yaml_val data.gtfs_url)"
 GTFS_ZIP="$GTFS_DIR/gtfs-idfm.zip"
 
-BAN_DIR="$ROOT/$(yaml_val ban_dir)"
-BAN_BASE_URL="$(yaml_val ban_url)"
-DEPARTMENTS=$(grep "^departments:" "$CONFIG" | sed 's/^[^[]*\[//;s/\].*//;s/,/ /g;s/  */ /g;s/^ //;s/ $//')
+BAN_DIR="$DATA_DIR/ban"
+BAN_BASE_URL="$(yaml_val data.ban_url)"
+# Parse the departments array from the nested "data:" section.
+DEPARTMENTS=$(sed -n '/^data:/,/^[^ ]/{s/^  *departments:[[:space:]]*\[//p;}' "$CONFIG" \
+    | sed 's/\].*//;s/,/ /g;s/  */ /g;s/^ //;s/ $//')
 
-SIRENE_DIR="$ROOT/$(yaml_val sirene_dir)"
-SIRENE_URL="$(yaml_val sirene_url)"
-SIRENE_FILE="$SIRENE_DIR/base-sirene.csv"
+# ---------------------------------------------------------------------------
+# Download functions
+# ---------------------------------------------------------------------------
 
-# --- Functions ---
+# Download the OpenStreetMap PBF extract (used by Valhalla for routing tiles).
 download_osm() {
     mkdir -p "$OSM_DIR"
     if [ -f "$OSM_FILE" ]; then
@@ -82,6 +121,9 @@ download_osm() {
     fi
 }
 
+# Download and extract the GTFS archive (transit schedules).
+# The ZIP is removed after extraction; presence of stop_times.txt is used
+# as a sentinel to detect an existing dataset.
 download_gtfs() {
     mkdir -p "$GTFS_DIR"
     if [ -f "$GTFS_DIR/stop_times.txt" ]; then
@@ -106,6 +148,8 @@ download_gtfs() {
     fi
 }
 
+# Download BAN (Base Adresse Nationale) CSV files, one per department.
+# Files are distributed as gzipped CSVs; each is decompressed in place.
 download_ban() {
     mkdir -p "$BAN_DIR"
     if [ -z "$DEPARTMENTS" ]; then
@@ -134,31 +178,14 @@ download_ban() {
     done
 }
 
-download_sirene() {
-    mkdir -p "$SIRENE_DIR"
-    if [ -f "$SIRENE_FILE" ]; then
-        log "SIRENE file already exists: $SIRENE_FILE"
-        if confirm "Replace it?"; then
-            log "Downloading SIRENE database..."
-            wget -O "$SIRENE_FILE" "$SIRENE_URL"
-            ok "SIRENE data saved to $SIRENE_FILE"
-        else
-            log "Skipping SIRENE download."
-        fi
-    else
-        log "Downloading SIRENE database..."
-        wget -O "$SIRENE_FILE" "$SIRENE_URL"
-        ok "SIRENE data saved to $SIRENE_FILE"
-    fi
-}
-
-# --- Main ---
+# ---------------------------------------------------------------------------
+# Main — dispatch on the first argument
+# ---------------------------------------------------------------------------
 case "$1" in
     all)
         download_osm
         download_gtfs
         download_ban
-        download_sirene
         ;;
     osm)
         download_osm
@@ -168,9 +195,6 @@ case "$1" in
         ;;
     ban)
         download_ban
-        ;;
-    sirene)
-        download_sirene
         ;;
     *)
         usage

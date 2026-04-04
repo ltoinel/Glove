@@ -274,3 +274,179 @@ impl BanData {
         results.into_iter().map(|(entry, _)| entry).collect()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_test_ban() -> BanData {
+        BanData {
+            entries: vec![
+                BanEntry {
+                    label: "Rue de Rivoli, 75001 Paris".to_string(),
+                    name_lower: normalize("Rue de Rivoli, 75001 Paris"),
+                    lon: 2.3387,
+                    lat: 48.8606,
+                },
+                BanEntry {
+                    label: "Avenue des Champs-Élysées, 75008 Paris".to_string(),
+                    name_lower: normalize("Avenue des Champs-Élysées, 75008 Paris"),
+                    lon: 2.3065,
+                    lat: 48.8698,
+                },
+                BanEntry {
+                    label: "Boulevard Saint-Germain, 75005 Paris".to_string(),
+                    name_lower: normalize("Boulevard Saint-Germain, 75005 Paris"),
+                    lon: 2.3441,
+                    lat: 48.8509,
+                },
+            ],
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // search
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn search_empty_query() {
+        let ban = make_test_ban();
+        assert!(ban.search("", 10).is_empty());
+    }
+
+    #[test]
+    fn search_exact_match() {
+        let ban = make_test_ban();
+        let results = ban.search("rue de rivoli, 75001 paris", 10);
+        assert!(!results.is_empty());
+        assert!(results[0].label.contains("Rivoli"));
+    }
+
+    #[test]
+    fn search_prefix() {
+        let ban = make_test_ban();
+        let results = ban.search("avenue", 10);
+        assert!(!results.is_empty());
+        assert!(results[0].label.contains("Avenue"));
+    }
+
+    #[test]
+    fn search_substring() {
+        let ban = make_test_ban();
+        let results = ban.search("Rivoli", 10);
+        assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn search_diacritics() {
+        let ban = make_test_ban();
+        // "elysees" should match "Élysées" via normalization
+        let results = ban.search("elysees", 10);
+        assert!(!results.is_empty());
+        assert!(results[0].label.contains("Champs"));
+    }
+
+    #[test]
+    fn search_no_match() {
+        let ban = make_test_ban();
+        let results = ban.search("zzzznonexistent", 10);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn search_respects_limit() {
+        let ban = make_test_ban();
+        let results = ban.search("paris", 1);
+        assert_eq!(results.len(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // load from directory
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn load_missing_dir() {
+        let ban = BanData::load(Path::new("/tmp/glove_test_nonexistent_ban_dir"));
+        assert!(ban.entries.is_empty());
+    }
+
+    #[test]
+    fn load_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let ban = BanData::load(dir.path());
+        assert!(ban.entries.is_empty());
+    }
+
+    #[test]
+    fn load_csv_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let csv_path = dir.path().join("adresses-75.csv");
+        std::fs::write(
+            &csv_path,
+            "id;nom_voie;code_postal;nom_commune;lon;lat\n\
+             1;Rue de Rivoli;75001;Paris;2.3387;48.8606\n\
+             2;Rue de Rivoli;75001;Paris;2.3388;48.8607\n\
+             3;Avenue Montaigne;75008;Paris;2.3025;48.8667\n",
+        )
+        .unwrap();
+        let ban = BanData::load(dir.path());
+        // 2 unique streets (Rue de Rivoli deduplicated)
+        assert_eq!(ban.entries.len(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // cache persistence
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn save_and_load_cache() {
+        let ban = make_test_ban();
+        let dir = tempfile::tempdir().unwrap();
+        ban.save(dir.path(), "test_fp").unwrap();
+
+        let loaded = BanData::load_cached(dir.path(), "test_fp");
+        assert!(loaded.is_some());
+        assert_eq!(loaded.unwrap().entries.len(), 3);
+    }
+
+    #[test]
+    fn load_cache_wrong_fingerprint() {
+        let ban = make_test_ban();
+        let dir = tempfile::tempdir().unwrap();
+        ban.save(dir.path(), "fp1").unwrap();
+        assert!(BanData::load_cached(dir.path(), "fp2").is_none());
+    }
+
+    #[test]
+    fn load_cache_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(BanData::load_cached(dir.path(), "fp").is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // fingerprint
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fingerprint_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let fp = BanData::fingerprint(dir.path());
+        assert_eq!(fp.len(), 64); // SHA-256 hex
+    }
+
+    #[test]
+    fn fingerprint_deterministic() {
+        let dir = tempfile::tempdir().unwrap();
+        let csv = dir.path().join("adresses-75.csv");
+        std::fs::write(&csv, "header\nrow1\n").unwrap();
+        let fp1 = BanData::fingerprint(dir.path());
+        let fp2 = BanData::fingerprint(dir.path());
+        assert_eq!(fp1, fp2);
+    }
+
+    #[test]
+    fn fingerprint_nonexistent_dir() {
+        let fp = BanData::fingerprint(Path::new("/nonexistent"));
+        assert_eq!(fp.len(), 64);
+    }
+}

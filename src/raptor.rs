@@ -20,8 +20,9 @@
 //! The algorithm terminates when no stop is improved or the maximum number
 //! of rounds is reached.
 
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 use tracing::info;
 
@@ -40,16 +41,20 @@ const MAX_ROUNDS: usize = 8;
 ///
 /// Contains the interned service index (for calendar lookup) and the
 /// pre-parsed stop times as (arrival_secs, departure_secs) tuples.
+///
+/// Field order is optimized for cache locality: hot fields used in the
+/// RAPTOR inner loop (`service_idx`, `stop_times`) come first; cold fields
+/// used only during reconstruction (`trip_id`, `headsign`) come last.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PatternTrip {
-    #[allow(dead_code)]
-    pub trip_id: String,
     /// Index into [`RaptorData::service_ids`] for fast active-service checks.
     pub service_idx: usize,
-    /// Destination sign displayed on the vehicle.
-    pub headsign: String,
     /// (arrival, departure) in seconds since midnight, one per stop in the pattern.
     pub stop_times: Vec<(u32, u32)>,
+    #[allow(dead_code)]
+    pub trip_id: String,
+    /// Destination sign displayed on the vehicle.
+    pub headsign: String,
 }
 
 /// A route pattern: an ordered sequence of stops served by multiple trips.
@@ -93,8 +98,8 @@ pub struct SearchEntry {
 /// across all request handlers via [`ArcSwap`](arc_swap::ArcSwap).
 #[derive(Serialize, Deserialize)]
 pub struct RaptorData {
-    /// stop_id (String) → numeric index.
-    pub stop_index: HashMap<String, usize>,
+    /// stop_id (String) → numeric index (FxHashMap for faster lookups).
+    pub stop_index: FxHashMap<String, usize>,
     /// All route patterns (unique stop sequences).
     pub patterns: Vec<Pattern>,
     /// For each stop: list of `(pattern_idx, position_in_pattern)`.
@@ -113,8 +118,8 @@ pub struct RaptorData {
     service_ids: Vec<String>,
     /// Calendar rules indexed by service_id.
     calendars: HashMap<String, gtfs::Calendar>,
-    /// Calendar exceptions: `service_id → [(date, exception_type)]`.
-    calendar_exceptions: HashMap<String, Vec<(String, u8)>>,
+    /// Calendar exceptions: `service_id → { date → exception_type }` for O(1) lookup.
+    calendar_exceptions: FxHashMap<String, FxHashMap<String, u8>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -143,7 +148,7 @@ impl RaptorData {
         let raw_transfers = gtfs.transfers.len();
 
         // Step 1: Assign numeric indices to stops
-        let mut stop_index: HashMap<String, usize> = HashMap::with_capacity(gtfs.stops.len());
+        let mut stop_index: FxHashMap<String, usize> = FxHashMap::default();
         let mut stops: Vec<gtfs::Stop> = Vec::with_capacity(gtfs.stops.len());
 
         for (id, stop) in &gtfs.stops {
@@ -156,7 +161,7 @@ impl RaptorData {
         info!("{} stops indexed", num_stops);
 
         // Step 2: Intern service_ids for O(1) active-service checks
-        let mut service_index: HashMap<String, usize> = HashMap::new();
+        let mut service_index: FxHashMap<String, usize> = FxHashMap::default();
         let mut service_ids: Vec<String> = Vec::new();
 
         for service_id in gtfs.calendars.keys() {
@@ -200,7 +205,7 @@ impl RaptorData {
 
         // Step 4: Build route patterns by grouping trips with identical stop sequences
         info!("Building route patterns...");
-        let mut pattern_map: HashMap<Vec<usize>, usize> = HashMap::new();
+        let mut pattern_map: FxHashMap<Vec<usize>, usize> = FxHashMap::default();
         let mut patterns: Vec<Pattern> = Vec::new();
 
         for (trip_id, times) in &trip_stop_times {
@@ -228,10 +233,10 @@ impl RaptorData {
             let svc_idx = service_index.get(&trip.service_id).copied().unwrap_or(0);
 
             let pattern_trip = PatternTrip {
-                trip_id: trip_id.to_string(),
                 service_idx: svc_idx,
-                headsign: trip.trip_headsign.clone(),
                 stop_times: stop_times_parsed,
+                trip_id: trip_id.to_string(),
+                headsign: trip.trip_headsign.clone(),
             };
 
             if let Some(&pat_idx) = pattern_map.get(&stop_seq) {
@@ -276,7 +281,7 @@ impl RaptorData {
 
         // Add implicit transfers between stops sharing the same parent station
         info!("Building parent station transfers...");
-        let mut parent_stops: HashMap<&str, Vec<usize>> = HashMap::new();
+        let mut parent_stops: FxHashMap<&str, Vec<usize>> = FxHashMap::default();
         for (idx, stop) in stops.iter().enumerate() {
             if !stop.parent_station.is_empty() {
                 parent_stops
@@ -291,7 +296,8 @@ impl RaptorData {
                 continue;
             }
             for &a in siblings {
-                let existing: HashSet<usize> = stop_transfers[a].iter().map(|&(t, _)| t).collect();
+                let existing: FxHashSet<usize> =
+                    stop_transfers[a].iter().map(|&(t, _)| t).collect();
                 for &b in siblings {
                     if a != b && !existing.contains(&b) {
                         stop_transfers[a].push((b, default_transfer_time));
@@ -302,13 +308,14 @@ impl RaptorData {
         }
         info!("{} parent station transfers added", parent_transfer_count);
 
-        // Calendar exceptions index
-        let mut calendar_exceptions: HashMap<String, Vec<(String, u8)>> = HashMap::new();
+        // Calendar exceptions index: service_id → { date → exception_type } for O(1) lookup
+        let mut calendar_exceptions: FxHashMap<String, FxHashMap<String, u8>> =
+            FxHashMap::default();
         for cd in &gtfs.calendar_dates {
             calendar_exceptions
                 .entry(cd.service_id.clone())
                 .or_default()
-                .push((cd.date.clone(), cd.exception_type));
+                .insert(cd.date.clone(), cd.exception_type);
         }
 
         info!("RAPTOR index built");
@@ -427,12 +434,10 @@ impl RaptorData {
     /// Check if a service runs on a given date (YYYYMMDD).
     /// Calendar exceptions (added/removed) take priority over the regular calendar.
     fn is_service_active(&self, service_id: &str, date: &str) -> bool {
-        if let Some(exceptions) = self.calendar_exceptions.get(service_id) {
-            for (exc_date, exc_type) in exceptions {
-                if exc_date == date {
-                    return *exc_type == 1; // 1 = added, 2 = removed
-                }
-            }
+        if let Some(exceptions) = self.calendar_exceptions.get(service_id)
+            && let Some(&exc_type) = exceptions.get(date)
+        {
+            return exc_type == 1; // 1 = added, 2 = removed
         }
 
         if let Some(cal) = self.calendars.get(service_id) {
@@ -585,7 +590,7 @@ pub struct RaptorResult {
 /// - `data`: pre-built RAPTOR data
 /// - `source`, `target`: numeric stop indices
 /// - `departure_time`: seconds since midnight
-/// - `date`: date in YYYYMMDD format (for service calendar filtering)
+/// - `active`: pre-computed active services bitmap (from [`RaptorData::active_services`])
 /// - `max_transfers`: maximum number of vehicle changes allowed
 /// - `excluded_patterns`: patterns to skip (used for diverse route alternatives)
 pub fn raptor_query(
@@ -593,15 +598,12 @@ pub fn raptor_query(
     source: usize,
     target: usize,
     departure_time: u32,
-    date: &str,
+    active: &[bool],
     max_transfers: usize,
-    excluded_patterns: &HashSet<usize>,
+    excluded_patterns: &FxHashSet<usize>,
 ) -> RaptorResult {
     let n = data.stops.len();
     let rounds = max_transfers.min(MAX_ROUNDS - 1) + 1;
-
-    // Pre-compute active services for this date (avoids per-trip string lookups)
-    let active = data.active_services(date);
 
     let mut tau: Vec<Vec<u32>> = vec![vec![INFINITY; n]; rounds + 1];
     let mut best: Vec<u32> = vec![INFINITY; n];
@@ -633,10 +635,17 @@ pub fn raptor_query(
         }
     }
 
+    // Pre-allocated buffers reused across rounds
+    let num_patterns = data.patterns.len();
+    let mut route_earliest: Vec<usize> = vec![usize::MAX; num_patterns]; // earliest position per pattern
+    let mut active_routes: Vec<usize> = Vec::with_capacity(num_patterns); // patterns to scan this round
+    let mut new_marked: Vec<bool> = vec![false; n];
+    let mut trip_improved: Vec<usize> = Vec::new(); // stops improved by trips (for transfers)
+
     // Main RAPTOR loop: one round per additional vehicle trip
     for k in 1..=rounds {
-        // Collect route patterns serving any marked stop
-        let mut routes_to_scan: HashMap<usize, usize> = HashMap::new();
+        // Collect route patterns serving any marked stop (Vec-based, no HashMap)
+        active_routes.clear();
         for (stop_idx, is_marked) in marked.iter().enumerate() {
             if !*is_marked {
                 continue;
@@ -645,21 +654,23 @@ pub fn raptor_query(
                 if excluded_patterns.contains(&pat_idx) {
                     continue;
                 }
-                routes_to_scan
-                    .entry(pat_idx)
-                    .and_modify(|earliest| {
-                        if pos < *earliest {
-                            *earliest = pos;
-                        }
-                    })
-                    .or_insert(pos);
+                if route_earliest[pat_idx] == usize::MAX {
+                    active_routes.push(pat_idx);
+                    route_earliest[pat_idx] = pos;
+                } else if pos < route_earliest[pat_idx] {
+                    route_earliest[pat_idx] = pos;
+                }
             }
         }
 
-        let mut new_marked: Vec<bool> = vec![false; n];
+        new_marked.fill(false);
+        trip_improved.clear();
 
         // Scan each collected route pattern
-        for (&pat_idx, &start_pos) in &routes_to_scan {
+        for &pat_idx in &active_routes {
+            let start_pos = route_earliest[pat_idx];
+            route_earliest[pat_idx] = usize::MAX; // reset for next round
+
             let pattern = &data.patterns[pat_idx];
             let mut current_trip: Option<usize> = None;
             let mut board_pos: usize = 0;
@@ -670,7 +681,7 @@ pub fn raptor_query(
                 // Try to board an earlier trip at this stop
                 if tau[k - 1][stop_idx] != INFINITY {
                     let board_time = tau[k - 1][stop_idx];
-                    let new_trip = find_earliest_trip(pattern, pos, board_time, &active);
+                    let new_trip = find_earliest_trip(pattern, pos, board_time, active);
 
                     if let Some(trip_idx) = new_trip {
                         match current_trip {
@@ -704,6 +715,7 @@ pub fn raptor_query(
                             alight_pos: pos,
                         });
                         new_marked[stop_idx] = true;
+                        trip_improved.push(stop_idx); // collect inline
                     }
                 }
             }
@@ -711,10 +723,6 @@ pub fn raptor_query(
 
         // Apply transfers ONLY from stops improved by trips (not by other transfers)
         // to prevent transitive transfer chains within a single round.
-        let trip_improved: Vec<usize> = (0..n)
-            .filter(|&s| matches!(labels[k][s], Some(Label::Trip { .. })))
-            .collect();
-
         for &stop_idx in &trip_improved {
             for &(to_stop, duration) in &data.stop_transfers[stop_idx] {
                 let arr = tau[k][stop_idx].saturating_add(duration);
@@ -730,7 +738,7 @@ pub fn raptor_query(
             }
         }
 
-        marked = new_marked;
+        std::mem::swap(&mut marked, &mut new_marked);
 
         // Early termination if no stop was improved
         if !marked.iter().any(|&m| m) {
@@ -759,22 +767,36 @@ pub fn raptor_query(
 /// Find the earliest active trip departing at or after `min_departure`
 /// at position `pos` within a pattern.
 ///
-/// Uses linear scan for correctness: trips are sorted by departure at the
-/// first stop, but not necessarily at intermediate stops.
+/// Trips are sorted by departure at the first stop. We use binary search
+/// on the first-stop departure to skip trips that depart too early, then
+/// scan forward for the best match at `pos`.
 fn find_earliest_trip(
     pattern: &Pattern,
     pos: usize,
     min_departure: u32,
     active: &[bool],
 ) -> Option<usize> {
+    let trips = &pattern.trips;
+
+    // Binary search: find first trip whose first-stop departure >= min_departure.
+    // Trips departing before this at stop 0 *might* still be valid at `pos` due to
+    // travel time, so we look back a small window for safety.
+    let pivot = trips.partition_point(|t| t.stop_times[0].1 < min_departure);
+    let start = pivot.saturating_sub(8); // look-back window for intermediate stops
+
     let mut best_dep = INFINITY;
     let mut best_idx = None;
 
-    for (idx, trip) in pattern.trips.iter().enumerate() {
+    for (idx, trip) in trips.iter().enumerate().skip(start) {
         let dep = trip.stop_times[pos].1;
         if dep >= min_departure && dep < best_dep && active[trip.service_idx] {
             best_dep = dep;
             best_idx = Some(idx);
+            // Once past the pivot, trips are roughly ordered: if we found a match
+            // and the first-stop departure is already well past our best, stop early.
+            if idx > pivot && trip.stop_times[0].1 > best_dep {
+                break;
+            }
         }
     }
 
@@ -803,7 +825,7 @@ pub struct JourneySection {
 }
 
 /// Collect the set of pattern indices used in a journey (for diversity filtering).
-pub fn used_patterns(sections: &[JourneySection]) -> HashSet<usize> {
+pub fn used_patterns(sections: &[JourneySection]) -> FxHashSet<usize> {
     sections.iter().filter_map(|s| s.pattern_idx).collect()
 }
 
@@ -1046,4 +1068,693 @@ pub fn parse_datetime(input: &str) -> Option<(String, u32)> {
         .unwrap_or(0);
 
     Some((date.to_string(), h * 3600 + m * 60 + s))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gtfs;
+
+    // -----------------------------------------------------------------------
+    // format_datetime
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn format_datetime_normal() {
+        assert_eq!(format_datetime("20260405", 0), "20260405T000000");
+        assert_eq!(format_datetime("20260405", 30600), "20260405T083000");
+        assert_eq!(format_datetime("20260405", 86399), "20260405T235959");
+    }
+
+    #[test]
+    fn format_datetime_midnight() {
+        assert_eq!(format_datetime("20260405", 86400), "20260406T000000");
+    }
+
+    #[test]
+    fn format_datetime_past_midnight() {
+        // 25h30 = 91800s → rolls over to next day 01:30
+        assert_eq!(format_datetime("20260405", 91800), "20260406T013000");
+    }
+
+    #[test]
+    fn format_datetime_month_rollover() {
+        // Jan 31 + 24h = Feb 1
+        assert_eq!(format_datetime("20260131", 86400), "20260201T000000");
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_datetime
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_datetime_with_t_and_seconds() {
+        let (date, secs) = parse_datetime("20260405T083000").unwrap();
+        assert_eq!(date, "20260405");
+        assert_eq!(secs, 8 * 3600 + 30 * 60);
+    }
+
+    #[test]
+    fn parse_datetime_with_t_no_seconds() {
+        let (date, secs) = parse_datetime("20260405T0830").unwrap();
+        assert_eq!(date, "20260405");
+        assert_eq!(secs, 8 * 3600 + 30 * 60);
+    }
+
+    #[test]
+    fn parse_datetime_no_t() {
+        let (date, secs) = parse_datetime("20260405083000").unwrap();
+        assert_eq!(date, "20260405");
+        assert_eq!(secs, 8 * 3600 + 30 * 60);
+    }
+
+    #[test]
+    fn parse_datetime_date_only() {
+        let (date, secs) = parse_datetime("20260405").unwrap();
+        assert_eq!(date, "20260405");
+        assert_eq!(secs, 8 * 3600); // defaults to 08:00
+    }
+
+    #[test]
+    fn parse_datetime_too_short() {
+        assert!(parse_datetime("2026").is_none());
+        assert!(parse_datetime("").is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // date_to_weekday
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn date_to_weekday_known_dates() {
+        // 2026-04-05 is a Sunday
+        assert_eq!(date_to_weekday("20260405"), 6);
+        // 2026-04-06 is a Monday
+        assert_eq!(date_to_weekday("20260406"), 0);
+        // 2024-01-01 was a Monday
+        assert_eq!(date_to_weekday("20240101"), 0);
+        // 2024-02-29 was a Thursday (leap year)
+        assert_eq!(date_to_weekday("20240229"), 3);
+    }
+
+    #[test]
+    fn date_to_weekday_invalid() {
+        assert_eq!(date_to_weekday("short"), 7);
+        assert_eq!(date_to_weekday(""), 7);
+    }
+
+    // -----------------------------------------------------------------------
+    // haversine_approx
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn haversine_approx_same_point() {
+        assert_eq!(haversine_approx(48.8566, 2.3522, 48.8566, 2.3522), 0.0);
+    }
+
+    #[test]
+    fn haversine_approx_different_points() {
+        let d = haversine_approx(48.8566, 2.3522, 48.8534, 2.3488);
+        assert!(d > 0.0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Helper: build a minimal RaptorData for testing
+    // -----------------------------------------------------------------------
+
+    fn make_test_gtfs() -> gtfs::GtfsData {
+        let mut stops = HashMap::new();
+        stops.insert(
+            "S1".to_string(),
+            gtfs::Stop {
+                stop_id: "S1".to_string(),
+                stop_name: "Châtelet".to_string(),
+                stop_lon: 2.347,
+                stop_lat: 48.858,
+                parent_station: "P1".to_string(),
+            },
+        );
+        stops.insert(
+            "S2".to_string(),
+            gtfs::Stop {
+                stop_id: "S2".to_string(),
+                stop_name: "Gare de Lyon".to_string(),
+                stop_lon: 2.373,
+                stop_lat: 48.844,
+                parent_station: String::new(),
+            },
+        );
+        stops.insert(
+            "S3".to_string(),
+            gtfs::Stop {
+                stop_id: "S3".to_string(),
+                stop_name: "Nation".to_string(),
+                stop_lon: 2.395,
+                stop_lat: 48.848,
+                parent_station: String::new(),
+            },
+        );
+        stops.insert(
+            "S4".to_string(),
+            gtfs::Stop {
+                stop_id: "S4".to_string(),
+                stop_name: "Châtelet Quai 2".to_string(),
+                stop_lon: 2.347,
+                stop_lat: 48.858,
+                parent_station: "P1".to_string(),
+            },
+        );
+
+        let mut routes = HashMap::new();
+        routes.insert(
+            "R1".to_string(),
+            gtfs::Route {
+                route_id: "R1".to_string(),
+                agency_id: "A1".to_string(),
+                route_short_name: "1".to_string(),
+                route_long_name: "Line 1".to_string(),
+                route_type: 1,
+                route_color: "FFCD00".to_string(),
+                route_text_color: "000000".to_string(),
+            },
+        );
+
+        let mut trips = HashMap::new();
+        trips.insert(
+            "T1".to_string(),
+            gtfs::Trip {
+                route_id: "R1".to_string(),
+                service_id: "SVC1".to_string(),
+                trip_id: "T1".to_string(),
+                trip_headsign: "Nation".to_string(),
+            },
+        );
+        trips.insert(
+            "T2".to_string(),
+            gtfs::Trip {
+                route_id: "R1".to_string(),
+                service_id: "SVC1".to_string(),
+                trip_id: "T2".to_string(),
+                trip_headsign: "Nation".to_string(),
+            },
+        );
+
+        let stop_times = vec![
+            gtfs::StopTime {
+                trip_id: "T1".to_string(),
+                arrival_time: "08:00:00".to_string(),
+                departure_time: "08:01:00".to_string(),
+                stop_id: "S1".to_string(),
+                stop_sequence: 0,
+            },
+            gtfs::StopTime {
+                trip_id: "T1".to_string(),
+                arrival_time: "08:10:00".to_string(),
+                departure_time: "08:11:00".to_string(),
+                stop_id: "S2".to_string(),
+                stop_sequence: 1,
+            },
+            gtfs::StopTime {
+                trip_id: "T1".to_string(),
+                arrival_time: "08:20:00".to_string(),
+                departure_time: "08:21:00".to_string(),
+                stop_id: "S3".to_string(),
+                stop_sequence: 2,
+            },
+            gtfs::StopTime {
+                trip_id: "T2".to_string(),
+                arrival_time: "09:00:00".to_string(),
+                departure_time: "09:01:00".to_string(),
+                stop_id: "S1".to_string(),
+                stop_sequence: 0,
+            },
+            gtfs::StopTime {
+                trip_id: "T2".to_string(),
+                arrival_time: "09:10:00".to_string(),
+                departure_time: "09:11:00".to_string(),
+                stop_id: "S2".to_string(),
+                stop_sequence: 1,
+            },
+            gtfs::StopTime {
+                trip_id: "T2".to_string(),
+                arrival_time: "09:20:00".to_string(),
+                departure_time: "09:21:00".to_string(),
+                stop_id: "S3".to_string(),
+                stop_sequence: 2,
+            },
+        ];
+
+        let mut calendars = HashMap::new();
+        calendars.insert(
+            "SVC1".to_string(),
+            gtfs::Calendar {
+                service_id: "SVC1".to_string(),
+                monday: 1,
+                tuesday: 1,
+                wednesday: 1,
+                thursday: 1,
+                friday: 1,
+                saturday: 1,
+                sunday: 1,
+                start_date: "20260101".to_string(),
+                end_date: "20261231".to_string(),
+            },
+        );
+
+        let calendar_dates = vec![gtfs::CalendarDate {
+            service_id: "SVC1".to_string(),
+            date: "20260101".to_string(),
+            exception_type: 2, // removed on Jan 1
+        }];
+
+        let transfers = vec![gtfs::Transfer {
+            from_stop_id: "S2".to_string(),
+            to_stop_id: "S3".to_string(),
+            min_transfer_time: Some(180),
+        }];
+
+        gtfs::GtfsData {
+            agencies: vec![],
+            routes,
+            stops,
+            trips,
+            stop_times,
+            calendars,
+            calendar_dates,
+            transfers,
+        }
+    }
+
+    fn build_test_data() -> RaptorData {
+        RaptorData::build(make_test_gtfs(), 120)
+    }
+
+    // -----------------------------------------------------------------------
+    // RaptorData::build
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn build_creates_patterns() {
+        let data = build_test_data();
+        assert!(!data.patterns.is_empty());
+        // Both trips share the same stop sequence → 1 pattern with 2 trips
+        assert_eq!(data.patterns.len(), 1);
+        assert_eq!(data.patterns[0].trips.len(), 2);
+    }
+
+    #[test]
+    fn build_indexes_stops() {
+        let data = build_test_data();
+        assert_eq!(data.stops.len(), 4);
+        assert!(data.stop_index.contains_key("S1"));
+        assert!(data.stop_index.contains_key("S2"));
+        assert!(data.stop_index.contains_key("S3"));
+    }
+
+    #[test]
+    fn build_creates_parent_station_transfers() {
+        let data = build_test_data();
+        // S1 and S4 share parent P1 → should have transfers between them
+        let s1 = data.stop_index["S1"];
+        let s4 = data.stop_index["S4"];
+        let s1_targets: Vec<usize> = data.stop_transfers[s1].iter().map(|&(t, _)| t).collect();
+        assert!(s1_targets.contains(&s4));
+    }
+
+    #[test]
+    fn build_creates_explicit_transfers() {
+        let data = build_test_data();
+        let s2 = data.stop_index["S2"];
+        let s3 = data.stop_index["S3"];
+        let s2_targets: Vec<(usize, u32)> = data.stop_transfers[s2].clone();
+        assert!(s2_targets.iter().any(|&(t, d)| t == s3 && d == 180));
+    }
+
+    #[test]
+    fn build_sorts_trips_by_departure() {
+        let data = build_test_data();
+        let trips = &data.patterns[0].trips;
+        assert!(trips[0].stop_times[0].1 <= trips[1].stop_times[0].1);
+    }
+
+    #[test]
+    fn build_search_index() {
+        let data = build_test_data();
+        // S4 has no patterns → should not be in search index
+        // S1, S2, S3 have patterns → should be searchable
+        assert!(data.search_index.len() >= 3);
+    }
+
+    #[test]
+    fn build_stats() {
+        let data = build_test_data();
+        assert_eq!(data.stats.stops, 4);
+        assert_eq!(data.stats.trips, 2);
+        assert_eq!(data.stats.patterns, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // active_services
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn active_services_normal_day() {
+        let data = build_test_data();
+        // 2026-04-06 is a Monday, SVC1 runs all days
+        let active = data.active_services("20260406");
+        let svc_idx = data.service_ids.iter().position(|s| s == "SVC1").unwrap();
+        assert!(active[svc_idx]);
+    }
+
+    #[test]
+    fn active_services_exception_removed() {
+        let data = build_test_data();
+        // SVC1 is removed on 20260101
+        let active = data.active_services("20260101");
+        let svc_idx = data.service_ids.iter().position(|s| s == "SVC1").unwrap();
+        assert!(!active[svc_idx]);
+    }
+
+    #[test]
+    fn active_services_outside_range() {
+        let data = build_test_data();
+        // 2027-01-01 is outside SVC1 end_date (20261231)
+        let active = data.active_services("20270101");
+        let svc_idx = data.service_ids.iter().position(|s| s == "SVC1").unwrap();
+        assert!(!active[svc_idx]);
+    }
+
+    // -----------------------------------------------------------------------
+    // search_stops
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn search_stops_exact() {
+        let data = build_test_data();
+        let results = data.search_stops("Châtelet", 5);
+        assert!(!results.is_empty());
+        // Exact match should rank first (after normalization)
+    }
+
+    #[test]
+    fn search_stops_prefix() {
+        let data = build_test_data();
+        let results = data.search_stops("Gare", 5);
+        assert!(!results.is_empty());
+        assert!(results.iter().any(|(_, name, _)| name.contains("Gare")));
+    }
+
+    #[test]
+    fn search_stops_substring() {
+        let data = build_test_data();
+        let results = data.search_stops("Lyon", 5);
+        assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn search_stops_empty_query() {
+        let data = build_test_data();
+        let results = data.search_stops("", 5);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn search_stops_no_match() {
+        let data = build_test_data();
+        let results = data.search_stops("zzzznonexistent", 5);
+        assert!(results.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // resolve_stop
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resolve_stop_by_id() {
+        let data = build_test_data();
+        let idx = data.resolve_stop("S1");
+        assert!(idx.is_some());
+        assert_eq!(idx.unwrap(), data.stop_index["S1"]);
+    }
+
+    #[test]
+    fn resolve_stop_by_coords() {
+        let data = build_test_data();
+        // lon;lat near S1 (2.347;48.858)
+        let idx = data.resolve_stop("2.347;48.858");
+        assert!(idx.is_some());
+    }
+
+    #[test]
+    fn resolve_stop_unknown() {
+        let data = build_test_data();
+        assert!(data.resolve_stop("UNKNOWN_STOP").is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // find_earliest_trip
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn find_earliest_trip_basic() {
+        let data = build_test_data();
+        let pattern = &data.patterns[0];
+        let active = data.active_services("20260406"); // Monday, SVC1 active
+        // At position 0, departure 08:01:00 = 28860, look for trip departing >= 28000
+        let result = find_earliest_trip(pattern, 0, 28000, &active);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn find_earliest_trip_too_late() {
+        let data = build_test_data();
+        let pattern = &data.patterns[0];
+        let active = data.active_services("20260406");
+        // All trips depart before 40000 at pos 0 → should return the last trip
+        let result = find_earliest_trip(pattern, 0, 99999, &active);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn find_earliest_trip_inactive_service() {
+        let data = build_test_data();
+        let pattern = &data.patterns[0];
+        let active = data.active_services("20260101"); // exception: SVC1 removed
+        let result = find_earliest_trip(pattern, 0, 0, &active);
+        assert!(result.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // raptor_query + reconstruct_journeys
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn raptor_query_simple() {
+        let data = build_test_data();
+        let source = data.stop_index["S1"];
+        let target = data.stop_index["S3"];
+        let active = data.active_services("20260406");
+        let result = raptor_query(
+            &data,
+            source,
+            target,
+            28000,
+            &active,
+            3,
+            &FxHashSet::default(),
+        );
+        let journeys = reconstruct_journeys(&data, &result, target);
+        assert!(!journeys.is_empty());
+    }
+
+    #[test]
+    fn raptor_query_same_stop() {
+        let data = build_test_data();
+        let source = data.stop_index["S1"];
+        let active = data.active_services("20260406");
+        let result = raptor_query(
+            &data,
+            source,
+            source,
+            28000,
+            &active,
+            3,
+            &FxHashSet::default(),
+        );
+        // Source is already at target → tau[0][source] == departure_time
+        assert_eq!(result.tau[0][source], 28000);
+    }
+
+    #[test]
+    fn raptor_query_no_service() {
+        let data = build_test_data();
+        let source = data.stop_index["S1"];
+        let target = data.stop_index["S3"];
+        let active = data.active_services("20260101"); // no service
+        let result = raptor_query(
+            &data,
+            source,
+            target,
+            28000,
+            &active,
+            3,
+            &FxHashSet::default(),
+        );
+        let journeys = reconstruct_journeys(&data, &result, target);
+        assert!(journeys.is_empty());
+    }
+
+    #[test]
+    fn raptor_query_with_excluded_patterns() {
+        let data = build_test_data();
+        let source = data.stop_index["S1"];
+        let target = data.stop_index["S3"];
+        let active = data.active_services("20260406");
+        // Exclude all patterns
+        let excluded: FxHashSet<usize> = (0..data.patterns.len()).collect();
+        let result = raptor_query(&data, source, target, 28000, &active, 3, &excluded);
+        let journeys = reconstruct_journeys(&data, &result, target);
+        assert!(journeys.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // used_patterns
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn used_patterns_extracts_pattern_indices() {
+        let sections = vec![
+            JourneySection {
+                section_type: SectionType::PublicTransport,
+                from_stop: 0,
+                to_stop: 1,
+                departure_time: 100,
+                arrival_time: 200,
+                pattern_idx: Some(5),
+                trip_idx: Some(0),
+                board_pos: Some(0),
+                alight_pos: Some(1),
+            },
+            JourneySection {
+                section_type: SectionType::Transfer,
+                from_stop: 1,
+                to_stop: 2,
+                departure_time: 200,
+                arrival_time: 300,
+                pattern_idx: None,
+                trip_idx: None,
+                board_pos: None,
+                alight_pos: None,
+            },
+        ];
+        let pats = used_patterns(&sections);
+        assert_eq!(pats.len(), 1);
+        assert!(pats.contains(&5));
+    }
+
+    // -----------------------------------------------------------------------
+    // Cache persistence
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn save_and_load_cache() {
+        let data = build_test_data();
+        let dir = tempfile::tempdir().unwrap();
+        let fp = "test_fp_123";
+        data.save(dir.path(), fp).unwrap();
+
+        let loaded = RaptorData::load_cached(dir.path(), fp);
+        assert!(loaded.is_some());
+        let loaded = loaded.unwrap();
+        assert_eq!(loaded.stops.len(), data.stops.len());
+        assert_eq!(loaded.patterns.len(), data.patterns.len());
+    }
+
+    #[test]
+    fn load_cache_wrong_fingerprint() {
+        let data = build_test_data();
+        let dir = tempfile::tempdir().unwrap();
+        data.save(dir.path(), "fp1").unwrap();
+
+        let loaded = RaptorData::load_cached(dir.path(), "fp_different");
+        assert!(loaded.is_none());
+    }
+
+    #[test]
+    fn load_cache_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let loaded = RaptorData::load_cached(dir.path(), "anything");
+        assert!(loaded.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // sanitize_sections
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sanitize_removes_self_loop_transfer() {
+        let sections = vec![JourneySection {
+            section_type: SectionType::Transfer,
+            from_stop: 5,
+            to_stop: 5,
+            departure_time: 100,
+            arrival_time: 100,
+            pattern_idx: None,
+            trip_idx: None,
+            board_pos: None,
+            alight_pos: None,
+        }];
+        let clean = sanitize_sections(sections);
+        assert!(clean.is_empty());
+    }
+
+    #[test]
+    fn sanitize_removes_zero_duration_pt() {
+        let sections = vec![JourneySection {
+            section_type: SectionType::PublicTransport,
+            from_stop: 0,
+            to_stop: 1,
+            departure_time: 100,
+            arrival_time: 100, // zero duration
+            pattern_idx: Some(0),
+            trip_idx: Some(0),
+            board_pos: Some(0),
+            alight_pos: Some(1),
+        }];
+        let clean = sanitize_sections(sections);
+        assert!(clean.is_empty());
+    }
+
+    #[test]
+    fn sanitize_merges_consecutive_transfers() {
+        let sections = vec![
+            JourneySection {
+                section_type: SectionType::Transfer,
+                from_stop: 0,
+                to_stop: 1,
+                departure_time: 100,
+                arrival_time: 200,
+                pattern_idx: None,
+                trip_idx: None,
+                board_pos: None,
+                alight_pos: None,
+            },
+            JourneySection {
+                section_type: SectionType::Transfer,
+                from_stop: 1,
+                to_stop: 2,
+                departure_time: 200,
+                arrival_time: 300,
+                pattern_idx: None,
+                trip_idx: None,
+                board_pos: None,
+                alight_pos: None,
+            },
+        ];
+        let clean = sanitize_sections(sections);
+        assert_eq!(clean.len(), 1);
+        assert_eq!(clean[0].from_stop, 0);
+        assert_eq!(clean[0].to_stop, 2);
+        assert_eq!(clean[0].arrival_time, 300);
+    }
 }

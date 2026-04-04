@@ -13,10 +13,12 @@ mod gtfs;
 mod raptor;
 mod text;
 
-use actix_web::{App, HttpServer, web};
+use actix_web::middleware::{self, Next};
+use actix_web::{App, HttpServer, dev, web};
 use arc_swap::ArcSwap;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use tracing::info;
 use utoipa::OpenApi;
 
@@ -29,15 +31,17 @@ async fn main() -> std::io::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&config.log_level)),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&config.server.log_level)),
         )
         .init();
 
     info!(?config);
 
     // Try loading RAPTOR index from cache, or build from GTFS
-    let data_dir = Path::new(&config.data_dir);
-    let cache_dir = Path::new(&config.raptor_dir);
+    let data_dir = config.data.gtfs_dir();
+    let cache_dir = config.data.raptor_dir();
+    let data_dir = Path::new(&data_dir);
+    let cache_dir = Path::new(&cache_dir);
     let fingerprint = gtfs::gtfs_fingerprint(data_dir);
 
     let raptor_data = if let Some(cached) = raptor::RaptorData::load_cached(cache_dir, &fingerprint)
@@ -51,7 +55,7 @@ async fn main() -> std::io::Result<()> {
                 std::process::exit(1);
             }
         };
-        let data = raptor::RaptorData::build(gtfs, config.default_transfer_time);
+        let data = raptor::RaptorData::build(gtfs, config.routing.default_transfer_time);
         if let Err(e) = data.save(cache_dir, &fingerprint) {
             tracing::warn!("Failed to save RAPTOR cache: {e}");
         }
@@ -67,24 +71,31 @@ async fn main() -> std::io::Result<()> {
     let shared_data = web::Data::new(ArcSwap::from(raptor_data));
 
     // Load BAN address data (from cache or CSV)
-    let ban_dir = Path::new(&config.ban_dir);
+    let ban_dir = config.data.ban_dir();
+    let ban_dir = Path::new(&ban_dir);
     let ban_fingerprint = ban::BanData::fingerprint(ban_dir);
-    let ban_data = if let Some(cached) = ban::BanData::load_cached(cache_dir, &ban_fingerprint) {
+    let ban_data = if let Some(cached) = ban::BanData::load_cached(ban_dir, &ban_fingerprint) {
         Arc::new(cached)
     } else {
         let data = ban::BanData::load(ban_dir);
-        if let Err(e) = data.save(cache_dir, &ban_fingerprint) {
+        if let Err(e) = data.save(ban_dir, &ban_fingerprint) {
             tracing::warn!("Failed to save BAN cache: {e}");
         }
         Arc::new(data)
     };
     let shared_ban = web::Data::new(ban_data);
 
-    info!("Starting server on http://{}:{}", config.bind, config.port);
+    // Initialize metrics start time
+    api::metrics::init_start_time();
 
-    let bind = config.bind.clone();
-    let port = config.port;
-    let workers = config.workers;
+    info!(
+        "Starting server on http://{}:{}",
+        config.server.bind, config.server.port
+    );
+
+    let bind = config.server.bind.clone();
+    let port = config.server.port;
+    let workers = config.server.workers;
     let config = web::Data::new(config);
 
     #[derive(OpenApi)]
@@ -101,6 +112,7 @@ async fn main() -> std::io::Result<()> {
             api::get_car,
             api::get_places,
             api::get_status,
+            api::get_metrics,
             api::post_reload,
         ),
         components(schemas(
@@ -142,6 +154,7 @@ async fn main() -> std::io::Result<()> {
 
     let mut server = HttpServer::new(move || {
         App::new()
+            .wrap(middleware::from_fn(metrics_middleware))
             .app_data(shared_data.clone())
             .app_data(shared_ban.clone())
             .app_data(config.clone())
@@ -152,6 +165,7 @@ async fn main() -> std::io::Result<()> {
             .service(api::get_bike)
             .service(api::get_car)
             .service(api::get_journeys)
+            .service(api::get_metrics)
             .service(api::post_reload)
             .route(
                 "/api-docs/openapi.json",
@@ -169,4 +183,17 @@ async fn main() -> std::io::Result<()> {
     }
 
     server.bind((bind.as_str(), port))?.run().await
+}
+
+/// Middleware that counts HTTP requests and errors for Prometheus metrics.
+async fn metrics_middleware(
+    req: dev::ServiceRequest,
+    next: Next<impl actix_web::body::MessageBody>,
+) -> Result<dev::ServiceResponse<impl actix_web::body::MessageBody>, actix_web::Error> {
+    api::metrics::HTTP_REQUESTS_TOTAL.fetch_add(1, Ordering::Relaxed);
+    let res = next.call(req).await?;
+    if res.status().is_client_error() || res.status().is_server_error() {
+        api::metrics::HTTP_ERRORS_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
+    Ok(res)
 }

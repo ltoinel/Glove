@@ -63,6 +63,66 @@ html, body, #root {
   border-top-color: rgba(12, 12, 20, 0.88) !important;
 }
 
+/* Origin label — green accent pill */
+.leaflet-tooltip.origin-label {
+  background: linear-gradient(135deg, rgba(0, 230, 118, 0.18) 0%, rgba(12, 12, 20, 0.94) 50%) !important;
+  backdrop-filter: blur(12px) saturate(1.4) !important;
+  border: 1.5px solid rgba(0, 230, 118, 0.4) !important;
+  box-shadow:
+    0 4px 24px rgba(0, 0, 0, 0.5),
+    0 0 16px rgba(0, 230, 118, 0.15),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08) !important;
+  border-radius: 20px !important;
+  padding: 6px 16px 6px 12px !important;
+  font-family: 'Syne', sans-serif !important;
+  font-size: 12.5px !important;
+  font-weight: 700 !important;
+  color: #f0eff8 !important;
+  white-space: nowrap !important;
+  letter-spacing: -0.01em !important;
+}
+.leaflet-tooltip.origin-label span::before {
+  content: '●';
+  color: #00e676;
+  margin-right: 7px;
+  font-size: 9px;
+  vertical-align: 1px;
+  text-shadow: 0 0 8px rgba(0, 230, 118, 0.7);
+}
+.leaflet-tooltip.origin-label::before {
+  border-top-color: rgba(0, 230, 118, 0.35) !important;
+}
+
+/* Destination label — red accent pill */
+.leaflet-tooltip.dest-label {
+  background: linear-gradient(135deg, rgba(255, 82, 82, 0.18) 0%, rgba(12, 12, 20, 0.94) 50%) !important;
+  backdrop-filter: blur(12px) saturate(1.4) !important;
+  border: 1.5px solid rgba(255, 82, 82, 0.4) !important;
+  box-shadow:
+    0 4px 24px rgba(0, 0, 0, 0.5),
+    0 0 16px rgba(255, 82, 82, 0.15),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08) !important;
+  border-radius: 20px !important;
+  padding: 6px 16px 6px 12px !important;
+  font-family: 'Syne', sans-serif !important;
+  font-size: 12.5px !important;
+  font-weight: 700 !important;
+  color: #f0eff8 !important;
+  white-space: nowrap !important;
+  letter-spacing: -0.01em !important;
+}
+.leaflet-tooltip.dest-label span::before {
+  content: '◆';
+  color: #ff5252;
+  margin-right: 7px;
+  font-size: 9px;
+  vertical-align: 0px;
+  text-shadow: 0 0 8px rgba(255, 82, 82, 0.7);
+}
+.leaflet-tooltip.dest-label::before {
+  border-top-color: rgba(255, 82, 82, 0.35) !important;
+}
+
 /* Leaflet controls dark style */
 .leaflet-control-zoom a {
   background: rgba(12, 12, 20, 0.85) !important;

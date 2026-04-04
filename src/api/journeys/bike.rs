@@ -29,7 +29,7 @@ pub struct BikeQuery {
 // Valhalla request / response types
 // ---------------------------------------------------------------------------
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct ValhallaLocation {
     lat: f64,
     lon: f64,
@@ -110,7 +110,7 @@ pub struct BikeResponse {
 /// A cycling journey from origin to destination.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct BikeJourney {
-    /// Bike type: "bike" or "ebike".
+    /// Bike profile: "city", "ebike", or "road".
     #[serde(rename = "type")]
     pub bike_type: String,
     /// Total duration in seconds.
@@ -123,6 +123,8 @@ pub struct BikeJourney {
     pub elevation_loss: u32,
     /// Encoded polyline shape of the route.
     pub shape: String,
+    /// Elevation values (meters) sampled along the route.
+    pub heights: Vec<f64>,
     /// Turn-by-turn maneuvers.
     pub maneuvers: Vec<Maneuver>,
 }
@@ -222,7 +224,20 @@ fn compute_elevation(heights: &[f64]) -> (u32, u32) {
 /// E-bike speed factor relative to standard bicycle.
 /// Valhalla's bicycle costing assumes ~18 km/h average.
 /// E-bikes average ~25 km/h, so duration is scaled by 18/25.
-const EBIKE_SPEED_FACTOR: f64 = 0.72;
+/// Build Valhalla bicycle costing_options from a bike profile.
+fn bike_costing_options(profile: &crate::config::BikeProfile) -> serde_json::Value {
+    serde_json::json!({
+        "bicycle": {
+            "cycling_speed": profile.cycling_speed,
+            "use_roads": profile.use_roads,
+            "use_hills": profile.use_hills,
+            "bicycle_type": profile.bicycle_type
+        }
+    })
+}
+
+/// Bike profile definitions: (config field accessor, response type name).
+const BIKE_PROFILES: &[&str] = &["city", "ebike", "road"];
 
 /// Fetch elevation data from Valhalla's /height endpoint.
 async fn fetch_elevation(
@@ -264,13 +279,14 @@ async fn fetch_elevation(
 
 /// Compute cycling journeys between two coordinates via Valhalla.
 ///
-/// Returns two variants: standard bicycle and e-bike (with adjusted duration).
+/// Returns three variants: city bike, e-bike, and road bike — each with its
+/// own Valhalla routing profile (speed, road/hill preferences, bicycle type).
 #[utoipa::path(
     get,
     path = "/api/journeys/bike",
     params(BikeQuery),
     responses(
-        (status = 200, description = "Cycling journeys (bike + e-bike)", body = BikeResponse),
+        (status = 200, description = "Cycling journeys (city, e-bike, road)", body = BikeResponse),
         (status = 400, description = "Invalid parameters"),
         (status = 502, description = "Valhalla routing engine error"),
     ),
@@ -296,7 +312,7 @@ pub async fn get_bike(query: web::Query<BikeQuery>, config: web::Data<AppConfig>
         }
     };
 
-    let valhalla_base = format!("http://{}:{}", config.valhalla_host, config.valhalla_port);
+    let valhalla_base = format!("http://{}:{}", config.valhalla.host, config.valhalla.port);
     let valhalla_url = format!("{}/route", valhalla_base);
 
     let locations = vec![
@@ -310,55 +326,72 @@ pub async fn get_bike(query: web::Query<BikeQuery>, config: web::Data<AppConfig>
         },
     ];
 
-    let valhalla_req = ValhallaRequest {
-        locations,
-        costing: "bicycle".to_string(),
-        costing_options: None,
-        directions_options: ValhallaDirectionsOptions {
-            units: "kilometers".to_string(),
-        },
-    };
-
     let client = reqwest::Client::new();
-    let resp = match client.post(&valhalla_url).json(&valhalla_req).send().await {
-        Ok(r) => r,
-        Err(e) => {
-            return HttpResponse::BadGateway().json(serde_json::json!({
-                "error": { "id": "valhalla_error", "message": format!("Failed to reach Valhalla: {e}") }
-            }));
+
+    let profiles = [
+        (&config.bike.city, BIKE_PROFILES[0]),
+        (&config.bike.ebike, BIKE_PROFILES[1]),
+        (&config.bike.road, BIKE_PROFILES[2]),
+    ];
+
+    let mut journeys = Vec::with_capacity(profiles.len());
+
+    for (profile, type_name) in &profiles {
+        let req = ValhallaRequest {
+            locations: locations.clone(),
+            costing: "bicycle".to_string(),
+            costing_options: Some(bike_costing_options(profile)),
+            directions_options: ValhallaDirectionsOptions {
+                units: "kilometers".to_string(),
+            },
+        };
+
+        let resp = client.post(&valhalla_url).json(&req).send().await;
+        match process_valhalla_response(resp, type_name, &client, &valhalla_base).await {
+            Ok(j) => journeys.push(j),
+            Err(e) => return e,
         }
-    };
+    }
+
+    HttpResponse::Ok().json(BikeResponse { journeys })
+}
+
+/// Process a Valhalla route response into a BikeJourney, or return an HTTP error.
+async fn process_valhalla_response(
+    resp: Result<reqwest::Response, reqwest::Error>,
+    bike_type: &str,
+    client: &reqwest::Client,
+    valhalla_base: &str,
+) -> Result<BikeJourney, HttpResponse> {
+    let resp = resp.map_err(|e| {
+        HttpResponse::BadGateway().json(serde_json::json!({
+            "error": { "id": "valhalla_error", "message": format!("Failed to reach Valhalla: {e}") }
+        }))
+    })?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return HttpResponse::BadGateway().json(serde_json::json!({
+        return Err(HttpResponse::BadGateway().json(serde_json::json!({
             "error": { "id": "valhalla_error", "message": format!("Valhalla returned {status}: {body}") }
-        }));
+        })));
     }
 
-    let valhalla_resp: ValhallaResponse = match resp.json().await {
-        Ok(r) => r,
-        Err(e) => {
-            return HttpResponse::BadGateway().json(serde_json::json!({
-                "error": { "id": "valhalla_error", "message": format!("Invalid Valhalla response: {e}") }
-            }));
-        }
-    };
+    let valhalla_resp: ValhallaResponse = resp.json().await.map_err(|e| {
+        HttpResponse::BadGateway().json(serde_json::json!({
+            "error": { "id": "valhalla_error", "message": format!("Invalid Valhalla response: {e}") }
+        }))
+    })?;
 
     let trip = &valhalla_resp.trip;
-    let leg = match trip.legs.first() {
-        Some(l) => l,
-        None => {
-            return HttpResponse::BadGateway().json(serde_json::json!({
-                "error": { "id": "valhalla_error", "message": "Valhalla returned no route legs" }
-            }));
-        }
-    };
+    let leg = trip.legs.first().ok_or_else(|| {
+        HttpResponse::BadGateway().json(serde_json::json!({
+            "error": { "id": "valhalla_error", "message": "Valhalla returned no route legs" }
+        }))
+    })?;
 
-    // Decode polyline and fetch elevation data
     let coords = decode_polyline(&leg.shape);
-    let heights = fetch_elevation(&client, &valhalla_base, &coords).await;
+    let heights = fetch_elevation(client, valhalla_base, &coords).await;
     let (elevation_gain, elevation_loss) = compute_elevation(&heights);
 
     let maneuvers: Vec<Maneuver> = leg
@@ -371,40 +404,14 @@ pub async fn get_bike(query: web::Query<BikeQuery>, config: web::Data<AppConfig>
         })
         .collect();
 
-    let bike_duration = trip.summary.time as u32;
-    let distance = (trip.summary.length * 1000.0) as u32;
-
-    let ebike_duration = (trip.summary.time * EBIKE_SPEED_FACTOR).round() as u32;
-    let ebike_maneuvers: Vec<Maneuver> = leg
-        .maneuvers
-        .iter()
-        .map(|m| Maneuver {
-            instruction: m.instruction.clone(),
-            distance: (m.length * 1000.0) as u32,
-            duration: (m.time * EBIKE_SPEED_FACTOR).round() as u32,
-        })
-        .collect();
-
-    HttpResponse::Ok().json(BikeResponse {
-        journeys: vec![
-            BikeJourney {
-                bike_type: "bike".to_string(),
-                duration: bike_duration,
-                distance,
-                elevation_gain,
-                elevation_loss,
-                shape: leg.shape.clone(),
-                maneuvers,
-            },
-            BikeJourney {
-                bike_type: "ebike".to_string(),
-                duration: ebike_duration,
-                distance,
-                elevation_gain,
-                elevation_loss,
-                shape: leg.shape.clone(),
-                maneuvers: ebike_maneuvers,
-            },
-        ],
+    Ok(BikeJourney {
+        bike_type: bike_type.to_string(),
+        duration: trip.summary.time as u32,
+        distance: (trip.summary.length * 1000.0) as u32,
+        elevation_gain,
+        elevation_loss,
+        shape: leg.shape.clone(),
+        heights,
+        maneuvers,
     })
 }

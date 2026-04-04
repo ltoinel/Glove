@@ -1,41 +1,52 @@
 # Glove configuration
 
-# Server
-bind: "0.0.0.0"
-port: 8080
+server:
+  bind: "0.0.0.0"
+  port: 8080
+  workers: 1                    # 0 = auto (one per logical CPU)
+  log_level: "info"             # trace, debug, info, warn, error
 
-# Data directories
-data_dir: "data/gtfs"
-osm_dir: "data/osm"
-ban_dir: "data/ban"
-sirene_dir: "data/sirene"
+data:
+  dir: "data"                   # sub-dirs gtfs/, osm/, raptor/, ban/ are implicit
+  gtfs_url: "https://data.iledefrance-mobilites.fr/explore/dataset/offre-horaires-tc-gtfs-idfm/files/a925e164271e4bca93433756d6a340d1/download/"
+  osm_url: "https://download.geofabrik.de/europe/france/ile-de-france-latest.osm.pbf"
+  ban_url: "https://adresse.data.gouv.fr/data/ban/adresses/latest/csv"
+  departments: [75, 77, 78, 91, 92, 93, 94, 95]
 
-# Download URLs
-gtfs_url: "https://data.iledefrance-mobilites.fr/explore/dataset/offre-horaires-tc-gtfs-idfm/files/a925e164271e4bca93433756d6a340d1/download/"
-osm_url: "https://download.geofabrik.de/europe/france/ile-de-france-latest.osm.pbf"
-ban_url: "https://adresse.data.gouv.fr/data/ban/adresses/latest/csv"
-sirene_url: "https://data.iledefrance.fr/api/explore/v2.1/catalog/datasets/base-sirene/exports/csv?lang=fr&timezone=Europe%2FBerlin&use_labels=true&delimiter=%3B"
+routing:
+  max_journeys: 5
+  max_transfers: 5
+  default_transfer_time: 120    # seconds
+  max_duration: 10800           # 3 hours in seconds
 
-# Covered departments
-departments: [75, 77, 78, 91, 92, 93, 94, 95]
+valhalla:
+  host: "localhost"
+  port: 8002
 
-# Routing
-max_journeys: 5
-max_transfers: 5
-default_transfer_time: 120  # seconds
-max_duration: 10800         # 3 hours in seconds
+map:
+  zoom: 11
+  center_lat: 48.8566
+  center_lon: 2.3522
+  bounds_sw_lat: 48.1          # South-west corner (Île-de-France)
+  bounds_sw_lon: 1.4
+  bounds_ne_lat: 49.3          # North-east corner
+  bounds_ne_lon: 3.6
 
-# Server workers (0 = auto, uses number of logical CPUs)
-workers: 0
+bike:
+  city:                         # City bike (Velib' mécanique)
+    cycling_speed: 16.0         # km/h — realistic in dense urban areas
+    use_roads: 0.2              # prefer bike lanes
+    use_hills: 0.3              # avoid climbs
+    bicycle_type: "City"
 
-# Valhalla routing engine
-valhalla_host: "localhost"
-valhalla_port: 8002
+  ebike:                        # E-bike (VAE / Velib' électrique)
+    cycling_speed: 21.0         # km/h — motor cuts at 25, avg ~21
+    use_roads: 0.4              # accept sharing roads for speed
+    use_hills: 0.8              # climbs are easy with motor assist
+    bicycle_type: "Hybrid"
 
-# Map defaults
-map_center_lat: 48.8566
-map_center_lon: 2.3522
-map_zoom: 11
-
-# Logging (trace, debug, info, warn, error)
-log_level: "info"
+  road:                         # Road bike (fast commuter)
+    cycling_speed: 25.0         # km/h — cruising speed on good roads
+    use_roads: 0.6              # prefer smooth tarmac
+    use_hills: 0.5              # effort accepted but not sought
+    bicycle_type: "Road"

@@ -166,7 +166,7 @@ pub async fn get_walk(query: web::Query<WalkQuery>, config: web::Data<AppConfig>
 
     let valhalla_url = format!(
         "http://{}:{}/route",
-        config.valhalla_host, config.valhalla_port
+        config.valhalla.host, config.valhalla.port
     );
 
     let valhalla_req = ValhallaRequest {

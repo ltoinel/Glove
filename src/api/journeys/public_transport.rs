@@ -220,30 +220,37 @@ pub async fn get_journeys(
     let max_transfers = query
         .max_nb_transfers
         .map(|n| n.max(0) as usize)
-        .unwrap_or(config.max_transfers);
+        .unwrap_or(config.routing.max_transfers);
 
     let max_duration = query
         .max_duration
         .map(|n| n.max(0) as u32)
-        .unwrap_or(config.max_duration);
+        .unwrap_or(config.routing.max_duration);
 
     let requested = query
         .count
         .or(query.max_nb_journeys)
-        .map(|n| (n.max(1) as usize).min(config.max_journeys))
-        .unwrap_or(config.max_journeys);
+        .map(|n| (n.max(1) as usize).min(config.routing.max_journeys))
+        .unwrap_or(config.routing.max_journeys);
+
+    // Pre-compute active services once for all diversity iterations
+    let active = raptor_data.active_services(&date);
 
     // Iterative search with pattern exclusion for route diversity
     let mut journeys: Vec<Journey> = Vec::new();
-    let mut excluded_patterns = std::collections::HashSet::new();
+    let mut excluded_patterns = rustc_hash::FxHashSet::default();
 
     for _ in 0..requested {
+        if journeys.len() >= requested {
+            break;
+        }
+
         let result = raptor::raptor_query(
             &raptor_data,
             source,
             target,
             departure_time,
-            &date,
+            &active,
             max_transfers,
             &excluded_patterns,
         );
@@ -253,26 +260,23 @@ pub async fn get_journeys(
             break;
         }
 
-        let sections = &section_sets[0];
-        let journey = build_journey(&raptor_data, sections, &date);
-
-        if journey.duration > max_duration {
-            for sections in &section_sets {
-                excluded_patterns.extend(raptor::used_patterns(sections));
-            }
-            continue;
-        }
-
-        let dominated = journeys.iter().any(|existing| {
-            existing.departure_date_time == journey.departure_date_time
-                && existing.arrival_date_time == journey.arrival_date_time
-        });
-
-        if !dominated {
-            journeys.push(journey);
-        }
-
+        // Exploit all Pareto-optimal journeys from this RAPTOR run
         for sections in &section_sets {
+            let journey = build_journey(&raptor_data, sections, &date);
+
+            if journey.duration > max_duration {
+                continue;
+            }
+
+            let dominated = journeys.iter().any(|existing| {
+                existing.departure_date_time == journey.departure_date_time
+                    && existing.arrival_date_time == journey.arrival_date_time
+            });
+
+            if !dominated {
+                journeys.push(journey);
+            }
+
             excluded_patterns.extend(raptor::used_patterns(sections));
         }
     }

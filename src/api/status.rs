@@ -81,8 +81,10 @@ pub async fn get_status(
             "services": s.services,
         },
         "map": {
-            "center": [config.map_center_lat, config.map_center_lon],
-            "zoom": config.map_zoom,
+            "center": [config.map.center_lat, config.map.center_lon],
+            "zoom": config.map.zoom,
+            "bounds": [[config.map.bounds_sw_lat, config.map.bounds_sw_lon],
+                        [config.map.bounds_ne_lat, config.map.bounds_ne_lon]],
         }
     }))
 }
@@ -106,9 +108,9 @@ pub async fn post_reload(
     shared: web::Data<ArcSwap<RaptorData>>,
     config: web::Data<AppConfig>,
 ) -> HttpResponse {
-    let data_dir = config.data_dir.clone();
-    let raptor_dir = config.raptor_dir.clone();
-    let transfer_time = config.default_transfer_time;
+    let data_dir = config.data.gtfs_dir();
+    let raptor_dir = config.data.raptor_dir();
+    let transfer_time = config.routing.default_transfer_time;
 
     let result = web::block(move || {
         let data_path = std::path::Path::new(&data_dir);
