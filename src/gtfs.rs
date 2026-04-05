@@ -387,4 +387,159 @@ mod tests {
             "expected an error when loading from a non-existent directory"
         );
     }
+
+    /// Write all 8 required GTFS files with a header and the given rows into
+    /// `dir`. `rows` is a slice of `(filename, row_content)` pairs.
+    fn write_gtfs_dir(dir: &TempDir, files: &[(&str, &str)]) {
+        for (name, content) in files {
+            let path = dir.path().join(name);
+            let mut f =
+                std::fs::File::create(&path).unwrap_or_else(|e| panic!("create {name}: {e}"));
+            write!(f, "{content}").unwrap_or_else(|e| panic!("write {name}: {e}"));
+        }
+    }
+
+    /// Returns a complete set of minimal valid GTFS file contents (header + 1 row
+    /// each) as a vector of `(filename, content)` pairs.
+    fn minimal_gtfs_files() -> Vec<(&'static str, String)> {
+        vec![
+            (
+                "agency.txt",
+                "agency_id,agency_name,agency_url,agency_timezone\n\
+                 A1,Test Agency,http://example.com,Europe/Paris\n"
+                    .to_string(),
+            ),
+            (
+                "routes.txt",
+                "route_id,agency_id,route_short_name,route_long_name,route_type,route_color,route_text_color\n\
+                 R1,A1,1,Line One,3,FF0000,FFFFFF\n"
+                    .to_string(),
+            ),
+            (
+                "stops.txt",
+                "stop_id,stop_name,stop_lon,stop_lat,parent_station\n\
+                 S1,Central,2.3522,48.8566,\n\
+                 S2,Airport,2.5479,49.0097,\n"
+                    .to_string(),
+            ),
+            (
+                "trips.txt",
+                "route_id,service_id,trip_id,trip_headsign\n\
+                 R1,SVC1,T1,Headsign A\n"
+                    .to_string(),
+            ),
+            (
+                "stop_times.txt",
+                "trip_id,arrival_time,departure_time,stop_id,stop_sequence\n\
+                 T1,08:00:00,08:00:00,S1,0\n\
+                 T1,08:10:00,08:10:00,S2,1\n"
+                    .to_string(),
+            ),
+            (
+                "calendar.txt",
+                "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\n\
+                 SVC1,1,1,1,1,1,0,0,20260101,20261231\n"
+                    .to_string(),
+            ),
+            (
+                "calendar_dates.txt",
+                "service_id,date,exception_type\n\
+                 SVC1,20260414,2\n"
+                    .to_string(),
+            ),
+            (
+                "transfers.txt",
+                "from_stop_id,to_stop_id,min_transfer_time\n\
+                 S1,S2,120\n"
+                    .to_string(),
+            ),
+        ]
+    }
+
+    #[test]
+    fn gtfs_load_valid_minimal_dataset() {
+        let dir = TempDir::new().expect("failed to create temp dir");
+        let files = minimal_gtfs_files();
+        let pairs: Vec<(&str, &str)> = files.iter().map(|(n, c)| (*n, c.as_str())).collect();
+        write_gtfs_dir(&dir, &pairs);
+
+        let data = GtfsData::load(dir.path()).expect("GtfsData::load should succeed");
+
+        assert_eq!(data.agencies.len(), 1, "expected 1 agency");
+        assert_eq!(data.routes.len(), 1, "expected 1 route");
+        assert!(data.routes.contains_key("R1"), "route R1 should be present");
+        assert_eq!(data.stops.len(), 2, "expected 2 stops");
+        assert!(data.stops.contains_key("S1"), "stop S1 should be present");
+        assert!(data.stops.contains_key("S2"), "stop S2 should be present");
+        assert_eq!(data.trips.len(), 1, "expected 1 trip");
+        assert!(data.trips.contains_key("T1"), "trip T1 should be present");
+        assert_eq!(data.stop_times.len(), 2, "expected 2 stop_times");
+        assert_eq!(data.calendars.len(), 1, "expected 1 calendar");
+        assert!(
+            data.calendars.contains_key("SVC1"),
+            "calendar SVC1 should be present"
+        );
+        assert_eq!(data.calendar_dates.len(), 1, "expected 1 calendar_date");
+        assert_eq!(data.transfers.len(), 1, "expected 1 transfer");
+    }
+
+    #[test]
+    fn gtfs_load_skips_malformed_rows() {
+        let dir = TempDir::new().expect("failed to create temp dir");
+        let mut files = minimal_gtfs_files();
+
+        // Replace stops.txt with a version that has one good row, one malformed
+        // row (wrong number of fields — too few), and one good row.
+        // The malformed row should be silently skipped by load_csv.
+        let stops_content = "stop_id,stop_name,stop_lon,stop_lat,parent_station\n\
+             S1,Central,2.3522,48.8566,\n\
+             MALFORMED_ROW_MISSING_FIELDS\n\
+             S2,Airport,2.5479,49.0097,\n"
+            .to_string();
+
+        if let Some(entry) = files.iter_mut().find(|(n, _)| *n == "stops.txt") {
+            entry.1 = stops_content;
+        }
+
+        let pairs: Vec<(&str, &str)> = files.iter().map(|(n, c)| (*n, c.as_str())).collect();
+        write_gtfs_dir(&dir, &pairs);
+
+        let data = GtfsData::load(dir.path()).expect("GtfsData::load should succeed");
+
+        // Only the 2 well-formed stop rows should be present; the malformed one
+        // must be skipped.
+        assert_eq!(
+            data.stops.len(),
+            2,
+            "malformed row should be skipped, leaving 2 valid stops"
+        );
+        assert!(data.stops.contains_key("S1"), "stop S1 should be present");
+        assert!(data.stops.contains_key("S2"), "stop S2 should be present");
+    }
+
+    #[test]
+    fn gtfs_fingerprint_changes_when_any_gtfs_file_modified() {
+        let dir = TempDir::new().expect("failed to create temp dir");
+        let files = minimal_gtfs_files();
+        let pairs: Vec<(&str, &str)> = files.iter().map(|(n, c)| (*n, c.as_str())).collect();
+        write_gtfs_dir(&dir, &pairs);
+
+        let fp_before = gtfs_fingerprint(dir.path());
+
+        // Append a new row to routes.txt so its file size grows.
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(dir.path().join("routes.txt"))
+                .expect("open routes.txt for append");
+            writeln!(f, "R2,A1,2,Line Two,3,00FF00,000000").expect("append row to routes.txt");
+        }
+
+        let fp_after = gtfs_fingerprint(dir.path());
+
+        assert_ne!(
+            fp_before, fp_after,
+            "fingerprint must change when a GTFS file is modified"
+        );
+    }
 }

@@ -108,3 +108,207 @@ pub async fn get_places(
 
     HttpResponse::Ok().json(serde_json::json!({ "places": places }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ban, config, gtfs, raptor};
+    use std::collections::HashMap;
+
+    fn make_test_data() -> (Arc<RaptorData>, Arc<BanData>) {
+        let mut stops = HashMap::new();
+        stops.insert(
+            "S1".into(),
+            gtfs::Stop {
+                stop_id: "S1".into(),
+                stop_name: "Châtelet".into(),
+                stop_lon: 2.347,
+                stop_lat: 48.858,
+                parent_station: String::new(),
+            },
+        );
+        stops.insert(
+            "S2".into(),
+            gtfs::Stop {
+                stop_id: "S2".into(),
+                stop_name: "Nation".into(),
+                stop_lon: 2.395,
+                stop_lat: 48.848,
+                parent_station: String::new(),
+            },
+        );
+        let mut trips = HashMap::new();
+        trips.insert(
+            "T1".into(),
+            gtfs::Trip {
+                route_id: "R1".into(),
+                service_id: "SVC1".into(),
+                trip_id: "T1".into(),
+                trip_headsign: "Nation".into(),
+            },
+        );
+        let stop_times = vec![
+            gtfs::StopTime {
+                trip_id: "T1".into(),
+                arrival_time: "08:00:00".into(),
+                departure_time: "08:01:00".into(),
+                stop_id: "S1".into(),
+                stop_sequence: 0,
+            },
+            gtfs::StopTime {
+                trip_id: "T1".into(),
+                arrival_time: "08:10:00".into(),
+                departure_time: "08:11:00".into(),
+                stop_id: "S2".into(),
+                stop_sequence: 1,
+            },
+        ];
+        let mut calendars = HashMap::new();
+        calendars.insert(
+            "SVC1".into(),
+            gtfs::Calendar {
+                service_id: "SVC1".into(),
+                monday: 1,
+                tuesday: 1,
+                wednesday: 1,
+                thursday: 1,
+                friday: 1,
+                saturday: 1,
+                sunday: 1,
+                start_date: "20260101".into(),
+                end_date: "20261231".into(),
+            },
+        );
+        let mut routes = HashMap::new();
+        routes.insert(
+            "R1".into(),
+            gtfs::Route {
+                route_id: "R1".into(),
+                agency_id: "A1".into(),
+                route_short_name: "1".into(),
+                route_long_name: "Line 1".into(),
+                route_type: 1,
+                route_color: String::new(),
+                route_text_color: String::new(),
+            },
+        );
+        let gtfs_data = gtfs::GtfsData {
+            agencies: vec![],
+            routes,
+            stops,
+            trips,
+            stop_times,
+            calendars,
+            calendar_dates: vec![],
+            transfers: vec![],
+        };
+        let raptor_data = Arc::new(raptor::RaptorData::build(gtfs_data, 120));
+        let ban_data = Arc::new(ban::BanData {
+            entries: vec![ban::BanEntry {
+                label: "Rue de Rivoli, 75001 Paris".into(),
+                name_lower: crate::text::normalize("Rue de Rivoli, 75001 Paris"),
+                lon: 2.3387,
+                lat: 48.8606,
+            }],
+        });
+        (raptor_data, ban_data)
+    }
+
+    #[actix_web::test]
+    async fn places_short_query() {
+        let (raptor, ban) = make_test_data();
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(web::Data::new(ArcSwap::from(raptor)))
+                .app_data(web::Data::new(ban))
+                .service(get_places),
+        )
+        .await;
+        let req = actix_web::test::TestRequest::get()
+            .uri("/api/places?q=a")
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = actix_web::test::read_body_json(resp).await;
+        assert!(body["places"].as_array().unwrap().is_empty());
+    }
+
+    #[actix_web::test]
+    async fn places_returns_stops_first() {
+        let (raptor, ban) = make_test_data();
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(web::Data::new(ArcSwap::from(raptor)))
+                .app_data(web::Data::new(ban))
+                .service(get_places),
+        )
+        .await;
+        // "at" matches "Châtelet" (stop) and "Rivoli" won't match
+        let req = actix_web::test::TestRequest::get()
+            .uri("/api/places?q=chatelet")
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = actix_web::test::read_body_json(resp).await;
+        let places = body["places"].as_array().unwrap();
+        assert!(!places.is_empty());
+        assert_eq!(places[0]["type"], "stop");
+    }
+
+    #[actix_web::test]
+    async fn places_strips_numbers() {
+        let (raptor, ban) = make_test_data();
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(web::Data::new(ArcSwap::from(raptor)))
+                .app_data(web::Data::new(ban))
+                .service(get_places),
+        )
+        .await;
+        // "12 nation" → strips "12" → searches "nation"
+        let req = actix_web::test::TestRequest::get()
+            .uri("/api/places?q=12%20nation")
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = actix_web::test::read_body_json(resp).await;
+        let places = body["places"].as_array().unwrap();
+        assert!(!places.is_empty());
+    }
+
+    #[actix_web::test]
+    async fn places_returns_addresses() {
+        let (raptor, ban) = make_test_data();
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(web::Data::new(ArcSwap::from(raptor)))
+                .app_data(web::Data::new(ban))
+                .service(get_places),
+        )
+        .await;
+        let req = actix_web::test::TestRequest::get()
+            .uri("/api/places?q=rivoli")
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+        let body: serde_json::Value = actix_web::test::read_body_json(resp).await;
+        let places = body["places"].as_array().unwrap();
+        assert!(places.iter().any(|p| p["type"] == "address"));
+    }
+
+    #[actix_web::test]
+    async fn places_no_query() {
+        let (raptor, ban) = make_test_data();
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(web::Data::new(ArcSwap::from(raptor)))
+                .app_data(web::Data::new(ban))
+                .service(get_places),
+        )
+        .await;
+        let req = actix_web::test::TestRequest::get()
+            .uri("/api/places")
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+    }
+}

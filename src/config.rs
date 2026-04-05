@@ -522,4 +522,113 @@ routing:
 
         let _ = std::fs::remove_file(path);
     }
+
+    #[test]
+    fn data_config_derived_dirs() {
+        let data = DataConfig {
+            dir: "mydata".to_string(),
+            ..DataConfig::default()
+        };
+        assert_eq!(data.gtfs_dir(), "mydata/gtfs");
+        assert_eq!(data.osm_dir(), "mydata/osm");
+        assert_eq!(data.raptor_dir(), "mydata/raptor");
+        assert_eq!(data.ban_dir(), "mydata/ban");
+    }
+
+    #[test]
+    fn bike_profile_defaults() {
+        let cfg = AppConfig::default();
+        assert_eq!(cfg.bike.city.bicycle_type, "City");
+        assert!((cfg.bike.city.use_roads - 0.2).abs() < 1e-6);
+        assert!((cfg.bike.city.use_hills - 0.3).abs() < 1e-6);
+        assert_eq!(cfg.bike.ebike.bicycle_type, "Hybrid");
+        assert!((cfg.bike.ebike.use_roads - 0.4).abs() < 1e-6);
+        assert!((cfg.bike.ebike.use_hills - 0.8).abs() < 1e-6);
+        assert_eq!(cfg.bike.road.bicycle_type, "Road");
+        assert!((cfg.bike.road.use_roads - 0.6).abs() < 1e-6);
+        assert!((cfg.bike.road.use_hills - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn map_config_defaults() {
+        let cfg = AppConfig::default();
+        assert!((cfg.map.bounds_sw_lat - 48.1).abs() < 1e-6);
+        assert!((cfg.map.bounds_sw_lon - 1.4).abs() < 1e-6);
+        assert!((cfg.map.bounds_ne_lat - 49.3).abs() < 1e-6);
+        assert!((cfg.map.bounds_ne_lon - 3.6).abs() < 1e-6);
+    }
+
+    #[test]
+    fn load_yaml_with_bike_profiles() {
+        let path = Path::new("/tmp/glove_test_bike_config.yaml");
+        let yaml = r#"
+bike:
+  city:
+    cycling_speed: 12.0
+    use_roads: 0.1
+    use_hills: 0.2
+    bicycle_type: "Mountain"
+  ebike:
+    cycling_speed: 18.0
+  road:
+    cycling_speed: 30.0
+    bicycle_type: "Road"
+"#;
+        std::fs::write(path, yaml).unwrap();
+        let cfg = AppConfig::load(path);
+        assert!((cfg.bike.city.cycling_speed - 12.0).abs() < 1e-6);
+        assert_eq!(cfg.bike.city.bicycle_type, "Mountain");
+        assert!((cfg.bike.ebike.cycling_speed - 18.0).abs() < 1e-6);
+        // ebike defaults for unspecified fields
+        assert!((cfg.bike.ebike.use_roads - 0.5).abs() < 1e-6);
+        assert!((cfg.bike.road.cycling_speed - 30.0).abs() < 1e-6);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn load_yaml_with_map_bounds() {
+        let path = Path::new("/tmp/glove_test_map_bounds.yaml");
+        let yaml = r#"
+map:
+  center_lat: 43.0
+  center_lon: 5.0
+  zoom: 13
+  bounds_sw_lat: 42.0
+  bounds_sw_lon: 4.0
+  bounds_ne_lat: 44.0
+  bounds_ne_lon: 6.0
+"#;
+        std::fs::write(path, yaml).unwrap();
+        let cfg = AppConfig::load(path);
+        assert!((cfg.map.center_lat - 43.0).abs() < 1e-6);
+        assert_eq!(cfg.map.zoom, 13);
+        assert!((cfg.map.bounds_sw_lat - 42.0).abs() < 1e-6);
+        assert!((cfg.map.bounds_ne_lon - 6.0).abs() < 1e-6);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn server_config_defaults() {
+        let s = ServerConfig::default();
+        assert_eq!(s.bind, "0.0.0.0");
+        assert_eq!(s.port, 8080);
+        assert_eq!(s.workers, 0);
+        assert_eq!(s.log_level, "info");
+    }
+
+    #[test]
+    fn routing_config_defaults() {
+        let r = RoutingConfig::default();
+        assert_eq!(r.max_journeys, 5);
+        assert_eq!(r.max_transfers, 5);
+        assert_eq!(r.default_transfer_time, 120);
+        assert_eq!(r.max_duration, 10800);
+    }
+
+    #[test]
+    fn valhalla_config_defaults() {
+        let v = ValhallaConfig::default();
+        assert_eq!(v.host, "localhost");
+        assert_eq!(v.port, 8002);
+    }
 }

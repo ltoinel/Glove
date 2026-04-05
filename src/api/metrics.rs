@@ -301,4 +301,62 @@ mod tests {
         HTTP_REQUESTS_TOTAL.fetch_add(1, Ordering::Relaxed);
         assert_eq!(HTTP_REQUESTS_TOTAL.load(Ordering::Relaxed), before + 1);
     }
+
+    #[test]
+    fn write_metric_large_integer() {
+        let mut out = String::new();
+        write_metric(&mut out, "big", "Big value.", "counter", 1_000_000.0);
+        assert!(out.contains("big 1000000"));
+    }
+
+    #[test]
+    fn write_metric_negative() {
+        let mut out = String::new();
+        write_metric(&mut out, "neg", "Negative.", "gauge", -5.0);
+        assert!(out.contains("neg -5"));
+    }
+
+    #[test]
+    fn parse_kb_with_extra_whitespace() {
+        assert_eq!(parse_kb("   2048   kB   "), 2048);
+    }
+
+    #[test]
+    fn parse_kb_plain_number() {
+        assert_eq!(parse_kb("512"), 512);
+    }
+
+    #[test]
+    fn proc_memory_rss_less_than_vsize() {
+        let (rss, vsize) = proc_memory();
+        if rss > 0 && vsize > 0 {
+            assert!(rss <= vsize);
+        }
+    }
+
+    #[test]
+    fn error_counter_increments() {
+        let before = HTTP_ERRORS_TOTAL.load(Ordering::Relaxed);
+        HTTP_ERRORS_TOTAL.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(HTTP_ERRORS_TOTAL.load(Ordering::Relaxed), before + 1);
+    }
+
+    #[actix_web::test]
+    async fn get_metrics_returns_prometheus_format() {
+        init_start_time();
+        let app = actix_web::test::init_service(actix_web::App::new().service(get_metrics)).await;
+        let req = actix_web::test::TestRequest::get()
+            .uri("/api/metrics")
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+        let body = actix_web::test::read_body(resp).await;
+        let text = std::str::from_utf8(&body).unwrap();
+        assert!(text.contains("# HELP process_cpu_seconds_total"));
+        assert!(text.contains("# TYPE process_cpu_seconds_total counter"));
+        assert!(text.contains("process_resident_memory_bytes"));
+        assert!(text.contains("process_uptime_seconds"));
+        assert!(text.contains("glove_http_requests_total"));
+        assert!(text.contains("glove_http_errors_total"));
+    }
 }

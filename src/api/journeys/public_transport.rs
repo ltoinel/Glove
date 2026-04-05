@@ -451,3 +451,355 @@ fn tag_journeys(journeys: &mut [Journey]) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gtfs;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn make_test_raptor_data() -> Arc<RaptorData> {
+        let mut stops = HashMap::new();
+        for (id, name, lon, lat) in &[
+            ("S1", "StopA", 2.347, 48.858),
+            ("S2", "StopB", 2.373, 48.844),
+            ("S3", "StopC", 2.395, 48.848),
+        ] {
+            stops.insert(
+                id.to_string(),
+                gtfs::Stop {
+                    stop_id: id.to_string(),
+                    stop_name: name.to_string(),
+                    stop_lon: *lon,
+                    stop_lat: *lat,
+                    parent_station: String::new(),
+                },
+            );
+        }
+        let mut routes = HashMap::new();
+        routes.insert(
+            "R1".to_string(),
+            gtfs::Route {
+                route_id: "R1".to_string(),
+                agency_id: "A1".to_string(),
+                route_short_name: "1".to_string(),
+                route_long_name: "Line 1".to_string(),
+                route_type: 1,
+                route_color: "FFCD00".to_string(),
+                route_text_color: "000000".to_string(),
+            },
+        );
+        let mut trips = HashMap::new();
+        trips.insert(
+            "T1".to_string(),
+            gtfs::Trip {
+                route_id: "R1".to_string(),
+                service_id: "SVC1".to_string(),
+                trip_id: "T1".to_string(),
+                trip_headsign: "StopC".to_string(),
+            },
+        );
+        let stop_times = vec![
+            gtfs::StopTime {
+                trip_id: "T1".into(),
+                arrival_time: "08:00:00".into(),
+                departure_time: "08:01:00".into(),
+                stop_id: "S1".into(),
+                stop_sequence: 0,
+            },
+            gtfs::StopTime {
+                trip_id: "T1".into(),
+                arrival_time: "08:10:00".into(),
+                departure_time: "08:11:00".into(),
+                stop_id: "S2".into(),
+                stop_sequence: 1,
+            },
+            gtfs::StopTime {
+                trip_id: "T1".into(),
+                arrival_time: "08:20:00".into(),
+                departure_time: "08:21:00".into(),
+                stop_id: "S3".into(),
+                stop_sequence: 2,
+            },
+        ];
+        let mut calendars = HashMap::new();
+        calendars.insert(
+            "SVC1".to_string(),
+            gtfs::Calendar {
+                service_id: "SVC1".into(),
+                monday: 1,
+                tuesday: 1,
+                wednesday: 1,
+                thursday: 1,
+                friday: 1,
+                saturday: 1,
+                sunday: 1,
+                start_date: "20260101".into(),
+                end_date: "20261231".into(),
+            },
+        );
+        let gtfs_data = gtfs::GtfsData {
+            agencies: vec![],
+            routes,
+            stops,
+            trips,
+            stop_times,
+            calendars,
+            calendar_dates: vec![],
+            transfers: vec![],
+        };
+        Arc::new(raptor::RaptorData::build(gtfs_data, 120))
+    }
+
+    fn make_test_config() -> AppConfig {
+        AppConfig::default()
+    }
+
+    // -----------------------------------------------------------------------
+    // tag_journeys
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn tag_journeys_empty() {
+        let mut journeys: Vec<Journey> = vec![];
+        tag_journeys(&mut journeys);
+        assert!(journeys.is_empty());
+    }
+
+    #[test]
+    fn tag_journeys_single() {
+        let mut journeys = vec![Journey {
+            departure_date_time: "20260406T080100".into(),
+            arrival_date_time: "20260406T082000".into(),
+            duration: 1140,
+            nb_transfers: 0,
+            tags: vec![],
+            sections: vec![],
+        }];
+        tag_journeys(&mut journeys);
+        assert!(journeys[0].tags.contains(&"fastest".to_string()));
+    }
+
+    #[test]
+    fn tag_journeys_diverse() {
+        let mut journeys = vec![
+            Journey {
+                departure_date_time: "20260406T080100".into(),
+                arrival_date_time: "20260406T082000".into(),
+                duration: 1140,
+                nb_transfers: 2,
+                tags: vec![],
+                sections: vec![Section {
+                    section_type: "transfer".into(),
+                    from: crate::api::Place {
+                        id: "a".into(),
+                        name: "a".into(),
+                        stop_point: None,
+                    },
+                    to: crate::api::Place {
+                        id: "b".into(),
+                        name: "b".into(),
+                        stop_point: None,
+                    },
+                    departure_date_time: "20260406T081000".into(),
+                    arrival_date_time: "20260406T081200".into(),
+                    duration: 300,
+                    display_informations: None,
+                    stop_date_times: None,
+                }],
+            },
+            Journey {
+                departure_date_time: "20260406T080100".into(),
+                arrival_date_time: "20260406T083000".into(),
+                duration: 1740,
+                nb_transfers: 0,
+                tags: vec![],
+                sections: vec![],
+            },
+        ];
+        tag_journeys(&mut journeys);
+        assert!(journeys[0].tags.contains(&"fastest".to_string()));
+        assert!(journeys[1].tags.contains(&"least_transfers".to_string()));
+        assert!(journeys[1].tags.contains(&"least_walking".to_string()));
+    }
+
+    // -----------------------------------------------------------------------
+    // build_journey
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn build_journey_from_sections() {
+        let data = make_test_raptor_data();
+        let source = data.stop_index["S1"];
+        let target = data.stop_index["S3"];
+        let active = data.active_services("20260406");
+        let result = raptor::raptor_query(
+            &data,
+            source,
+            target,
+            28000,
+            &active,
+            3,
+            &rustc_hash::FxHashSet::default(),
+        );
+        let section_sets = raptor::reconstruct_journeys(&data, &result, target);
+        assert!(!section_sets.is_empty());
+        let journey = build_journey(&data, &section_sets[0], "20260406");
+        assert!(journey.duration > 0);
+        assert!(!journey.sections.is_empty());
+        assert!(journey.departure_date_time.contains('T'));
+        assert!(journey.arrival_date_time.contains('T'));
+    }
+
+    #[test]
+    fn build_journey_has_display_info() {
+        let data = make_test_raptor_data();
+        let source = data.stop_index["S1"];
+        let target = data.stop_index["S3"];
+        let active = data.active_services("20260406");
+        let result = raptor::raptor_query(
+            &data,
+            source,
+            target,
+            28000,
+            &active,
+            3,
+            &rustc_hash::FxHashSet::default(),
+        );
+        let section_sets = raptor::reconstruct_journeys(&data, &result, target);
+        let journey = build_journey(&data, &section_sets[0], "20260406");
+        let pt_sections: Vec<_> = journey
+            .sections
+            .iter()
+            .filter(|s| s.section_type == "public_transport")
+            .collect();
+        assert!(!pt_sections.is_empty());
+        let di = pt_sections[0].display_informations.as_ref().unwrap();
+        assert_eq!(di.label, "1");
+        assert_eq!(di.commercial_mode, "metro");
+        assert_eq!(di.color, "FFCD00");
+    }
+
+    // -----------------------------------------------------------------------
+    // HTTP handler integration tests
+    // -----------------------------------------------------------------------
+
+    #[actix_web::test]
+    async fn get_journeys_missing_from() {
+        let data = make_test_raptor_data();
+        let shared = web::Data::new(ArcSwap::from(data));
+        let config = web::Data::new(make_test_config());
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(shared)
+                .app_data(config)
+                .service(get_journeys),
+        )
+        .await;
+        let req = actix_web::test::TestRequest::get()
+            .uri("/api/journeys/public_transport?to=S1")
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 400);
+    }
+
+    #[actix_web::test]
+    async fn get_journeys_missing_to() {
+        let data = make_test_raptor_data();
+        let shared = web::Data::new(ArcSwap::from(data));
+        let config = web::Data::new(make_test_config());
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(shared)
+                .app_data(config)
+                .service(get_journeys),
+        )
+        .await;
+        let req = actix_web::test::TestRequest::get()
+            .uri("/api/journeys/public_transport?from=S1")
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 400);
+    }
+
+    #[actix_web::test]
+    async fn get_journeys_unknown_stop() {
+        let data = make_test_raptor_data();
+        let shared = web::Data::new(ArcSwap::from(data));
+        let config = web::Data::new(make_test_config());
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(shared)
+                .app_data(config)
+                .service(get_journeys),
+        )
+        .await;
+        let req = actix_web::test::TestRequest::get()
+            .uri("/api/journeys/public_transport?from=UNKNOWN&to=S1")
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 400);
+    }
+
+    #[actix_web::test]
+    async fn get_journeys_invalid_datetime() {
+        let data = make_test_raptor_data();
+        let shared = web::Data::new(ArcSwap::from(data));
+        let config = web::Data::new(make_test_config());
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(shared)
+                .app_data(config)
+                .service(get_journeys),
+        )
+        .await;
+        let req = actix_web::test::TestRequest::get()
+            .uri("/api/journeys/public_transport?from=S1&to=S3&datetime=bad")
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 400);
+    }
+
+    #[actix_web::test]
+    async fn get_journeys_success() {
+        let data = make_test_raptor_data();
+        let shared = web::Data::new(ArcSwap::from(data));
+        let config = web::Data::new(make_test_config());
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(shared)
+                .app_data(config)
+                .service(get_journeys),
+        )
+        .await;
+        let req = actix_web::test::TestRequest::get()
+            .uri("/api/journeys/public_transport?from=S1&to=S3&datetime=20260406T080000")
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = actix_web::test::read_body_json(resp).await;
+        let journeys = body["journeys"].as_array().unwrap();
+        assert!(!journeys.is_empty());
+        assert!(journeys[0]["duration"].as_u64().unwrap() > 0);
+    }
+
+    #[actix_web::test]
+    async fn get_journeys_default_datetime() {
+        let data = make_test_raptor_data();
+        let shared = web::Data::new(ArcSwap::from(data));
+        let config = web::Data::new(make_test_config());
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(shared)
+                .app_data(config)
+                .service(get_journeys),
+        )
+        .await;
+        let req = actix_web::test::TestRequest::get()
+            .uri("/api/journeys/public_transport?from=S1&to=S3")
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+    }
+}

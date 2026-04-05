@@ -164,3 +164,103 @@ pub async fn post_reload(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{config::AppConfig, gtfs, raptor};
+    use std::collections::HashMap;
+
+    fn make_test_raptor() -> Arc<RaptorData> {
+        let mut stops = HashMap::new();
+        stops.insert(
+            "S1".into(),
+            gtfs::Stop {
+                stop_id: "S1".into(),
+                stop_name: "A".into(),
+                stop_lon: 2.0,
+                stop_lat: 48.0,
+                parent_station: String::new(),
+            },
+        );
+        let mut routes = HashMap::new();
+        routes.insert(
+            "R1".into(),
+            gtfs::Route {
+                route_id: "R1".into(),
+                agency_id: "A1".into(),
+                route_short_name: "1".into(),
+                route_long_name: "L".into(),
+                route_type: 1,
+                route_color: String::new(),
+                route_text_color: String::new(),
+            },
+        );
+        let mut trips = HashMap::new();
+        trips.insert(
+            "T1".into(),
+            gtfs::Trip {
+                route_id: "R1".into(),
+                service_id: "SVC1".into(),
+                trip_id: "T1".into(),
+                trip_headsign: "A".into(),
+            },
+        );
+        let stop_times = vec![gtfs::StopTime {
+            trip_id: "T1".into(),
+            arrival_time: "08:00:00".into(),
+            departure_time: "08:01:00".into(),
+            stop_id: "S1".into(),
+            stop_sequence: 0,
+        }];
+        let mut calendars = HashMap::new();
+        calendars.insert(
+            "SVC1".into(),
+            gtfs::Calendar {
+                service_id: "SVC1".into(),
+                monday: 1,
+                tuesday: 1,
+                wednesday: 1,
+                thursday: 1,
+                friday: 1,
+                saturday: 1,
+                sunday: 1,
+                start_date: "20260101".into(),
+                end_date: "20261231".into(),
+            },
+        );
+        let gtfs_data = gtfs::GtfsData {
+            agencies: vec![],
+            routes,
+            stops,
+            trips,
+            stop_times,
+            calendars,
+            calendar_dates: vec![],
+            transfers: vec![],
+        };
+        Arc::new(raptor::RaptorData::build(gtfs_data, 120))
+    }
+
+    #[actix_web::test]
+    async fn status_returns_ok() {
+        let data = make_test_raptor();
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(web::Data::new(ArcSwap::from(data)))
+                .app_data(web::Data::new(AppConfig::default()))
+                .service(get_status),
+        )
+        .await;
+        let req = actix_web::test::TestRequest::get()
+            .uri("/api/status")
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = actix_web::test::read_body_json(resp).await;
+        assert_eq!(body["status"], "ok");
+        assert!(body["gtfs"]["stops"].as_u64().unwrap() > 0);
+        assert!(body["map"]["center"].is_array());
+        assert!(body["map"]["bounds"].is_array());
+    }
+}

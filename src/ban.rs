@@ -449,4 +449,86 @@ mod tests {
         let fp = BanData::fingerprint(Path::new("/nonexistent"));
         assert_eq!(fp.len(), 64);
     }
+
+    #[test]
+    fn load_csv_skips_empty_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let csv_path = dir.path().join("adresses-75.csv");
+        // Rows with empty nom_voie or code_postal should be skipped
+        std::fs::write(
+            &csv_path,
+            "id;nom_voie;code_postal;nom_commune;lon;lat\n\
+             1;;75001;Paris;2.33;48.86\n\
+             2;Rue Test;;Paris;2.33;48.86\n\
+             3;Rue Valid;75001;Paris;2.33;48.86\n",
+        )
+        .unwrap();
+        let ban = BanData::load(dir.path());
+        assert_eq!(ban.entries.len(), 1);
+        assert!(ban.entries[0].label.contains("Rue Valid"));
+    }
+
+    #[test]
+    fn load_csv_skips_invalid_coords() {
+        let dir = tempfile::tempdir().unwrap();
+        let csv_path = dir.path().join("adresses-75.csv");
+        std::fs::write(
+            &csv_path,
+            "id;nom_voie;code_postal;nom_commune;lon;lat\n\
+             1;Rue A;75001;Paris;not_a_number;48.86\n\
+             2;Rue B;75001;Paris;2.33;not_a_number\n\
+             3;Rue C;75001;Paris;2.33;48.86\n",
+        )
+        .unwrap();
+        let ban = BanData::load(dir.path());
+        assert_eq!(ban.entries.len(), 1);
+    }
+
+    #[test]
+    fn load_csv_ignores_non_adresses_files() {
+        let dir = tempfile::tempdir().unwrap();
+        // This file should be ignored (wrong prefix)
+        std::fs::write(
+            dir.path().join("other.csv"),
+            "id;nom_voie;code_postal;nom_commune;lon;lat\n1;Rue X;75001;Paris;2.33;48.86\n",
+        )
+        .unwrap();
+        let ban = BanData::load(dir.path());
+        assert!(ban.entries.is_empty());
+    }
+
+    #[test]
+    fn load_cache_corrupted_data() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("ban.fingerprint"), "fp1").unwrap();
+        std::fs::write(dir.path().join("ban.bin"), b"corrupted").unwrap();
+        let loaded = BanData::load_cached(dir.path(), "fp1");
+        assert!(loaded.is_none());
+    }
+
+    #[test]
+    fn search_word_prefix() {
+        let ban = BanData {
+            entries: vec![BanEntry {
+                label: "Place de la Republique, 75003 Paris".to_string(),
+                name_lower: normalize("Place de la Republique, 75003 Paris"),
+                lon: 2.36,
+                lat: 48.87,
+            }],
+        };
+        // "rep" should match via word-prefix on "republique"
+        let results = ban.search("rep", 10);
+        assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn fingerprint_changes_on_file_modification() {
+        let dir = tempfile::tempdir().unwrap();
+        let csv = dir.path().join("adresses-75.csv");
+        std::fs::write(&csv, "header\nrow1\n").unwrap();
+        let fp1 = BanData::fingerprint(dir.path());
+        std::fs::write(&csv, "header\nrow1\nrow2\n").unwrap();
+        let fp2 = BanData::fingerprint(dir.path());
+        assert_ne!(fp1, fp2);
+    }
 }

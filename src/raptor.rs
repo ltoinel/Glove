@@ -1757,4 +1757,196 @@ mod tests {
         assert_eq!(clean[0].to_stop, 2);
         assert_eq!(clean[0].arrival_time, 300);
     }
+
+    // -----------------------------------------------------------------------
+    // active_services — weekday coverage
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn active_services_each_weekday() {
+        let data = build_test_data();
+        let svc_idx = data.service_ids.iter().position(|s| s == "SVC1").unwrap();
+        // SVC1 has all days = 1, valid 20260101-20261231
+        // Test each weekday within range (week of 2026-04-06 Mon to 2026-04-12 Sun)
+        for date in &[
+            "20260406", "20260407", "20260408", "20260409", "20260410", "20260411", "20260412",
+        ] {
+            let active = data.active_services(date);
+            assert!(active[svc_idx], "SVC1 should be active on {date}");
+        }
+    }
+
+    #[test]
+    fn active_services_no_calendar_no_exception() {
+        // Service ID that exists in neither calendar nor calendar_dates
+        let mut gtfs = make_test_gtfs();
+        gtfs.trips.insert(
+            "T_ORPHAN".to_string(),
+            gtfs::Trip {
+                route_id: "R1".to_string(),
+                service_id: "SVC_ORPHAN".to_string(),
+                trip_id: "T_ORPHAN".to_string(),
+                trip_headsign: "Nowhere".to_string(),
+            },
+        );
+        let data = RaptorData::build(gtfs, 120);
+        let svc_idx = data
+            .service_ids
+            .iter()
+            .position(|s| s == "SVC_ORPHAN")
+            .unwrap();
+        let active = data.active_services("20260406");
+        assert!(!active[svc_idx]);
+    }
+
+    #[test]
+    fn active_services_exception_added() {
+        let mut gtfs = make_test_gtfs();
+        // Add a service that only runs via exception (no calendar entry)
+        gtfs.calendar_dates.push(gtfs::CalendarDate {
+            service_id: "SVC_SPECIAL".to_string(),
+            date: "20260501".to_string(),
+            exception_type: 1, // added
+        });
+        let data = RaptorData::build(gtfs, 120);
+        let svc_idx = data
+            .service_ids
+            .iter()
+            .position(|s| s == "SVC_SPECIAL")
+            .unwrap();
+        let active = data.active_services("20260501");
+        assert!(active[svc_idx]);
+        // Different date → not active (no calendar, no exception)
+        let active2 = data.active_services("20260502");
+        assert!(!active2[svc_idx]);
+    }
+
+    // -----------------------------------------------------------------------
+    // raptor_query — transfer via improved stops
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn raptor_query_uses_transfers() {
+        let data = build_test_data();
+        let source = data.stop_index["S1"];
+        let target = data.stop_index["S3"];
+        let active = data.active_services("20260406");
+        let result = raptor_query(
+            &data,
+            source,
+            target,
+            28000,
+            &active,
+            3,
+            &FxHashSet::default(),
+        );
+        let journeys = reconstruct_journeys(&data, &result, target);
+        assert!(!journeys.is_empty());
+        // Journey should have at least one PT section
+        let has_pt = journeys[0]
+            .iter()
+            .any(|s| matches!(s.section_type, SectionType::PublicTransport));
+        assert!(has_pt);
+    }
+
+    #[test]
+    fn raptor_query_departure_after_last_trip() {
+        let data = build_test_data();
+        let source = data.stop_index["S1"];
+        let target = data.stop_index["S3"];
+        let active = data.active_services("20260406");
+        // Departure at 23:00 — after all trips (last departs at 09:01)
+        let result = raptor_query(
+            &data,
+            source,
+            target,
+            82800,
+            &active,
+            3,
+            &FxHashSet::default(),
+        );
+        let journeys = reconstruct_journeys(&data, &result, target);
+        assert!(journeys.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // format_datetime — edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn format_datetime_invalid_date() {
+        // Short date string — should fallback gracefully
+        let result = format_datetime("bad", 90000);
+        assert!(result.contains("T"));
+    }
+
+    #[test]
+    fn format_datetime_multi_day_rollover() {
+        // 48h = 172800s → +2 days
+        assert_eq!(format_datetime("20260405", 172800), "20260407T000000");
+    }
+
+    // -----------------------------------------------------------------------
+    // sanitize_sections — PT from==to
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sanitize_removes_pt_same_stop() {
+        let sections = vec![JourneySection {
+            section_type: SectionType::PublicTransport,
+            from_stop: 3,
+            to_stop: 3, // same stop
+            departure_time: 100,
+            arrival_time: 200,
+            pattern_idx: Some(0),
+            trip_idx: Some(0),
+            board_pos: Some(0),
+            alight_pos: Some(0),
+        }];
+        let clean = sanitize_sections(sections);
+        assert!(clean.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // resolve_stop — nearest stop by coords
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resolve_stop_nearest_returns_closest() {
+        let data = build_test_data();
+        // Coords very close to S2 (lon=2.373, lat=48.844)
+        let idx = data.resolve_stop("2.374;48.845").unwrap();
+        let s2 = data.stop_index["S2"];
+        assert_eq!(idx, s2);
+    }
+
+    #[test]
+    fn resolve_stop_invalid_coords() {
+        let data = build_test_data();
+        assert!(data.resolve_stop("notlon;notlat").is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // search_stops — limit
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn search_stops_respects_limit() {
+        let data = build_test_data();
+        let results = data.search_stops("a", 1);
+        assert!(results.len() <= 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Cache — corrupted data
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn load_cache_corrupted_data() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("raptor.fingerprint"), "fp1").unwrap();
+        std::fs::write(dir.path().join("raptor.bin"), b"not valid bincode").unwrap();
+        let loaded = RaptorData::load_cached(dir.path(), "fp1");
+        assert!(loaded.is_none());
+    }
 }
