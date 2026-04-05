@@ -22,6 +22,8 @@ pub struct WalkQuery {
     pub from: String,
     /// Destination as `lon;lat`.
     pub to: String,
+    /// Walking speed in km/h (Valhalla range: 0.5–25.5, default ≈ 5.1).
+    pub walking_speed: Option<f64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -38,6 +40,8 @@ struct ValhallaLocation {
 struct ValhallaRequest {
     locations: Vec<ValhallaLocation>,
     costing: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    costing_options: Option<serde_json::Value>,
     directions_options: ValhallaDirectionsOptions,
 }
 
@@ -169,6 +173,12 @@ pub async fn get_walk(query: web::Query<WalkQuery>, config: web::Data<AppConfig>
         config.valhalla.host, config.valhalla.port
     );
 
+    // Build costing_options with walking speed if provided (Valhalla range: 0.5–25.5 km/h)
+    let costing_options = query.walking_speed.map(|speed| {
+        let clamped = speed.clamp(0.5, 25.5);
+        serde_json::json!({ "pedestrian": { "walking_speed": clamped } })
+    });
+
     let valhalla_req = ValhallaRequest {
         locations: vec![
             ValhallaLocation {
@@ -181,6 +191,7 @@ pub async fn get_walk(query: web::Query<WalkQuery>, config: web::Data<AppConfig>
             },
         ],
         costing: "pedestrian".to_string(),
+        costing_options,
         directions_options: ValhallaDirectionsOptions {
             units: "kilometers".to_string(),
         },

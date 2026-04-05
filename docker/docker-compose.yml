@@ -1,0 +1,32 @@
+services:
+  glove:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    ports:
+      - "8080:8080"
+    volumes:
+      - ../data:/app/data
+      - ../config.yaml:/app/config.yaml:ro
+    depends_on:
+      valhalla:
+        condition: service_healthy
+    restart: unless-stopped
+
+  valhalla:
+    image: ghcr.io/gis-ops/docker-valhalla/valhalla:latest
+    ports:
+      - "8002:8002"
+    volumes:
+      - ../data/osm:/custom_files
+    environment:
+      - tile_urls=http://download.geofabrik.de/europe/france/ile-de-france-latest.osm.pbf
+      - serve_tiles=True
+      - build_admins=False
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8002/status"]
+      interval: 30s
+      timeout: 5s
+      start_period: 120s
+      retries: 3
+    restart: unless-stopped

@@ -9,6 +9,25 @@ use utoipa::ToSchema;
 use crate::config::AppConfig;
 use crate::raptor::RaptorData;
 
+/// Check Valhalla connectivity by hitting its /status endpoint.
+async fn check_valhalla(config: &AppConfig) -> bool {
+    let url = format!(
+        "http://{}:{}/status",
+        config.valhalla.host, config.valhalla.port
+    );
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build();
+    match client {
+        Ok(c) => c
+            .get(&url)
+            .send()
+            .await
+            .is_ok_and(|r| r.status().is_success()),
+        Err(_) => false,
+    }
+}
+
 /// GTFS data statistics.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct GtfsStats {
@@ -63,9 +82,13 @@ pub async fn get_status(
 ) -> HttpResponse {
     let raptor_data = shared.load();
     let s = &raptor_data.stats;
+    let valhalla_ok = check_valhalla(&config).await;
     HttpResponse::Ok().json(serde_json::json!({
-        "status": "ok",
+        "status": if valhalla_ok { "ok" } else { "degraded" },
         "loaded_at": s.loaded_at.to_rfc3339(),
+        "dependencies": {
+            "valhalla": if valhalla_ok { "ok" } else { "unreachable" },
+        },
         "gtfs": {
             "agencies": s.agencies,
             "routes": s.routes,
@@ -99,15 +122,37 @@ pub async fn get_status(
     path = "/api/reload",
     responses(
         (status = 200, description = "GTFS data reloaded successfully", body = ReloadResponse),
+        (status = 401, description = "Invalid or missing API key"),
+        (status = 403, description = "Reload endpoint disabled (no api_key configured)"),
         (status = 500, description = "Reload failed"),
     ),
+    security(("api_key" = [])),
     tag = "Status"
 )]
 #[post("/api/reload")]
 pub async fn post_reload(
+    req: actix_web::HttpRequest,
     shared: web::Data<ArcSwap<RaptorData>>,
     config: web::Data<AppConfig>,
 ) -> HttpResponse {
+    // --- API key authentication ---
+    let expected_key = &config.server.api_key;
+    if expected_key.is_empty() {
+        return HttpResponse::Forbidden().json(serde_json::json!({
+            "error": { "id": "disabled", "message": "Reload endpoint is disabled (no api_key configured)" }
+        }));
+    }
+    let provided_key = req
+        .headers()
+        .get("X-Api-Key")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if provided_key != expected_key {
+        return HttpResponse::Unauthorized().json(serde_json::json!({
+            "error": { "id": "unauthorized", "message": "Invalid or missing X-Api-Key header" }
+        }));
+    }
+
     let data_dir = config.data.gtfs_dir();
     let raptor_dir = config.data.raptor_dir();
     let transfer_time = config.routing.default_transfer_time;
@@ -258,7 +303,10 @@ mod tests {
         let resp = actix_web::test::call_service(&app, req).await;
         assert_eq!(resp.status(), 200);
         let body: serde_json::Value = actix_web::test::read_body_json(resp).await;
-        assert_eq!(body["status"], "ok");
+        // Status is "degraded" when Valhalla is not running (test environment)
+        let status = body["status"].as_str().unwrap();
+        assert!(status == "ok" || status == "degraded");
+        assert!(body["dependencies"]["valhalla"].is_string());
         assert!(body["gtfs"]["stops"].as_u64().unwrap() > 0);
         assert!(body["map"]["center"].is_array());
         assert!(body["map"]["bounds"].is_array());

@@ -1,0 +1,8 @@
+target
+data
+portal/node_modules
+portal/dist
+.git
+.claude
+.vscode
+.idea

@@ -13,13 +13,15 @@ mod gtfs;
 mod raptor;
 mod text;
 
+use actix_cors::Cors;
+use actix_governor::{Governor, GovernorConfigBuilder};
 use actix_web::middleware::{self, Next};
 use actix_web::{App, HttpServer, dev, web};
 use arc_swap::ArcSwap;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use tracing::info;
+use tracing::{info, warn};
 use utoipa::OpenApi;
 
 #[actix_web::main]
@@ -93,9 +95,17 @@ async fn main() -> std::io::Result<()> {
         config.server.bind, config.server.port
     );
 
+    // Warn if no API key is set — admin endpoints will be disabled
+    if config.server.api_key.is_empty() {
+        warn!("No server.api_key configured — POST /api/reload is DISABLED");
+    }
+
     let bind = config.server.bind.clone();
     let port = config.server.port;
     let workers = config.server.workers;
+    let shutdown_timeout = config.server.shutdown_timeout;
+    let cors_origins = config.server.cors_origins.clone();
+    let rate_limit = config.server.rate_limit;
     let config = web::Data::new(config);
 
     #[derive(OpenApi)]
@@ -150,10 +160,43 @@ async fn main() -> std::io::Result<()> {
     )]
     struct ApiDoc;
 
-    let openapi_json = web::Data::new(ApiDoc::openapi().to_json().unwrap());
+    let openapi_json = match ApiDoc::openapi().to_json() {
+        Ok(json) => web::Data::new(json),
+        Err(e) => {
+            eprintln!("Failed to generate OpenAPI spec: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    // Build rate-limiter governor
+    // When rate_limit is 0 (disabled), use a very high burst to effectively disable limiting
+    let effective_burst = if rate_limit > 0 { rate_limit } else { u32::MAX };
+    let governor_conf = GovernorConfigBuilder::default()
+        .seconds_per_request(1)
+        .burst_size(effective_burst)
+        .finish()
+        .expect("valid governor config");
 
     let mut server = HttpServer::new(move || {
+        // --- CORS ---
+        let cors = if cors_origins.iter().any(|o| o == "*") {
+            Cors::permissive()
+        } else if cors_origins.is_empty() {
+            Cors::default()
+        } else {
+            let mut c = Cors::default()
+                .allowed_methods(vec!["GET", "POST", "OPTIONS"])
+                .allowed_headers(vec!["Content-Type", "Authorization", "X-Api-Key"])
+                .max_age(3600);
+            for origin in &cors_origins {
+                c = c.allowed_origin(origin);
+            }
+            c
+        };
+
         App::new()
+            .wrap(cors)
+            .wrap(Governor::new(&governor_conf))
             .wrap(middleware::from_fn(metrics_middleware))
             .app_data(shared_data.clone())
             .app_data(shared_ban.clone())
@@ -181,6 +224,9 @@ async fn main() -> std::io::Result<()> {
     if workers > 0 {
         server = server.workers(workers);
     }
+
+    // Graceful shutdown: allow in-flight requests to complete
+    server = server.shutdown_timeout(shutdown_timeout);
 
     server.bind((bind.as_str(), port))?.run().await
 }

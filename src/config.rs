@@ -61,6 +61,26 @@ pub struct ServerConfig {
     /// Minimum log level: trace, debug, info, warn, error.
     #[serde(default = "default_log_level")]
     pub log_level: String,
+
+    /// Graceful shutdown timeout in seconds. In-flight requests get this
+    /// long to complete before the server force-closes connections.
+    #[serde(default = "default_shutdown_timeout")]
+    pub shutdown_timeout: u64,
+
+    /// API key required for admin endpoints (e.g. POST /api/reload).
+    /// If empty, admin endpoints are disabled.
+    #[serde(default)]
+    pub api_key: String,
+
+    /// Allowed CORS origins. Empty = no CORS header (same-origin only).
+    /// Use `["*"]` to allow all origins (not recommended in production).
+    #[serde(default)]
+    pub cors_origins: Vec<String>,
+
+    /// Maximum requests per second per IP address (rate limiting).
+    /// 0 = no rate limiting.
+    #[serde(default = "default_rate_limit")]
+    pub rate_limit: u32,
 }
 
 impl Default for ServerConfig {
@@ -70,6 +90,10 @@ impl Default for ServerConfig {
             port: default_port(),
             workers: 0,
             log_level: default_log_level(),
+            shutdown_timeout: default_shutdown_timeout(),
+            api_key: String::new(),
+            cors_origins: Vec::new(),
+            rate_limit: default_rate_limit(),
         }
     }
 }
@@ -82,6 +106,12 @@ fn default_port() -> u16 {
 }
 fn default_log_level() -> String {
     "info".to_string()
+}
+fn default_shutdown_timeout() -> u64 {
+    30
+}
+fn default_rate_limit() -> u32 {
+    20
 }
 
 // ---------------------------------------------------------------------------

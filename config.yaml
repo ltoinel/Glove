@@ -5,6 +5,10 @@ server:
   port: 8080
   workers: 1                    # 0 = auto (one per logical CPU)
   log_level: "info"             # trace, debug, info, warn, error
+  shutdown_timeout: 30          # seconds — graceful shutdown for in-flight requests
+  api_key: ""                   # Required for POST /api/reload. Empty = endpoint disabled
+  cors_origins: []              # Allowed origins. ["*"] = permissive (not for production)
+  rate_limit: 20                # Max requests/sec per IP. 0 = disabled
 
 data:
   dir: "data"                   # sub-dirs gtfs/, osm/, raptor/, ban/ are implicit

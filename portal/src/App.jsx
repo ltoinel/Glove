@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import {
-  Typography, Paper, TextField, Button,
+  Typography, Paper, TextField, Button, Slider,
   Box, Card, CardContent, CardActionArea, Chip, Collapse, Alert,
   CircularProgress, Divider, Stack, IconButton, Tooltip, Autocomplete, alpha,
 } from '@mui/material'
@@ -16,6 +16,11 @@ import 'swagger-ui-react/swagger-ui.css'
 import { MapContainer, TileLayer, Polyline, CircleMarker, Marker, Tooltip as LTooltip, useMap } from 'react-leaflet'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
+import { LocalizationProvider } from '@mui/x-date-pickers/LocalizationProvider'
+import { AdapterDayjs } from '@mui/x-date-pickers/AdapterDayjs'
+import { DatePicker } from '@mui/x-date-pickers/DatePicker'
+import { TimePicker } from '@mui/x-date-pickers/TimePicker'
+import 'dayjs/locale/fr'
 import { useI18n } from './i18n.jsx'
 
 // Origin marker — pulsing radar dot
@@ -954,7 +959,10 @@ export default function App() {
 
   const [from, setFrom] = useState(null)
   const [to, setTo] = useState(null)
-  const [datetime, setDatetime] = useState(defaultDatetime())
+  const [departDate, setDepartDate] = useState(null)  // dayjs object or null
+  const [departTime, setDepartTime] = useState(null)  // dayjs object or null
+  const [showOptions, setShowOptions] = useState(false)
+  const isNow = !departDate && !departTime
   const [journeys, setJourneys] = useState(null)
   const [walkJourney, setWalkJourney] = useState(null)
   const [bikeJourneys, setBikeJourneys] = useState(null)
@@ -969,6 +977,14 @@ export default function App() {
   const [carTime, setCarTime] = useState(null)
   const [resultTab, setResultTab] = useState('pt')
   const [view, setView] = useState('search')
+  const [walkingSpeed, setWalkingSpeed] = useState(() => {
+    const saved = localStorage.getItem('glove_walking_speed')
+    return saved ? parseFloat(saved) : 5
+  })
+  const handleWalkingSpeedChange = (v) => {
+    setWalkingSpeed(v)
+    localStorage.setItem('glove_walking_speed', String(v))
+  }
 
   const refreshStatus = () => {
     fetch('/api/status').then(r => r.json()).then(setStatus).catch(() => {})
@@ -985,7 +1001,15 @@ export default function App() {
     if (!from || !to) return
     setLoading(true); setError(null); setJourneys(null); setWalkJourney(null); setBikeJourneys(null); setCarJourney(null); setSelectedJourney(0); setResultTab('pt'); setPtTime(null); setWalkTime(null); setBikeTime(null); setCarTime(null)
     try {
-      const ptParams = new URLSearchParams({ from: from.id, to: to.id, datetime: toApiDatetime(datetime) })
+      let effectiveDatetime
+      if (departDate || departTime) {
+        const d = departDate ? departDate.format('YYYY-MM-DD') : defaultDatetime().slice(0, 10)
+        const t2 = departTime ? departTime.format('HH:mm') : '00:00'
+        effectiveDatetime = `${d}T${t2}`
+      } else {
+        effectiveDatetime = defaultDatetime()
+      }
+      const ptParams = new URLSearchParams({ from: from.id, to: to.id, datetime: toApiDatetime(effectiveDatetime) })
       const ptT0 = performance.now()
       const ptFetch = fetch(`/api/journeys/public_transport?${ptParams}`)
         .then(r => r.json())
@@ -1002,8 +1026,10 @@ export default function App() {
           from: `${fromCoord.lon};${fromCoord.lat}`,
           to: `${toCoord.lon};${toCoord.lat}`,
         })
+        const walkParams = new URLSearchParams(coordParams)
+        if (walkingSpeed !== 5) walkParams.set('walking_speed', String(walkingSpeed))
         const walkT0 = performance.now()
-        walkFetch = fetch(`/api/journeys/walk?${coordParams}`)
+        walkFetch = fetch(`/api/journeys/walk?${walkParams}`)
           .then(r => r.ok ? r.json() : null)
           .then(data => { setWalkTime(Math.round(performance.now() - walkT0)); return data })
           .catch(() => null)
@@ -1059,6 +1085,7 @@ export default function App() {
     : null
 
   return (
+    <LocalizationProvider dateAdapter={AdapterDayjs} adapterLocale={lang}>
     <Box sx={{ display: 'flex', height: '100vh', overflow: 'hidden', bgcolor: '#0a0a12' }}>
       {/* Left panel — floating glass sidebar */}
       <Box sx={{
@@ -1226,15 +1253,95 @@ export default function App() {
                     </Tooltip>
                   </Box>
 
-                  <TextField label={t('dateTime')} type="datetime-local" value={datetime}
-                    onChange={e => setDatetime(e.target.value)} size="small" fullWidth
-                    slotProps={{
-                      inputLabel: { shrink: true },
-                      input: {
-                        startAdornment: <><AccessTime fontSize="small" sx={{ color: 'text.disabled', mr: 0.5, ml: 0.5 }} /></>,
-                      },
-                    }}
-                  />
+                  {/* Departure time: "Now" chip + date/time pickers */}
+                  <Box>
+                    <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                      <Chip
+                        icon={<AccessTime fontSize="small" />}
+                        label={t('now')}
+                        onClick={() => { setDepartDate(null); setDepartTime(null) }}
+                        variant={isNow ? 'filled' : 'outlined'}
+                        sx={{
+                          fontWeight: 600, fontSize: 12, flexShrink: 0,
+                          ...(isNow ? {
+                            bgcolor: 'rgba(0, 229, 255, 0.15)', color: '#00e5ff',
+                            border: '1px solid rgba(0, 229, 255, 0.3)',
+                          } : {
+                            borderColor: 'rgba(255,255,255,0.12)', color: 'text.secondary',
+                          }),
+                        }}
+                      />
+                      <DatePicker
+                        value={departDate}
+                        onChange={setDepartDate}
+                        label={t('date')}
+                        format="DD/MM/YYYY"
+                        slotProps={{
+                          textField: {
+                            size: 'small',
+                            sx: { flex: 1, '& .MuiInputBase-input': { fontSize: 12, py: 0.6 }, '& .MuiInputLabel-root': { fontSize: 12 }, '& .MuiInputAdornment-root': { ml: 0 } },
+                          },
+                          openPickerButton: { sx: { p: 0.3, '& svg': { fontSize: 18 } } },
+                        }}
+                      />
+                      <TimePicker
+                        value={departTime}
+                        onChange={setDepartTime}
+                        label={t('time')}
+                        ampm={false}
+                        slotProps={{
+                          textField: {
+                            size: 'small',
+                            sx: { width: 105, '& .MuiInputBase-input': { fontSize: 12, py: 0.6 }, '& .MuiInputLabel-root': { fontSize: 12 }, '& .MuiInputAdornment-root': { ml: 0 } },
+                          },
+                          openPickerButton: { sx: { p: 0.3, '& svg': { fontSize: 18 } } },
+                        }}
+                      />
+                    </Box>
+                  </Box>
+
+                  {/* Collapsible options */}
+                  <Box>
+                    <Box
+                      onClick={() => setShowOptions(v => !v)}
+                      sx={{
+                        display: 'flex', alignItems: 'center', gap: 0.5, cursor: 'pointer',
+                        color: 'text.secondary', '&:hover': { color: '#00e5ff' },
+                        transition: 'color 0.15s', userSelect: 'none',
+                      }}
+                    >
+                      <Settings sx={{ fontSize: 14 }} />
+                      <Typography variant="caption" sx={{ fontSize: 11, fontWeight: 600, letterSpacing: 0.5 }}>
+                        {t('preferences')}
+                      </Typography>
+                      {showOptions ? <ExpandLess sx={{ fontSize: 16 }} /> : <ExpandMore sx={{ fontSize: 16 }} />}
+                    </Box>
+                    <Collapse in={showOptions}>
+                      <Box sx={{ pt: 1.5, pb: 0.5 }}>
+                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                          <DirectionsWalk sx={{ fontSize: 16, color: 'text.secondary' }} />
+                          <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: 11 }}>
+                            {t('walkingSpeed')}
+                          </Typography>
+                          <Typography variant="caption" fontWeight={700} sx={{ ml: 'auto', fontFamily: '"Syne", sans-serif', color: '#00e5ff' }}>
+                            {walkingSpeed} {t('walkingSpeedUnit')}
+                          </Typography>
+                        </Box>
+                        <Slider
+                          value={walkingSpeed}
+                          onChange={(_, v) => handleWalkingSpeedChange(v)}
+                          min={2} max={10} step={0.5}
+                          marks={[{ value: 2, label: '2' }, { value: 5, label: '5' }, { value: 10, label: '10' }]}
+                          sx={{
+                            color: '#00e5ff', mt: 0.5,
+                            '& .MuiSlider-markLabel': { fontSize: 9, color: 'text.disabled' },
+                            '& .MuiSlider-thumb': { width: 12, height: 12 },
+                            '& .MuiSlider-rail': { opacity: 0.2 },
+                          }}
+                        />
+                      </Box>
+                    </Collapse>
+                  </Box>
 
                   <Button type="submit" variant="contained" fullWidth size="large"
                     disabled={loading || !from || !to}
@@ -1465,5 +1572,6 @@ export default function App() {
         </MapContainer>
       </Box>
     </Box>
+    </LocalizationProvider>
   )
 }

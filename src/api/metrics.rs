@@ -5,6 +5,7 @@
 
 use actix_web::{HttpResponse, get};
 use std::fmt::Write;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
@@ -18,31 +19,30 @@ pub static HTTP_REQUESTS_TOTAL: AtomicU64 = AtomicU64::new(0);
 /// Total HTTP request errors (4xx + 5xx).
 pub static HTTP_ERRORS_TOTAL: AtomicU64 = AtomicU64::new(0);
 
-/// Start time of the process.
-static mut START_INSTANT: Option<Instant> = None;
-static mut START_UNIX: f64 = 0.0;
+/// Process start times (safe initialization via OnceLock).
+static START_INSTANT: OnceLock<Instant> = OnceLock::new();
+static START_UNIX: OnceLock<f64> = OnceLock::new();
 
 /// Call once at startup to record the process start time.
 pub fn init_start_time() {
-    unsafe {
-        START_INSTANT = Some(Instant::now());
-        START_UNIX = std::time::SystemTime::now()
+    START_INSTANT.get_or_init(Instant::now);
+    START_UNIX.get_or_init(|| {
+        std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs_f64();
-    }
+            .as_secs_f64()
+    });
 }
 
 fn uptime_secs() -> f64 {
-    unsafe {
-        START_INSTANT
-            .map(|s| s.elapsed().as_secs_f64())
-            .unwrap_or(0.0)
-    }
+    START_INSTANT
+        .get()
+        .map(|s| s.elapsed().as_secs_f64())
+        .unwrap_or(0.0)
 }
 
 fn start_unix() -> f64 {
-    unsafe { START_UNIX }
+    START_UNIX.get().copied().unwrap_or(0.0)
 }
 
 // ---------------------------------------------------------------------------
