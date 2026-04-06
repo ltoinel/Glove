@@ -52,23 +52,27 @@ pub async fn get_places(
     ban: web::Data<Arc<BanData>>,
 ) -> HttpResponse {
     let raptor_data = shared.load();
-    let raw_q = query.q.as_deref().unwrap_or("");
+    let raw_q = query.q.as_deref().unwrap_or("").trim();
     let limit = query.limit.unwrap_or(10).min(50);
 
-    // Strip leading/trailing digits and whitespace (e.g. "12 rue de Rivoli" → "rue de Rivoli")
-    let q: String = raw_q
-        .chars()
-        .filter(|c| !c.is_ascii_digit())
-        .collect::<String>();
-    let q = q.trim();
-
-    if q.len() < 2 {
+    if raw_q.len() < 2 {
         return HttpResponse::Ok().json(serde_json::json!({ "places": [] }));
     }
 
-    // Search both sources
-    let stop_results = raptor_data.search_stops(q, limit);
-    let ban_results = ban.search(q, limit);
+    // Strip digits for stop search (stop names don't contain street numbers)
+    let stop_q: String = raw_q
+        .chars()
+        .filter(|c| !c.is_ascii_digit())
+        .collect::<String>();
+    let stop_q = stop_q.trim();
+
+    // Search both sources — stops use stripped query, BAN uses full query
+    let stop_results = if stop_q.len() >= 2 {
+        raptor_data.search_stops(stop_q, limit)
+    } else {
+        Vec::new()
+    };
+    let ban_results = ban.search(raw_q, limit);
 
     // Stops first (higher priority), then addresses, up to limit
     let mut places: Vec<serde_json::Value> = Vec::with_capacity(limit);
@@ -89,20 +93,25 @@ pub async fn get_places(
         }));
     }
 
+    // Extract leading street number from query for address interpolation
+    let street_number: Option<u32> = raw_q.split_whitespace().next().and_then(|w| w.parse().ok());
+
     for entry in &ban_results {
         if places.len() >= limit {
             break;
         }
-        // Use lon;lat as ID so resolve_stop() can find the nearest stop
-        let id = format!("{};{}", entry.lon, entry.lat);
+        let (lon, lat) = entry.locate(street_number);
+        let id = format!("{lon};{lat}");
+        let name = if let Some(num) = street_number {
+            format!("{} {}", num, entry.label)
+        } else {
+            entry.label.clone()
+        };
         places.push(serde_json::json!({
             "id": id,
-            "name": entry.label,
+            "name": name,
             "type": "address",
-            "coord": {
-                "lon": entry.lon,
-                "lat": entry.lat,
-            }
+            "coord": { "lon": lon, "lat": lat },
         }));
     }
 
@@ -201,6 +210,7 @@ mod tests {
             calendars,
             calendar_dates: vec![],
             transfers: vec![],
+            pathways: vec![],
         };
         let raptor_data = Arc::new(raptor::RaptorData::build(gtfs_data, 120));
         let ban_data = Arc::new(ban::BanData {
@@ -209,6 +219,23 @@ mod tests {
                 name_lower: crate::text::normalize("Rue de Rivoli, 75001 Paris"),
                 lon: 2.3387,
                 lat: 48.8606,
+                points: vec![
+                    ban::AddressPoint {
+                        num: 1,
+                        lon: 2.330,
+                        lat: 48.859,
+                    },
+                    ban::AddressPoint {
+                        num: 100,
+                        lon: 2.3387,
+                        lat: 48.8606,
+                    },
+                    ban::AddressPoint {
+                        num: 200,
+                        lon: 2.347,
+                        lat: 48.862,
+                    },
+                ],
             }],
         });
         (raptor_data, ban_data)

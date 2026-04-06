@@ -8,6 +8,7 @@
 pub mod bike;
 pub mod car;
 pub mod public_transport;
+pub mod valhalla;
 pub mod walk;
 
 pub use bike::{__path_get_bike, get_bike};

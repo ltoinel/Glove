@@ -279,7 +279,30 @@ impl RaptorData {
             }
         }
 
+        // Build pathway graph: stop_id → Vec<(stop_id, traversal_time)>
+        // Pathways provide realistic walking times within stations
+        info!(
+            "Building pathway graph ({} pathways)...",
+            gtfs.pathways.len()
+        );
+        let mut pathway_graph: FxHashMap<&str, Vec<(&str, u32)>> = FxHashMap::default();
+        for p in &gtfs.pathways {
+            if let Some(time) = p.traversal_time {
+                pathway_graph
+                    .entry(&p.from_stop_id)
+                    .or_default()
+                    .push((&p.to_stop_id, time));
+                if p.is_bidirectional == 1 {
+                    pathway_graph
+                        .entry(&p.to_stop_id)
+                        .or_default()
+                        .push((&p.from_stop_id, time));
+                }
+            }
+        }
+
         // Add implicit transfers between stops sharing the same parent station
+        // Use pathway traversal times when available, otherwise default_transfer_time
         info!("Building parent station transfers...");
         let mut parent_stops: FxHashMap<&str, Vec<usize>> = FxHashMap::default();
         for (idx, stop) in stops.iter().enumerate() {
@@ -290,7 +313,42 @@ impl RaptorData {
                     .push(idx);
             }
         }
+
+        // Compute shortest pathway times between stops via BFS on the pathway graph.
+        // For two sibling stops A and B in the same station, finds the shortest
+        // path through intermediate nodes (entrances, platforms) using Dijkstra.
+        let pathway_time = |from_id: &str, to_id: &str| -> Option<u32> {
+            if pathway_graph.is_empty() {
+                return None;
+            }
+            // Mini-Dijkstra on the pathway graph
+            let mut dist: FxHashMap<&str, u32> = FxHashMap::default();
+            let mut queue: std::collections::BinaryHeap<std::cmp::Reverse<(u32, &str)>> =
+                std::collections::BinaryHeap::new();
+            dist.insert(from_id, 0);
+            queue.push(std::cmp::Reverse((0, from_id)));
+            while let Some(std::cmp::Reverse((cost, node))) = queue.pop() {
+                if node == to_id {
+                    return Some(cost);
+                }
+                if cost > dist.get(node).copied().unwrap_or(u32::MAX) {
+                    continue;
+                }
+                if let Some(neighbors) = pathway_graph.get(node) {
+                    for &(next, time) in neighbors {
+                        let new_cost = cost + time;
+                        if new_cost < dist.get(next).copied().unwrap_or(u32::MAX) {
+                            dist.insert(next, new_cost);
+                            queue.push(std::cmp::Reverse((new_cost, next)));
+                        }
+                    }
+                }
+            }
+            None
+        };
+
         let mut parent_transfer_count = 0u64;
+        let mut pathway_transfer_count = 0u64;
         for siblings in parent_stops.values() {
             if siblings.len() < 2 {
                 continue;
@@ -300,13 +358,21 @@ impl RaptorData {
                     stop_transfers[a].iter().map(|&(t, _)| t).collect();
                 for &b in siblings {
                     if a != b && !existing.contains(&b) {
-                        stop_transfers[a].push((b, default_transfer_time));
+                        let duration = pathway_time(&stops[a].stop_id, &stops[b].stop_id)
+                            .unwrap_or(default_transfer_time);
+                        if duration != default_transfer_time {
+                            pathway_transfer_count += 1;
+                        }
+                        stop_transfers[a].push((b, duration));
                         parent_transfer_count += 1;
                     }
                 }
             }
         }
-        info!("{} parent station transfers added", parent_transfer_count);
+        info!(
+            "{} parent station transfers added ({} with pathway times)",
+            parent_transfer_count, pathway_transfer_count
+        );
 
         // Calendar exceptions index: service_id → { date → exception_type } for O(1) lookup
         let mut calendar_exceptions: FxHashMap<String, FxHashMap<String, u8>> =
@@ -514,8 +580,8 @@ impl RaptorData {
     ///
     /// Accepts either a direct stop_id (e.g. "IDFM:22101") or GPS coordinates
     /// in "lon;lat" format (e.g. "2.3522;48.8566"), in which case the nearest
-    /// stop is returned.
-    pub fn resolve_stop(&self, input: &str) -> Option<usize> {
+    /// served stop within `max_distance_m` meters is returned.
+    pub fn resolve_stop(&self, input: &str, max_distance_m: u32) -> Option<usize> {
         if let Some(&idx) = self.stop_index.get(input) {
             return Some(idx);
         }
@@ -523,18 +589,28 @@ impl RaptorData {
         if let Some((lon_str, lat_str)) = input.split_once(';')
             && let (Ok(lon), Ok(lat)) = (lon_str.parse::<f64>(), lat_str.parse::<f64>())
         {
-            return self.find_nearest_stop(lon, lat);
+            return self.find_nearest_stop(lon, lat, max_distance_m);
         }
 
         None
     }
 
-    /// Brute-force nearest-stop search. Acceptable for single-query use.
-    fn find_nearest_stop(&self, lon: f64, lat: f64) -> Option<usize> {
+    /// Find the nearest stop that is served by at least one pattern
+    /// (i.e. reachable by RAPTOR) and within `max_distance_m` meters.
+    /// Stops without patterns (entrances, parent stations, unused quays) are ignored.
+    fn find_nearest_stop(&self, lon: f64, lat: f64, max_distance_m: u32) -> Option<usize> {
+        // Pre-filter: rough bounding box in degrees (~1 degree ≈ 111 km)
+        let max_deg = max_distance_m as f64 / 111_000.0 * 1.5; // 1.5x margin
+
         self.stops
             .iter()
             .enumerate()
-            .filter(|(_, s)| s.stop_lon != 0.0 || s.stop_lat != 0.0)
+            .filter(|(idx, s)| {
+                (s.stop_lon != 0.0 || s.stop_lat != 0.0)
+                    && !self.stop_patterns[*idx].is_empty()
+                    && (s.stop_lat - lat).abs() < max_deg
+                    && (s.stop_lon - lon).abs() < max_deg
+            })
             .min_by(|(_, a), (_, b)| {
                 let dist_a = haversine_approx(lat, lon, a.stop_lat, a.stop_lon);
                 let dist_b = haversine_approx(lat, lon, b.stop_lat, b.stop_lon);
@@ -542,7 +618,45 @@ impl RaptorData {
                     .partial_cmp(&dist_b)
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
+            .filter(|(_, s)| {
+                haversine_meters(lat, lon, s.stop_lat, s.stop_lon) <= max_distance_m as f64
+            })
             .map(|(idx, _)| idx)
+    }
+
+    /// Find all served stops within `max_distance_m` meters of the given
+    /// coordinates. Returns `(stop_idx, walking_time_secs)` pairs, where
+    /// walking time is computed from the straight-line distance at the given
+    /// `walking_speed` (km/h, defaults to 5).
+    pub fn find_nearby_stops(
+        &self,
+        lon: f64,
+        lat: f64,
+        max_distance_m: u32,
+        walking_speed_kmh: f64,
+    ) -> Vec<(usize, u32)> {
+        let max_deg = max_distance_m as f64 / 111_000.0 * 1.5;
+        let speed_ms = walking_speed_kmh / 3.6; // m/s
+
+        self.stops
+            .iter()
+            .enumerate()
+            .filter(|(idx, s)| {
+                (s.stop_lon != 0.0 || s.stop_lat != 0.0)
+                    && !self.stop_patterns[*idx].is_empty()
+                    && (s.stop_lat - lat).abs() < max_deg
+                    && (s.stop_lon - lon).abs() < max_deg
+            })
+            .filter_map(|(idx, s)| {
+                let dist = haversine_meters(lat, lon, s.stop_lat, s.stop_lon);
+                if dist <= max_distance_m as f64 {
+                    let walk_secs = (dist / speed_ms).ceil() as u32;
+                    Some((idx, walk_secs))
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 }
 
@@ -553,6 +667,16 @@ fn haversine_approx(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
     let dlat = lat2 - lat1;
     let dlon = (lon2 - lon1) * lat1.to_radians().cos();
     dlat * dlat + dlon * dlon
+}
+
+/// Haversine distance in meters between two points.
+fn haversine_meters(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+    const R: f64 = 6_371_000.0; // Earth radius in meters
+    let dlat = (lat2 - lat1).to_radians();
+    let dlon = (lon2 - lon1).to_radians();
+    let a = (dlat / 2.0).sin().powi(2)
+        + lat1.to_radians().cos() * lat2.to_radians().cos() * (dlon / 2.0).sin().powi(2);
+    2.0 * R * a.sqrt().asin()
 }
 
 // ---------------------------------------------------------------------------
@@ -577,11 +701,11 @@ enum Label {
 /// for all stops across all rounds.
 pub struct RaptorResult {
     /// `tau[k][stop]` = best arrival time at `stop` using at most `k` vehicle trips.
-    tau: Vec<Vec<u32>>,
+    pub tau: Vec<Vec<u32>>,
     /// `labels[k][stop]` = how we reached `stop` in round `k`.
     labels: Vec<Vec<Option<Label>>>,
-    /// Source stop index (for reconstruction termination).
-    source: usize,
+    /// Source stop indices (for reconstruction termination).
+    sources: FxHashSet<usize>,
 }
 
 /// Run the RAPTOR algorithm to find earliest-arrival journeys.
@@ -595,8 +719,7 @@ pub struct RaptorResult {
 /// - `excluded_patterns`: patterns to skip (used for diverse route alternatives)
 pub fn raptor_query(
     data: &RaptorData,
-    source: usize,
-    target: usize,
+    sources: &[(usize, u32)],
     departure_time: u32,
     active: &[bool],
     max_transfers: usize,
@@ -609,29 +732,30 @@ pub fn raptor_query(
     let mut best: Vec<u32> = vec![INFINITY; n];
     let mut labels: Vec<Vec<Option<Label>>> = vec![vec![None; n]; rounds + 1];
 
-    // Initialize source stop
-    tau[0][source] = departure_time;
-    best[source] = departure_time;
-
-    // Apply initial foot transfers from source
-    for &(to_stop, duration) in &data.stop_transfers[source] {
-        let arr = departure_time.saturating_add(duration);
-        if arr < tau[0][to_stop] {
-            tau[0][to_stop] = arr;
-            best[to_stop] = arr;
-            labels[0][to_stop] = Some(Label::Transfer {
-                from_stop: source,
-                duration,
-            });
-        }
-    }
-
     // Track which stops were improved (to limit route scanning)
     let mut marked: Vec<bool> = vec![false; n];
-    marked[source] = true;
-    for &(to_stop, _) in &data.stop_transfers[source] {
-        if tau[0][to_stop] != INFINITY {
-            marked[to_stop] = true;
+
+    // Initialize all source stops with their walking-time offset
+    for &(source, walk_time) in sources {
+        let arr = departure_time.saturating_add(walk_time);
+        if arr < tau[0][source] {
+            tau[0][source] = arr;
+            best[source] = arr;
+            marked[source] = true;
+        }
+
+        // Apply initial foot transfers from each source
+        for &(to_stop, duration) in &data.stop_transfers[source] {
+            let total = arr.saturating_add(duration);
+            if total < tau[0][to_stop] {
+                tau[0][to_stop] = total;
+                best[to_stop] = total;
+                labels[0][to_stop] = Some(Label::Transfer {
+                    from_stop: source,
+                    duration,
+                });
+                marked[to_stop] = true;
+            }
         }
     }
 
@@ -745,22 +869,13 @@ pub fn raptor_query(
             break;
         }
 
-        // Early exit if target is reached and no marked stop can beat it
-        if best[target] != INFINITY && !marked[target] {
-            let dominated = !marked
-                .iter()
-                .enumerate()
-                .any(|(s, &m)| m && best[s] < best[target]);
-            if dominated {
-                break;
-            }
-        }
     }
 
+    let source_set: FxHashSet<usize> = sources.iter().map(|&(idx, _)| idx).collect();
     RaptorResult {
         tau,
         labels,
-        source,
+        sources: source_set,
     }
 }
 
@@ -839,22 +954,34 @@ pub enum SectionType {
 /// Each RAPTOR round that improves the arrival at the target yields a
 /// distinct journey. This produces a trade-off set: more transfers but
 /// earlier arrival vs. fewer transfers but later arrival.
+///
+/// `targets` is a slice of `(stop_idx, walking_time_secs)` — the walking
+/// time from the stop to the final destination is added to determine the
+/// effective arrival time.
 pub fn reconstruct_journeys(
     data: &RaptorData,
     result: &RaptorResult,
-    target: usize,
+    targets: &[(usize, u32)],
 ) -> Vec<Vec<JourneySection>> {
     let mut journeys = Vec::new();
     let mut best_time = INFINITY;
 
     for k in 0..result.tau.len() {
-        let time = result.tau[k][target];
+        // Pick the target stop with the best effective arrival (PT arrival + walk)
+        let best_target = targets
+            .iter()
+            .filter(|&&(t, _)| result.tau[k][t] < INFINITY)
+            .min_by_key(|&&(t, walk)| result.tau[k][t].saturating_add(walk));
+        let Some(&(target, walk_to_dest)) = best_target else {
+            continue;
+        };
+        let time = result.tau[k][target].saturating_add(walk_to_dest);
         if time < best_time {
             best_time = time;
             if let Some(sections) = reconstruct_for_round(data, result, target, k)
                 && !sections.is_empty()
             {
-                let clean = sanitize_sections(sections);
+                let clean = sanitize_sections(data, sections);
                 if !clean.is_empty() {
                     journeys.push(clean);
                 }
@@ -880,7 +1007,7 @@ pub fn reconstruct_journeys(
 /// - Self-loop transfers with zero duration
 ///
 /// Merges consecutive transfer sections into a single walk.
-fn sanitize_sections(sections: Vec<JourneySection>) -> Vec<JourneySection> {
+fn sanitize_sections(_data: &RaptorData, sections: Vec<JourneySection>) -> Vec<JourneySection> {
     let mut result: Vec<JourneySection> = Vec::new();
 
     for section in sections {
@@ -932,7 +1059,7 @@ fn reconstruct_for_round(
     let mut current_round = round;
 
     loop {
-        if current_stop == result.source {
+        if result.sources.contains(&current_stop) {
             break;
         }
 
@@ -1342,6 +1469,7 @@ mod tests {
             calendars,
             calendar_dates,
             transfers,
+            pathways: vec![],
         }
     }
 
@@ -1492,7 +1620,7 @@ mod tests {
     #[test]
     fn resolve_stop_by_id() {
         let data = build_test_data();
-        let idx = data.resolve_stop("S1");
+        let idx = data.resolve_stop("S1", u32::MAX);
         assert!(idx.is_some());
         assert_eq!(idx.unwrap(), data.stop_index["S1"]);
     }
@@ -1501,14 +1629,14 @@ mod tests {
     fn resolve_stop_by_coords() {
         let data = build_test_data();
         // lon;lat near S1 (2.347;48.858)
-        let idx = data.resolve_stop("2.347;48.858");
+        let idx = data.resolve_stop("2.347;48.858", u32::MAX);
         assert!(idx.is_some());
     }
 
     #[test]
     fn resolve_stop_unknown() {
         let data = build_test_data();
-        assert!(data.resolve_stop("UNKNOWN_STOP").is_none());
+        assert!(data.resolve_stop("UNKNOWN_STOP", u32::MAX).is_none());
     }
 
     // -----------------------------------------------------------------------
@@ -1556,14 +1684,13 @@ mod tests {
         let active = data.active_services("20260406");
         let result = raptor_query(
             &data,
-            source,
-            target,
+            &[(source, 0)],
             28000,
             &active,
             3,
             &FxHashSet::default(),
         );
-        let journeys = reconstruct_journeys(&data, &result, target);
+        let journeys = reconstruct_journeys(&data, &result, &[(target, 0)]);
         assert!(!journeys.is_empty());
     }
 
@@ -1574,8 +1701,7 @@ mod tests {
         let active = data.active_services("20260406");
         let result = raptor_query(
             &data,
-            source,
-            source,
+            &[(source, 0)],
             28000,
             &active,
             3,
@@ -1593,14 +1719,13 @@ mod tests {
         let active = data.active_services("20260101"); // no service
         let result = raptor_query(
             &data,
-            source,
-            target,
+            &[(source, 0)],
             28000,
             &active,
             3,
             &FxHashSet::default(),
         );
-        let journeys = reconstruct_journeys(&data, &result, target);
+        let journeys = reconstruct_journeys(&data, &result, &[(target, 0)]);
         assert!(journeys.is_empty());
     }
 
@@ -1612,8 +1737,8 @@ mod tests {
         let active = data.active_services("20260406");
         // Exclude all patterns
         let excluded: FxHashSet<usize> = (0..data.patterns.len()).collect();
-        let result = raptor_query(&data, source, target, 28000, &active, 3, &excluded);
-        let journeys = reconstruct_journeys(&data, &result, target);
+        let result = raptor_query(&data, &[(source, 0)], 28000, &active, 3, &excluded);
+        let journeys = reconstruct_journeys(&data, &result, &[(target, 0)]);
         assert!(journeys.is_empty());
     }
 
@@ -1693,6 +1818,7 @@ mod tests {
 
     #[test]
     fn sanitize_removes_self_loop_transfer() {
+        let data = build_test_data();
         let sections = vec![JourneySection {
             section_type: SectionType::Transfer,
             from_stop: 5,
@@ -1704,12 +1830,13 @@ mod tests {
             board_pos: None,
             alight_pos: None,
         }];
-        let clean = sanitize_sections(sections);
+        let clean = sanitize_sections(&data, sections);
         assert!(clean.is_empty());
     }
 
     #[test]
     fn sanitize_removes_zero_duration_pt() {
+        let data = build_test_data();
         let sections = vec![JourneySection {
             section_type: SectionType::PublicTransport,
             from_stop: 0,
@@ -1721,12 +1848,13 @@ mod tests {
             board_pos: Some(0),
             alight_pos: Some(1),
         }];
-        let clean = sanitize_sections(sections);
+        let clean = sanitize_sections(&data, sections);
         assert!(clean.is_empty());
     }
 
     #[test]
     fn sanitize_merges_consecutive_transfers() {
+        let data = build_test_data();
         let sections = vec![
             JourneySection {
                 section_type: SectionType::Transfer,
@@ -1751,7 +1879,7 @@ mod tests {
                 alight_pos: None,
             },
         ];
-        let clean = sanitize_sections(sections);
+        let clean = sanitize_sections(&data, sections);
         assert_eq!(clean.len(), 1);
         assert_eq!(clean[0].from_stop, 0);
         assert_eq!(clean[0].to_stop, 2);
@@ -1833,14 +1961,13 @@ mod tests {
         let active = data.active_services("20260406");
         let result = raptor_query(
             &data,
-            source,
-            target,
+            &[(source, 0)],
             28000,
             &active,
             3,
             &FxHashSet::default(),
         );
-        let journeys = reconstruct_journeys(&data, &result, target);
+        let journeys = reconstruct_journeys(&data, &result, &[(target, 0)]);
         assert!(!journeys.is_empty());
         // Journey should have at least one PT section
         let has_pt = journeys[0]
@@ -1858,14 +1985,13 @@ mod tests {
         // Departure at 23:00 — after all trips (last departs at 09:01)
         let result = raptor_query(
             &data,
-            source,
-            target,
+            &[(source, 0)],
             82800,
             &active,
             3,
             &FxHashSet::default(),
         );
-        let journeys = reconstruct_journeys(&data, &result, target);
+        let journeys = reconstruct_journeys(&data, &result, &[(target, 0)]);
         assert!(journeys.is_empty());
     }
 
@@ -1892,6 +2018,7 @@ mod tests {
 
     #[test]
     fn sanitize_removes_pt_same_stop() {
+        let data = build_test_data();
         let sections = vec![JourneySection {
             section_type: SectionType::PublicTransport,
             from_stop: 3,
@@ -1903,7 +2030,7 @@ mod tests {
             board_pos: Some(0),
             alight_pos: Some(0),
         }];
-        let clean = sanitize_sections(sections);
+        let clean = sanitize_sections(&data, sections);
         assert!(clean.is_empty());
     }
 
@@ -1915,7 +2042,7 @@ mod tests {
     fn resolve_stop_nearest_returns_closest() {
         let data = build_test_data();
         // Coords very close to S2 (lon=2.373, lat=48.844)
-        let idx = data.resolve_stop("2.374;48.845").unwrap();
+        let idx = data.resolve_stop("2.374;48.845", u32::MAX).unwrap();
         let s2 = data.stop_index["S2"];
         assert_eq!(idx, s2);
     }
@@ -1923,7 +2050,7 @@ mod tests {
     #[test]
     fn resolve_stop_invalid_coords() {
         let data = build_test_data();
-        assert!(data.resolve_stop("notlon;notlat").is_none());
+        assert!(data.resolve_stop("notlon;notlat", u32::MAX).is_none());
     }
 
     // -----------------------------------------------------------------------

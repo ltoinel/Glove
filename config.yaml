@@ -22,6 +22,7 @@ routing:
   max_transfers: 5
   default_transfer_time: 120    # seconds
   max_duration: 10800           # 3 hours in seconds
+  max_nearest_stop_distance: 1500  # meters (~20 min walk at 5 km/h)
 
 valhalla:
   host: "localhost"

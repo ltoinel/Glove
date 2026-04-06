@@ -49,7 +49,7 @@ pub struct Place {
     pub stop_point: Option<StopPointRef>,
 }
 
-/// A section of a journey (public transport leg or transfer).
+/// A section of a journey (public transport leg, transfer, or walking leg).
 #[derive(Debug, Serialize, ToSchema)]
 pub struct Section {
     #[serde(rename = "type")]
@@ -63,6 +63,12 @@ pub struct Section {
     pub display_informations: Option<journeys::DisplayInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_date_times: Option<Vec<StopDateTime>>,
+    /// Encoded polyline shape (Valhalla precision-6) for street_network sections.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shape: Option<String>,
+    /// Distance in meters (for street_network sections).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub distance: Option<u32>,
 }
 
 /// A stop visit within a public transport section.

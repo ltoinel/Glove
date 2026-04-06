@@ -767,6 +767,7 @@ dependencies = [
  "bincode",
  "chrono",
  "csv",
+ "futures",
  "governor 0.8.1",
  "reqwest",
  "rustc-hash",

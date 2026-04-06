@@ -283,6 +283,7 @@ mod tests {
             calendars,
             calendar_dates: vec![],
             transfers: vec![],
+            pathways: vec![],
         };
         Arc::new(raptor::RaptorData::build(gtfs_data, 120))
     }

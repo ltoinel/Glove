@@ -117,6 +117,22 @@ pub struct Transfer {
     pub min_transfer_time: Option<u32>,
 }
 
+/// A pathway connecting two stops within a station (e.g. entrance to platform).
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Pathway {
+    pub from_stop_id: String,
+    pub to_stop_id: String,
+    /// 1=walkway, 2=stairs, 3=escalator, 4=elevator, etc.
+    #[serde(default)]
+    pub pathway_mode: u8,
+    /// 1 = bidirectional.
+    #[serde(default)]
+    pub is_bidirectional: u8,
+    /// Traversal time in seconds.
+    #[serde(default)]
+    pub traversal_time: Option<u32>,
+}
+
 /// Container for all raw GTFS data loaded from CSV files.
 pub struct GtfsData {
     pub agencies: Vec<Agency>,
@@ -127,6 +143,7 @@ pub struct GtfsData {
     pub calendars: HashMap<String, Calendar>,
     pub calendar_dates: Vec<CalendarDate>,
     pub transfers: Vec<Transfer>,
+    pub pathways: Vec<Pathway>,
 }
 
 /// Load a CSV file into a vector of deserialized records.
@@ -198,6 +215,15 @@ impl GtfsData {
         let transfers: Vec<Transfer> = load_csv(&data_dir.join("transfers.txt"))?;
         info!("{} transfers", transfers.len());
 
+        let pathways_path = data_dir.join("pathways.txt");
+        let pathways: Vec<Pathway> = if pathways_path.exists() {
+            let p = load_csv(&pathways_path)?;
+            info!("{} pathways", p.len());
+            p
+        } else {
+            Vec::new()
+        };
+
         info!("GTFS data loaded");
 
         Ok(GtfsData {
@@ -209,6 +235,7 @@ impl GtfsData {
             calendars,
             calendar_dates,
             transfers,
+            pathways,
         })
     }
 }
@@ -242,6 +269,7 @@ pub fn gtfs_fingerprint(data_dir: &Path) -> String {
         "calendar.txt",
         "calendar_dates.txt",
         "transfers.txt",
+        "pathways.txt",
     ];
     let mut hasher = Sha256::new();
     for name in &files {

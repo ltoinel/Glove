@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import {
-  Typography, Paper, TextField, Button, Slider,
+  Typography, Paper, TextField, Button, Slider, Checkbox, FormControlLabel,
   Box, Card, CardContent, CardActionArea, Chip, Collapse, Alert,
   CircularProgress, Divider, Stack, IconButton, Tooltip, Autocomplete, alpha,
 } from '@mui/material'
@@ -20,6 +20,7 @@ import { LocalizationProvider } from '@mui/x-date-pickers/LocalizationProvider'
 import { AdapterDayjs } from '@mui/x-date-pickers/AdapterDayjs'
 import { DatePicker } from '@mui/x-date-pickers/DatePicker'
 import { TimePicker } from '@mui/x-date-pickers/TimePicker'
+import dayjs from 'dayjs'
 import 'dayjs/locale/fr'
 import { useI18n } from './i18n.jsx'
 
@@ -194,6 +195,25 @@ function modeColor(mode, color) {
   }
 }
 
+// --- Recent places history ---
+
+const RECENT_PLACES_KEY = 'glove_recent_places'
+const MAX_RECENT_PLACES = 50
+
+function getRecentPlaces() {
+  try {
+    return JSON.parse(localStorage.getItem(RECENT_PLACES_KEY)) || []
+  } catch { return [] }
+}
+
+function saveRecentPlace(place) {
+  if (!place?.id || !place?.name) return
+  const recent = getRecentPlaces().filter(p => p.id !== place.id)
+  recent.unshift(place)
+  if (recent.length > MAX_RECENT_PLACES) recent.length = MAX_RECENT_PLACES
+  localStorage.setItem(RECENT_PLACES_KEY, JSON.stringify(recent))
+}
+
 // --- Autocomplete ---
 
 function useDebouncedFetch(delay = 250) {
@@ -220,16 +240,23 @@ function PlaceAutocomplete({ label, value, onChange, icon, placeholder }) {
 
   const handleInputChange = useCallback((_, newInput) => {
     setInputValue(newInput)
-    if (!newInput || newInput.length < 2) { setOptions(value ? [value] : []); setLoading(false); return }
+    if (!newInput || newInput.length < 2) {
+      const recent = getRecentPlaces()
+      setOptions(value ? [value, ...recent.filter(p => p.id !== value.id)] : recent)
+      setLoading(false)
+      return
+    }
     setLoading(true)
     fetchPlaces(newInput, (results) => { setOptions(results); setLoading(false) })
   }, [fetchPlaces, value])
 
-  const displayOptions = (!inputValue || inputValue.length < 2) ? (value ? [value] : []) : options
+  const displayOptions = (!inputValue || inputValue.length < 2)
+    ? (() => { const recent = getRecentPlaces(); return value ? [value, ...recent.filter(p => p.id !== value.id)] : recent })()
+    : options
 
   return (
     <Autocomplete
-      fullWidth size="small" options={displayOptions}
+      fullWidth size="small" options={displayOptions} openOnFocus
       getOptionLabel={(opt) => typeof opt === 'string' ? opt : opt.name || ''}
       isOptionEqualToValue={(opt, val) => opt.id === val.id}
       filterOptions={(x) => x}
@@ -251,7 +278,10 @@ function PlaceAutocomplete({ label, value, onChange, icon, placeholder }) {
           }}
         />
       )}
-      groupBy={(option) => option.type === 'stop' ? 'stops' : 'addresses'}
+      groupBy={(option) => {
+        if (!inputValue || inputValue.length < 2) return 'recent'
+        return option.type === 'stop' ? 'stops' : 'addresses'
+      }}
       renderGroup={(params) => (
         <li key={params.key}>
           <Box sx={{
@@ -262,9 +292,9 @@ function PlaceAutocomplete({ label, value, onChange, icon, placeholder }) {
             <Typography variant="caption" sx={{
               fontFamily: '"Syne", sans-serif', fontWeight: 700, fontSize: 10,
               letterSpacing: 1.5, textTransform: 'uppercase',
-              color: params.group === 'stops' ? '#00e5ff' : '#ffb800',
+              color: params.group === 'recent' ? '#b388ff' : params.group === 'stops' ? '#00e5ff' : '#ffb800',
             }}>
-              {params.group === 'stops' ? t('stopsLabel') : t('addresses')}
+              {params.group === 'recent' ? t('recentPlaces') : params.group === 'stops' ? t('stopsLabel') : t('addresses')}
             </Typography>
           </Box>
           {params.children}
@@ -323,6 +353,24 @@ function extractMapData(journey) {
   const ptSections = sections.filter(s => s.type === 'public_transport')
 
   for (const section of sections) {
+    // Walking legs (first/last mile via Valhalla)
+    if (section.type === 'street_network' && section.shape) {
+      const coords = decodePolyline(section.shape)
+      if (coords.length >= 2) lines.push({ coords, color: '#90a4ae', dashed: true })
+      continue
+    }
+    // Transfer walking legs (straight line between stops)
+    if (section.type === 'transfer') {
+      const fromCoord = section.from?.stop_point?.coord
+      const toCoord = section.to?.stop_point?.coord
+      if (fromCoord && toCoord) {
+        lines.push({
+          coords: [[fromCoord.lat, fromCoord.lon], [toCoord.lat, toCoord.lon]],
+          color: '#90a4ae', dashed: true,
+        })
+      }
+      continue
+    }
     if (section.type !== 'public_transport' || !section.stop_date_times) continue
     const di = section.display_informations
     const color = modeColor(di?.commercial_mode, di?.color)
@@ -375,7 +423,6 @@ const TAG_COLORS = {
 function JourneyCard({ journey, rank, selected, onSelect, animDelay }) {
   const { t } = useI18n()
   const [open, setOpen] = useState(false)
-  const ptSections = journey.sections.filter(s => s.type === 'public_transport' && s.display_informations)
 
   return (
     <Card
@@ -416,23 +463,36 @@ function JourneyCard({ journey, rank, selected, onSelect, animDelay }) {
                 <ArrowRightAlt sx={{ verticalAlign: 'middle', mx: 0.5, opacity: 0.3 }} fontSize="small" />
                 {formatTime(journey.arrival_date_time)}
               </Typography>
-              <Stack direction="row" spacing={0.5} sx={{ mt: 0.5 }} flexWrap="wrap" useFlexGap>
-                {ptSections.map((s, i) => {
-                  const di = s.display_informations
-                  const bg = modeColor(di.commercial_mode, di.color)
-                  const fg = di.text_color ? `#${di.text_color}` : '#fff'
-                  return (
-                    <Box key={i} sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.3 }}>
-                      {i > 0 && <Typography variant="caption" sx={{ color: 'text.disabled', mx: 0.2 }}>›</Typography>}
-                      <Chip icon={modeIcon(di.commercial_mode)} label={di.label || di.commercial_mode}
-                        size="small"
-                        sx={{
-                          bgcolor: bg, color: fg, fontWeight: 700, fontSize: 11, height: 24,
-                          boxShadow: `0 0 8px ${alpha(bg, 0.3)}`,
-                          '& .MuiChip-icon': { color: fg, ml: 0.5 },
-                        }} />
-                    </Box>
-                  )
+              <Stack direction="row" spacing={0.5} sx={{ mt: 0.5 }} flexWrap="wrap" useFlexGap alignItems="center">
+                {journey.sections.filter(s => s.type === 'public_transport' || s.type === 'street_network' || s.type === 'transfer').map((s, i, arr) => {
+                  if (s.type === 'public_transport' && s.display_informations) {
+                    const di = s.display_informations
+                    const bg = modeColor(di.commercial_mode, di.color)
+                    const fg = di.text_color ? `#${di.text_color}` : '#fff'
+                    return (
+                      <Box key={i} sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.3 }}>
+                        {i > 0 && arr[i - 1]?.type === 'public_transport' && <Typography variant="caption" sx={{ color: 'text.disabled', mx: 0.2 }}>›</Typography>}
+                        <Chip icon={modeIcon(di.commercial_mode)} label={di.label || di.commercial_mode}
+                          size="small"
+                          sx={{
+                            bgcolor: bg, color: fg, fontWeight: 700, fontSize: 11, height: 24,
+                            boxShadow: `0 0 8px ${alpha(bg, 0.3)}`,
+                            '& .MuiChip-icon': { color: fg, ml: 0.5 },
+                          }} />
+                      </Box>
+                    )
+                  }
+                  if ((s.type === 'street_network' || s.type === 'transfer') && s.duration > 0) {
+                    return (
+                      <Box key={i} sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.3 }}>
+                        <DirectionsWalk sx={{ fontSize: 14, color: 'text.disabled' }} />
+                        <Typography variant="caption" sx={{ fontSize: 10, color: 'text.disabled', fontWeight: 600 }}>
+                          {formatDuration(s.duration)}
+                        </Typography>
+                      </Box>
+                    )
+                  }
+                  return null
                 })}
               </Stack>
               {journey.tags?.length > 0 && (
@@ -986,6 +1046,19 @@ export default function App() {
     localStorage.setItem('glove_walking_speed', String(v))
   }
 
+  const defaultModes = { metro: true, rail: true, bus: true, tramway: true, walk: true, bike: true, car: true }
+  const [modes, setModes] = useState(() => {
+    const saved = localStorage.getItem('glove_modes')
+    return saved ? { ...defaultModes, ...JSON.parse(saved) } : defaultModes
+  })
+  const toggleMode = (mode) => {
+    setModes(prev => {
+      const next = { ...prev, [mode]: !prev[mode] }
+      localStorage.setItem('glove_modes', JSON.stringify(next))
+      return next
+    })
+  }
+
   const refreshStatus = () => {
     fetch('/api/status').then(r => r.json()).then(setStatus).catch(() => {})
   }
@@ -999,6 +1072,8 @@ export default function App() {
   const search = async (e) => {
     e.preventDefault()
     if (!from || !to) return
+    saveRecentPlace(from)
+    saveRecentPlace(to)
     setLoading(true); setError(null); setJourneys(null); setWalkJourney(null); setBikeJourneys(null); setCarJourney(null); setSelectedJourney(0); setResultTab('pt'); setPtTime(null); setWalkTime(null); setBikeTime(null); setCarTime(null)
     try {
       let effectiveDatetime
@@ -1009,15 +1084,20 @@ export default function App() {
       } else {
         effectiveDatetime = defaultDatetime()
       }
-      const ptParams = new URLSearchParams({ from: from.id, to: to.id, datetime: toApiDatetime(effectiveDatetime) })
+      const fromCoord = from.stop_point?.coord || from.coord
+      const toCoord = to.stop_point?.coord || to.coord
+      const ptFrom = fromCoord ? `${fromCoord.lon};${fromCoord.lat}` : from.id
+      const ptTo = toCoord ? `${toCoord.lon};${toCoord.lat}` : to.id
+      const ptParams = new URLSearchParams({ from: ptFrom, to: ptTo, datetime: toApiDatetime(effectiveDatetime) })
+      if (walkingSpeed !== 5) ptParams.set('walking_speed', String(walkingSpeed))
+      const forbidden = ['metro', 'rail', 'bus', 'tramway'].filter(m => !modes[m])
+      if (forbidden.length > 0) ptParams.set('forbidden_modes', forbidden.join(','))
       const ptT0 = performance.now()
       const ptFetch = fetch(`/api/journeys/public_transport?${ptParams}`)
         .then(r => r.json())
         .then(data => { setPtTime(Math.round(performance.now() - ptT0)); return data })
 
       // Walk, bike and car requests use lon;lat coordinates
-      const fromCoord = from.stop_point?.coord || from.coord
-      const toCoord = to.stop_point?.coord || to.coord
       let walkFetch = null
       let bikeFetch = null
       let carFetch = null
@@ -1026,23 +1106,29 @@ export default function App() {
           from: `${fromCoord.lon};${fromCoord.lat}`,
           to: `${toCoord.lon};${toCoord.lat}`,
         })
-        const walkParams = new URLSearchParams(coordParams)
-        if (walkingSpeed !== 5) walkParams.set('walking_speed', String(walkingSpeed))
-        const walkT0 = performance.now()
-        walkFetch = fetch(`/api/journeys/walk?${walkParams}`)
-          .then(r => r.ok ? r.json() : null)
-          .then(data => { setWalkTime(Math.round(performance.now() - walkT0)); return data })
-          .catch(() => null)
-        const bikeT0 = performance.now()
-        bikeFetch = fetch(`/api/journeys/bike?${coordParams}`)
-          .then(r => r.ok ? r.json() : null)
-          .then(data => { setBikeTime(Math.round(performance.now() - bikeT0)); return data })
-          .catch(() => null)
-        const carT0 = performance.now()
-        carFetch = fetch(`/api/journeys/car?${coordParams}`)
-          .then(r => r.ok ? r.json() : null)
-          .then(data => { setCarTime(Math.round(performance.now() - carT0)); return data })
-          .catch(() => null)
+        if (modes.walk) {
+          const walkParams = new URLSearchParams(coordParams)
+          if (walkingSpeed !== 5) walkParams.set('walking_speed', String(walkingSpeed))
+          const walkT0 = performance.now()
+          walkFetch = fetch(`/api/journeys/walk?${walkParams}`)
+            .then(r => r.ok ? r.json() : null)
+            .then(data => { setWalkTime(Math.round(performance.now() - walkT0)); return data })
+            .catch(() => null)
+        }
+        if (modes.bike) {
+          const bikeT0 = performance.now()
+          bikeFetch = fetch(`/api/journeys/bike?${coordParams}`)
+            .then(r => r.ok ? r.json() : null)
+            .then(data => { setBikeTime(Math.round(performance.now() - bikeT0)); return data })
+            .catch(() => null)
+        }
+        if (modes.car) {
+          const carT0 = performance.now()
+          carFetch = fetch(`/api/journeys/car?${coordParams}`)
+            .then(r => r.ok ? r.json() : null)
+            .then(data => { setCarTime(Math.round(performance.now() - carT0)); return data })
+            .catch(() => null)
+        }
       }
 
       const [ptData, walkData, bikeData, carData] = await Promise.all([ptFetch, walkFetch, bikeFetch, carFetch])
@@ -1253,7 +1339,7 @@ export default function App() {
                     </Tooltip>
                   </Box>
 
-                  {/* Departure time: "Now" chip + date/time pickers */}
+                  {/* Departure time: "Now" / "Later" chips + collapsible date/time pickers */}
                   <Box>
                     <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
                       <Chip
@@ -1262,7 +1348,7 @@ export default function App() {
                         onClick={() => { setDepartDate(null); setDepartTime(null) }}
                         variant={isNow ? 'filled' : 'outlined'}
                         sx={{
-                          fontWeight: 600, fontSize: 12, flexShrink: 0,
+                          fontWeight: 600, fontSize: 12,
                           ...(isNow ? {
                             bgcolor: 'rgba(0, 229, 255, 0.15)', color: '#00e5ff',
                             border: '1px solid rgba(0, 229, 255, 0.3)',
@@ -1271,33 +1357,52 @@ export default function App() {
                           }),
                         }}
                       />
-                      <DatePicker
-                        value={departDate}
-                        onChange={setDepartDate}
-                        label={t('date')}
-                        format="DD/MM/YYYY"
-                        slotProps={{
-                          textField: {
-                            size: 'small',
-                            sx: { flex: 1, '& .MuiInputBase-input': { fontSize: 12, py: 0.6 }, '& .MuiInputLabel-root': { fontSize: 12 }, '& .MuiInputAdornment-root': { ml: 0 } },
-                          },
-                          openPickerButton: { sx: { p: 0.3, '& svg': { fontSize: 18 } } },
-                        }}
-                      />
-                      <TimePicker
-                        value={departTime}
-                        onChange={setDepartTime}
-                        label={t('time')}
-                        ampm={false}
-                        slotProps={{
-                          textField: {
-                            size: 'small',
-                            sx: { width: 105, '& .MuiInputBase-input': { fontSize: 12, py: 0.6 }, '& .MuiInputLabel-root': { fontSize: 12 }, '& .MuiInputAdornment-root': { ml: 0 } },
-                          },
-                          openPickerButton: { sx: { p: 0.3, '& svg': { fontSize: 18 } } },
+                      <Chip
+                        icon={<CalendarMonth fontSize="small" />}
+                        label={t('later')}
+                        onClick={() => { if (isNow) { setDepartDate(dayjs()); setDepartTime(dayjs()) } }}
+                        variant={!isNow ? 'filled' : 'outlined'}
+                        sx={{
+                          fontWeight: 600, fontSize: 12,
+                          ...(!isNow ? {
+                            bgcolor: 'rgba(0, 229, 255, 0.15)', color: '#00e5ff',
+                            border: '1px solid rgba(0, 229, 255, 0.3)',
+                          } : {
+                            borderColor: 'rgba(255,255,255,0.12)', color: 'text.secondary',
+                          }),
                         }}
                       />
                     </Box>
+                    <Collapse in={!isNow}>
+                      <Box sx={{ display: 'flex', gap: 1, mt: 1.5 }}>
+                        <DatePicker
+                          value={departDate}
+                          onChange={setDepartDate}
+                          label={t('date')}
+                          format="DD/MM/YYYY"
+                          slotProps={{
+                            textField: {
+                              size: 'small',
+                              sx: { flex: 1, '& .MuiInputBase-input': { fontSize: 12, py: 0.6 }, '& .MuiInputLabel-root': { fontSize: 12 }, '& .MuiInputAdornment-root': { ml: 0 } },
+                            },
+                            openPickerButton: { sx: { p: 0.3, '& svg': { fontSize: 18 } } },
+                          }}
+                        />
+                        <TimePicker
+                          value={departTime}
+                          onChange={setDepartTime}
+                          label={t('time')}
+                          ampm={false}
+                          slotProps={{
+                            textField: {
+                              size: 'small',
+                              sx: { width: 105, '& .MuiInputBase-input': { fontSize: 12, py: 0.6 }, '& .MuiInputLabel-root': { fontSize: 12 }, '& .MuiInputAdornment-root': { ml: 0 } },
+                            },
+                            openPickerButton: { sx: { p: 0.3, '& svg': { fontSize: 18 } } },
+                          }}
+                        />
+                      </Box>
+                    </Collapse>
                   </Box>
 
                   {/* Collapsible options */}
@@ -1339,6 +1444,39 @@ export default function App() {
                             '& .MuiSlider-rail': { opacity: 0.2 },
                           }}
                         />
+
+                        <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: 11, mt: 1, mb: 0.5, display: 'block' }}>
+                          {t('transportModes')}
+                        </Typography>
+                        <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.25 }}>
+                          {[
+                            { key: 'metro', icon: <Subway sx={{ fontSize: 16 }} />, label: t('modeMetro') },
+                            { key: 'rail', icon: <Train sx={{ fontSize: 16 }} />, label: t('modeRail') },
+                            { key: 'tramway', icon: <Tram sx={{ fontSize: 16 }} />, label: t('modeTramway') },
+                            { key: 'bus', icon: <DirectionsBus sx={{ fontSize: 16 }} />, label: t('modeBus') },
+                            { key: 'walk', icon: <DirectionsWalk sx={{ fontSize: 16 }} />, label: t('modeWalk') },
+                            { key: 'bike', icon: <DirectionsBike sx={{ fontSize: 16 }} />, label: t('modeBike') },
+                            { key: 'car', icon: <DirectionsCar sx={{ fontSize: 16 }} />, label: t('modeCar') },
+                          ].map(m => (
+                            <Chip
+                              key={m.key}
+                              icon={m.icon}
+                              label={m.label}
+                              size="small"
+                              onClick={() => toggleMode(m.key)}
+                              variant={modes[m.key] ? 'filled' : 'outlined'}
+                              sx={{
+                                fontSize: 10,
+                                height: 26,
+                                bgcolor: modes[m.key] ? 'rgba(0, 229, 255, 0.15)' : 'transparent',
+                                borderColor: modes[m.key] ? 'rgba(0, 229, 255, 0.4)' : 'rgba(255,255,255,0.12)',
+                                color: modes[m.key] ? '#00e5ff' : 'text.disabled',
+                                '& .MuiChip-icon': { color: modes[m.key] ? '#00e5ff' : 'text.disabled' },
+                                '&:hover': { bgcolor: 'rgba(0, 229, 255, 0.1)' },
+                              }}
+                            />
+                          ))}
+                        </Box>
                       </Box>
                     </Collapse>
                   </Box>
@@ -1512,7 +1650,10 @@ export default function App() {
 
           {mapData.lines.map((line, i) => (
             <Polyline key={`line-${i}`} positions={smoothLine(line.coords)}
-              pathOptions={{ color: line.color, weight: 5, opacity: 0.9, lineCap: 'round', lineJoin: 'round' }} />
+              pathOptions={{
+                color: line.color, weight: line.dashed ? 4 : 5, opacity: 0.9, lineCap: 'round', lineJoin: 'round',
+                ...(line.dashed ? { dashArray: '8, 6' } : {}),
+              }} />
           ))}
 
           {isWalkSelected && walkCoords.length >= 2 && (

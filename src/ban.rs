@@ -3,7 +3,6 @@
 //! Loads BAN CSV files, deduplicates at the street+postcode level,
 //! and provides fuzzy autocomplete search.
 
-use std::collections::HashSet;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -16,17 +15,66 @@ use crate::text::normalize;
 // Data structures
 // ---------------------------------------------------------------------------
 
+/// A single address point: street number with its exact coordinates.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct AddressPoint {
+    pub num: u32,
+    pub lon: f64,
+    pub lat: f64,
+}
+
 /// A deduplicated BAN address entry (one per unique street + postcode).
+/// Stores all known street numbers with their exact GPS coordinates
+/// for precise positioning by house number.
 #[derive(Serialize, Deserialize)]
 pub struct BanEntry {
     /// Display label, e.g. "Rue de Rivoli, 75001 Paris".
     pub label: String,
     /// Normalized label for fuzzy search.
     pub name_lower: String,
-    /// Representative longitude.
+    /// Centroid longitude (fallback when no number is requested).
     pub lon: f64,
-    /// Representative latitude.
+    /// Centroid latitude (fallback when no number is requested).
     pub lat: f64,
+    /// All known address points along this street, sorted by number.
+    pub points: Vec<AddressPoint>,
+}
+
+impl BanEntry {
+    /// Look up the exact coordinates for a given street number.
+    /// - Exact match → exact coordinates.
+    /// - No exact match → interpolates between the two nearest known numbers.
+    /// - No number requested or no points → centroid.
+    pub fn locate(&self, number: Option<u32>) -> (f64, f64) {
+        let num = match number {
+            Some(n) if !self.points.is_empty() => n,
+            _ => return (self.lon, self.lat),
+        };
+
+        // Exact match
+        if let Ok(i) = self.points.binary_search_by_key(&num, |p| p.num) {
+            return (self.points[i].lon, self.points[i].lat);
+        }
+
+        // Interpolate between the two nearest neighbors
+        let pos = self.points.partition_point(|p| p.num < num);
+        if pos == 0 {
+            let p = &self.points[0];
+            return (p.lon, p.lat);
+        }
+        if pos >= self.points.len() {
+            let p = &self.points[self.points.len() - 1];
+            return (p.lon, p.lat);
+        }
+
+        let lo = &self.points[pos - 1];
+        let hi = &self.points[pos];
+        let t = (num - lo.num) as f64 / (hi.num - lo.num) as f64;
+        (
+            lo.lon + t * (hi.lon - lo.lon),
+            lo.lat + t * (hi.lat - lo.lat),
+        )
+    }
 }
 
 /// In-memory BAN address index.
@@ -42,6 +90,8 @@ pub struct BanData {
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 struct BanRow {
+    #[serde(default)]
+    numero: String,
     #[serde(default)]
     nom_voie: String,
     #[serde(default)]
@@ -73,14 +123,19 @@ impl BanData {
 
         info!("Loading BAN data from {}", ban_dir.display());
 
-        let mut seen: HashSet<(String, String)> = HashSet::new();
-        let mut entries: Vec<BanEntry> = Vec::new();
-        let mut total_rows: u64 = 0;
+        use std::collections::HashMap;
+
+        struct StreetAcc {
+            label: String,
+            name_lower: String,
+            points: Vec<AddressPoint>,
+        }
+
+        let mut streets: HashMap<(String, String), StreetAcc> = HashMap::new();
 
         let mut files: Vec<_> = std::fs::read_dir(ban_dir)
             .unwrap_or_else(|e| {
                 info!("Cannot read BAN directory: {e}");
-                // Return an empty iterator by reading /dev/null-like
                 std::fs::read_dir(ban_dir).unwrap()
             })
             .filter_map(|e| e.ok())
@@ -114,15 +169,8 @@ impl BanData {
                     Err(_) => continue,
                 };
 
-                total_rows += 1;
-
                 if row.nom_voie.is_empty() || row.code_postal.is_empty() {
                     continue;
-                }
-
-                let key = (row.nom_voie.clone(), row.code_postal.clone());
-                if !seen.insert(key) {
-                    continue; // already seen this street+postcode
                 }
 
                 let lon: f64 = match row.lon.parse() {
@@ -134,23 +182,58 @@ impl BanData {
                     Err(_) => continue,
                 };
 
-                let label = format!("{}, {} {}", row.nom_voie, row.code_postal, row.nom_commune);
-                let name_lower = normalize(&label);
+                let num: u32 = row.numero.parse().unwrap_or(0);
+                let key = (row.nom_voie.clone(), row.code_postal.clone());
 
-                entries.push(BanEntry {
-                    label,
-                    name_lower,
-                    lon,
-                    lat,
-                });
+                streets
+                    .entry(key)
+                    .or_insert_with(|| {
+                        let label =
+                            format!("{}, {} {}", row.nom_voie, row.code_postal, row.nom_commune);
+                        let name_lower = normalize(&label);
+                        StreetAcc {
+                            label,
+                            name_lower,
+                            points: Vec::new(),
+                        }
+                    })
+                    .points
+                    .push(AddressPoint { num, lon, lat });
             }
         }
 
+        let total_points: usize = streets.values().map(|s| s.points.len()).sum();
+
+        let mut entries: Vec<BanEntry> = streets
+            .into_values()
+            .map(|mut acc| {
+                // Sort points by street number for binary search
+                acc.points.sort_by_key(|p| p.num);
+                acc.points.dedup_by_key(|p| p.num);
+
+                // Centroid as fallback (when no number requested)
+                let (sum_lon, sum_lat) = acc
+                    .points
+                    .iter()
+                    .fold((0.0, 0.0), |(sl, sa), p| (sl + p.lon, sa + p.lat));
+                let n = acc.points.len().max(1) as f64;
+
+                BanEntry {
+                    label: acc.label,
+                    name_lower: acc.name_lower,
+                    lon: sum_lon / n,
+                    lat: sum_lat / n,
+                    points: acc.points,
+                }
+            })
+            .collect();
+
         entries.sort_by(|a, b| a.name_lower.cmp(&b.name_lower));
         info!(
-            "{} BAN addresses loaded ({} rows deduplicated)",
+            "{} BAN streets loaded ({} address points, {:.1} MB est.)",
             entries.len(),
-            total_rows
+            total_points,
+            total_points as f64 * 20.0 / 1_048_576.0
         );
 
         BanData { entries }
@@ -243,6 +326,7 @@ impl BanData {
         }
 
         let q = normalize(query);
+        let q_words: Vec<&str> = q.split_whitespace().collect();
         let mut results: Vec<(&BanEntry, usize)> = Vec::new();
 
         for entry in &self.entries {
@@ -258,6 +342,23 @@ impl BanData {
                 2
             } else if entry.name_lower.contains(&q) {
                 3
+            } else if q_words.len() >= 2 && {
+                // Multi-word matching: all non-numeric query words must match
+                // as prefix of some entry word. Numbers (street numbers) are
+                // ignored since BAN labels don't include them.
+                let alpha_words: Vec<&&str> = q_words
+                    .iter()
+                    .filter(|w| !w.chars().all(|c| c.is_ascii_digit() || c == ','))
+                    .collect();
+                alpha_words.len() >= 2
+                    && alpha_words.iter().all(|qw| {
+                        entry
+                            .name_lower
+                            .split_whitespace()
+                            .any(|ew| ew.starts_with(**qw))
+                    })
+            } {
+                4
             } else {
                 continue;
             };
@@ -279,27 +380,34 @@ impl BanData {
 mod tests {
     use super::*;
 
+    fn make_entry(label: &str, lon: f64, lat: f64) -> BanEntry {
+        BanEntry {
+            label: label.to_string(),
+            name_lower: normalize(label),
+            lon,
+            lat,
+            points: vec![
+                AddressPoint {
+                    num: 1,
+                    lon: lon - 0.005,
+                    lat: lat - 0.001,
+                },
+                AddressPoint { num: 100, lon, lat },
+                AddressPoint {
+                    num: 200,
+                    lon: lon + 0.005,
+                    lat: lat + 0.001,
+                },
+            ],
+        }
+    }
+
     fn make_test_ban() -> BanData {
         BanData {
             entries: vec![
-                BanEntry {
-                    label: "Rue de Rivoli, 75001 Paris".to_string(),
-                    name_lower: normalize("Rue de Rivoli, 75001 Paris"),
-                    lon: 2.3387,
-                    lat: 48.8606,
-                },
-                BanEntry {
-                    label: "Avenue des Champs-Élysées, 75008 Paris".to_string(),
-                    name_lower: normalize("Avenue des Champs-Élysées, 75008 Paris"),
-                    lon: 2.3065,
-                    lat: 48.8698,
-                },
-                BanEntry {
-                    label: "Boulevard Saint-Germain, 75005 Paris".to_string(),
-                    name_lower: normalize("Boulevard Saint-Germain, 75005 Paris"),
-                    lon: 2.3441,
-                    lat: 48.8509,
-                },
+                make_entry("Rue de Rivoli, 75001 Paris", 2.3387, 48.8606),
+                make_entry("Avenue des Champs-Élysées, 75008 Paris", 2.3065, 48.8698),
+                make_entry("Boulevard Saint-Germain, 75005 Paris", 2.3441, 48.8509),
             ],
         }
     }
@@ -509,12 +617,11 @@ mod tests {
     #[test]
     fn search_word_prefix() {
         let ban = BanData {
-            entries: vec![BanEntry {
-                label: "Place de la Republique, 75003 Paris".to_string(),
-                name_lower: normalize("Place de la Republique, 75003 Paris"),
-                lon: 2.36,
-                lat: 48.87,
-            }],
+            entries: vec![make_entry(
+                "Place de la Republique, 75003 Paris",
+                2.36,
+                48.87,
+            )],
         };
         // "rep" should match via word-prefix on "republique"
         let results = ban.search("rep", 10);

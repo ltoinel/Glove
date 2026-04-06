@@ -12,7 +12,8 @@ use utoipa::{IntoParams, ToSchema};
 use crate::config::AppConfig;
 use crate::raptor::{self, RaptorData, SectionType};
 
-use crate::api::{Section, StopDateTime, make_place, make_stop_point};
+use super::valhalla;
+use crate::api::{Place, Section, StopDateTime, make_place, make_stop_point};
 
 // ---------------------------------------------------------------------------
 // Query parameters
@@ -67,6 +68,9 @@ pub struct JourneysQuery {
 
     pub free_radius_from: Option<i32>,
     pub free_radius_to: Option<i32>,
+
+    /// Comma-separated commercial modes to exclude (e.g. "metro,bus,rail").
+    pub forbidden_modes: Option<String>,
 
     pub count: Option<i32>,
     pub min_nb_journeys: Option<i32>,
@@ -182,23 +186,40 @@ pub async fn get_journeys(
         }
     };
 
-    let source = match raptor_data.resolve_stop(from_str) {
-        Some(idx) => idx,
-        None => {
-            return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": { "id": "unknown_object", "message": format!("Stop not found: {from_str}") }
-            }));
-        }
-    };
+    // Parse origin/destination — may be stop IDs or "lon;lat" coordinates
+    let from_coord = parse_coord(from_str);
+    let to_coord = parse_coord(to_str);
 
-    let target = match raptor_data.resolve_stop(to_str) {
-        Some(idx) => idx,
-        None => {
-            return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": { "id": "unknown_object", "message": format!("Stop not found: {to_str}") }
-            }));
-        }
+    let max_dist = config.routing.max_nearest_stop_distance;
+    let walking_speed = query.walking_speed.unwrap_or(5.0);
+
+    // Resolve sources: coordinates → all nearby stops; stop ID → single stop
+    let sources: Vec<(usize, u32)> = if let Some((lon, lat)) = from_coord {
+        raptor_data.find_nearby_stops(lon, lat, max_dist, walking_speed)
+    } else if let Some(idx) = raptor_data.resolve_stop(from_str, max_dist) {
+        vec![(idx, 0)]
+    } else {
+        vec![]
     };
+    if sources.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": { "id": "unknown_object", "message": format!("No stop found within {} m of {from_str}", max_dist) }
+        }));
+    }
+
+    // Resolve targets: coordinates → all nearby stops; stop ID → single stop
+    let targets: Vec<(usize, u32)> = if let Some((lon, lat)) = to_coord {
+        raptor_data.find_nearby_stops(lon, lat, max_dist, walking_speed)
+    } else if let Some(idx) = raptor_data.resolve_stop(to_str, max_dist) {
+        vec![(idx, 0)]
+    } else {
+        vec![]
+    };
+    if targets.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": { "id": "unknown_object", "message": format!("No stop found within {} m of {to_str}", max_dist) }
+        }));
+    }
 
     let (date, departure_time) = match &query.datetime {
         Some(dt) => match raptor::parse_datetime(dt) {
@@ -236,9 +257,39 @@ pub async fn get_journeys(
     // Pre-compute active services once for all diversity iterations
     let active = raptor_data.active_services(&date);
 
+    // Pre-compute patterns to exclude based on forbidden transport modes
+    let forbidden_modes_str = query.forbidden_modes.as_deref().unwrap_or("");
+    let mode_excluded: rustc_hash::FxHashSet<usize> = if !forbidden_modes_str.is_empty() {
+        let forbidden_types: rustc_hash::FxHashSet<u16> = forbidden_modes_str
+            .split(',')
+            .filter_map(|m| match m.trim() {
+                "tramway" => Some(0),
+                "metro" => Some(1),
+                "rail" => Some(2),
+                "bus" => Some(3),
+                "funicular" => Some(7),
+                _ => None,
+            })
+            .collect();
+        raptor_data
+            .patterns
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| {
+                raptor_data
+                    .routes
+                    .get(&p.route_id)
+                    .is_some_and(|r| forbidden_types.contains(&r.route_type))
+            })
+            .map(|(i, _)| i)
+            .collect()
+    } else {
+        rustc_hash::FxHashSet::default()
+    };
+
     // Iterative search with pattern exclusion for route diversity
     let mut journeys: Vec<Journey> = Vec::new();
-    let mut excluded_patterns = rustc_hash::FxHashSet::default();
+    let mut excluded_patterns = mode_excluded.clone();
 
     for _ in 0..requested {
         if journeys.len() >= requested {
@@ -247,15 +298,14 @@ pub async fn get_journeys(
 
         let result = raptor::raptor_query(
             &raptor_data,
-            source,
-            target,
+            &sources,
             departure_time,
             &active,
             max_transfers,
             &excluded_patterns,
         );
 
-        let section_sets = raptor::reconstruct_journeys(&raptor_data, &result, target);
+        let section_sets = raptor::reconstruct_journeys(&raptor_data, &result, &targets);
         if section_sets.is_empty() {
             break;
         }
@@ -269,8 +319,7 @@ pub async fn get_journeys(
             }
 
             let dominated = journeys.iter().any(|existing| {
-                existing.departure_date_time == journey.departure_date_time
-                    && existing.arrival_date_time == journey.arrival_date_time
+                journey_sections_equal(existing, &journey)
             });
 
             if !dominated {
@@ -282,9 +331,242 @@ pub async fn get_journeys(
     }
 
     journeys.sort_by_key(|j| j.duration);
+
+    // Compute first/last mile walking legs per journey.
+    // Each journey may start/end at a different stop, so we compute the walking
+    // leg to/from the actual first/last PT stop (not the nearest-stop proxy).
+    // Results are cached by stop index to avoid redundant Valhalla calls.
+    if !journeys.is_empty() && (from_coord.is_some() || to_coord.is_some()) {
+        let valhalla_base = format!("http://{}:{}", config.valhalla.host, config.valhalla.port);
+        let walking_speed = query.walking_speed;
+
+        // Cache: stop_idx → WalkLeg (avoid recomputing for the same stop across journeys)
+        let mut first_mile_cache: rustc_hash::FxHashMap<usize, Option<valhalla::WalkLeg>> =
+            rustc_hash::FxHashMap::default();
+        let mut last_mile_cache: rustc_hash::FxHashMap<usize, Option<valhalla::WalkLeg>> =
+            rustc_hash::FxHashMap::default();
+
+        for journey in &mut journeys {
+            // Identify the actual first and last PT stops of this journey
+            let first_pt_section = journey
+                .sections
+                .iter()
+                .find(|s| s.section_type == "public_transport");
+            let last_pt_section = journey
+                .sections
+                .iter()
+                .rev()
+                .find(|s| s.section_type == "public_transport");
+
+            let first_stop_idx = first_pt_section
+                .and_then(|s| s.from.stop_point.as_ref())
+                .and_then(|sp| raptor_data.stop_index.get(&sp.id))
+                .copied();
+            let last_stop_idx = last_pt_section
+                .and_then(|s| s.to.stop_point.as_ref())
+                .and_then(|sp| raptor_data.stop_index.get(&sp.id))
+                .copied();
+
+            // Compute first-mile and last-mile in parallel
+            let first_mile_fut = async {
+                if let (Some(from_c), Some(stop_idx)) = (from_coord, first_stop_idx) {
+                    let stop = &raptor_data.stops[stop_idx];
+                    if (from_c.0 - stop.stop_lon).abs() < 1e-6
+                        && (from_c.1 - stop.stop_lat).abs() < 1e-6
+                    {
+                        return (stop_idx, None);
+                    }
+                    if let Some(cached) = first_mile_cache.get(&stop_idx) {
+                        return (stop_idx, cached.clone());
+                    }
+                    let result = valhalla::pedestrian_route(
+                        &valhalla_base,
+                        from_c,
+                        (stop.stop_lon, stop.stop_lat),
+                        walking_speed,
+                    )
+                    .await;
+                    (stop_idx, result)
+                } else {
+                    (0, None)
+                }
+            };
+
+            let last_mile_fut = async {
+                if let (Some(to_c), Some(stop_idx)) = (to_coord, last_stop_idx) {
+                    let stop = &raptor_data.stops[stop_idx];
+                    if (to_c.0 - stop.stop_lon).abs() < 1e-6
+                        && (to_c.1 - stop.stop_lat).abs() < 1e-6
+                    {
+                        return (stop_idx, None);
+                    }
+                    if let Some(cached) = last_mile_cache.get(&stop_idx) {
+                        return (stop_idx, cached.clone());
+                    }
+                    let result = valhalla::pedestrian_route(
+                        &valhalla_base,
+                        (stop.stop_lon, stop.stop_lat),
+                        to_c,
+                        walking_speed,
+                    )
+                    .await;
+                    (stop_idx, result)
+                } else {
+                    (0, None)
+                }
+            };
+
+            let ((fm_idx, first_mile), (lm_idx, last_mile)) =
+                futures::future::join(first_mile_fut, last_mile_fut).await;
+
+            // Cache results
+            if from_coord.is_some() && first_stop_idx.is_some() {
+                first_mile_cache.insert(fm_idx, first_mile.clone());
+            }
+            if to_coord.is_some() && last_stop_idx.is_some() {
+                last_mile_cache.insert(lm_idx, last_mile.clone());
+            }
+
+            // Prepend first-mile walking section
+            if let (Some(walk), Some(stop_idx)) = (&first_mile, first_stop_idx) {
+                // Remove leading transfer sections that are now redundant
+                // (the user walks directly from origin to the first PT stop)
+                while journey
+                    .sections
+                    .first()
+                    .is_some_and(|s| s.section_type == "transfer")
+                {
+                    let removed = journey.sections.remove(0);
+                    journey.duration = journey.duration.saturating_sub(removed.duration);
+                }
+
+                let first_dep = journey
+                    .sections
+                    .first()
+                    .map(|s| s.departure_date_time.clone())
+                    .unwrap_or_default();
+                let walk_dep_secs = journey
+                    .sections
+                    .first()
+                    .and_then(|s| {
+                        raptor::parse_datetime(&s.departure_date_time)
+                            .map(|(_, t)| t.saturating_sub(walk.duration))
+                    })
+                    .unwrap_or(0);
+                let walk_dep = raptor::format_datetime(&date, walk_dep_secs);
+                let (flon, flat) = from_coord.unwrap();
+                let stop = &raptor_data.stops[stop_idx];
+                let section = Section {
+                    section_type: "street_network".to_string(),
+                    from: Place {
+                        id: format!("{flon};{flat}"),
+                        name: "".to_string(),
+                        stop_point: None,
+                    },
+                    to: make_place(stop),
+                    departure_date_time: walk_dep,
+                    arrival_date_time: first_dep,
+                    duration: walk.duration,
+                    display_informations: None,
+                    stop_date_times: None,
+                    shape: Some(walk.shape.clone()),
+                    distance: Some(walk.distance),
+                };
+                journey.sections.insert(0, section);
+                journey.duration += walk.duration;
+                journey.departure_date_time = journey
+                    .sections
+                    .first()
+                    .unwrap()
+                    .departure_date_time
+                    .clone();
+            }
+
+            // Append last-mile walking section
+            if let (Some(walk), Some(stop_idx)) = (&last_mile, last_stop_idx) {
+                // Remove trailing transfer sections that are now redundant
+                // (the user walks directly from the last PT stop to destination)
+                while journey
+                    .sections
+                    .last()
+                    .is_some_and(|s| s.section_type == "transfer")
+                {
+                    let removed = journey.sections.pop().unwrap();
+                    journey.duration = journey.duration.saturating_sub(removed.duration);
+                }
+
+                let last_arr = journey
+                    .sections
+                    .last()
+                    .map(|s| s.arrival_date_time.clone())
+                    .unwrap_or_default();
+                let walk_arr_secs = journey
+                    .sections
+                    .last()
+                    .and_then(|s| {
+                        raptor::parse_datetime(&s.arrival_date_time)
+                            .map(|(_, t)| t + walk.duration)
+                    })
+                    .unwrap_or(0);
+                let walk_arr = raptor::format_datetime(&date, walk_arr_secs);
+                let (tlon, tlat) = to_coord.unwrap();
+                let stop = &raptor_data.stops[stop_idx];
+                let section = Section {
+                    section_type: "street_network".to_string(),
+                    from: make_place(stop),
+                    to: Place {
+                        id: format!("{tlon};{tlat}"),
+                        name: "".to_string(),
+                        stop_point: None,
+                    },
+                    departure_date_time: last_arr,
+                    arrival_date_time: walk_arr,
+                    duration: walk.duration,
+                    display_informations: None,
+                    stop_date_times: None,
+                    shape: Some(walk.shape.clone()),
+                    distance: Some(walk.distance),
+                };
+                journey.sections.push(section);
+                journey.duration += walk.duration;
+                journey.arrival_date_time =
+                    journey.sections.last().unwrap().arrival_date_time.clone();
+            }
+        }
+    }
+
     tag_journeys(&mut journeys);
 
     HttpResponse::Ok().json(JourneysResponse { journeys })
+}
+
+/// Two journeys are considered duplicates when their public-transport
+/// sections use the same stops (from/to) and display the same line label.
+/// This catches itineraries that differ only in departure time but follow
+/// the exact same route.
+fn journey_section_key(j: &Journey) -> Vec<(&str, &str, &str)> {
+    j.sections
+        .iter()
+        .filter(|s| s.section_type == "public_transport")
+        .map(|s| {
+            let label = s
+                .display_informations
+                .as_ref()
+                .map(|d| d.label.as_str())
+                .unwrap_or("");
+            (s.from.id.as_str(), s.to.id.as_str(), label)
+        })
+        .collect()
+}
+
+fn journey_sections_equal(a: &Journey, b: &Journey) -> bool {
+    journey_section_key(a) == journey_section_key(b)
+}
+
+/// Parse a `"lon;lat"` string into `(lon, lat)`.
+fn parse_coord(s: &str) -> Option<(f64, f64)> {
+    let (lon_str, lat_str) = s.split_once(';')?;
+    Some((lon_str.parse().ok()?, lat_str.parse().ok()?))
 }
 
 // ---------------------------------------------------------------------------
@@ -360,16 +642,77 @@ fn build_journey(data: &RaptorData, sections: &[raptor::JourneySection], date: &
                     stop_date_times = Some(sdt);
                 }
 
-                api_sections.push(Section {
-                    section_type: "public_transport".to_string(),
-                    from: make_place(from_stop),
-                    to: make_place(to_stop),
-                    departure_date_time: dep_dt,
-                    arrival_date_time: arr_dt,
-                    duration,
-                    display_informations: display_info,
-                    stop_date_times,
-                });
+                // Merge with previous PT section if same route and connecting stop
+                // (handles GTFS trip splits where the same physical line changes trip_id)
+                // The previous section may be a transfer at the connecting stop — look past it.
+                let (merge_target_idx, should_merge) = {
+                    let len = api_sections.len();
+                    if len >= 2
+                        && api_sections[len - 1].section_type == "transfer"
+                        && api_sections[len - 2].section_type == "public_transport"
+                        && api_sections[len - 2].to.id == make_place(from_stop).id
+                        && api_sections[len - 2].display_informations.is_some()
+                        && display_info.is_some()
+                        && api_sections[len - 2]
+                            .display_informations
+                            .as_ref()
+                            .unwrap()
+                            .label
+                            == display_info.as_ref().unwrap().label
+                    {
+                        (len - 2, true)
+                    } else if len >= 1
+                        && api_sections[len - 1].section_type == "public_transport"
+                        && api_sections[len - 1].to.id == make_place(from_stop).id
+                        && api_sections[len - 1].display_informations.is_some()
+                        && display_info.is_some()
+                        && api_sections[len - 1]
+                            .display_informations
+                            .as_ref()
+                            .unwrap()
+                            .label
+                            == display_info.as_ref().unwrap().label
+                    {
+                        (len - 1, true)
+                    } else {
+                        (0, false)
+                    }
+                };
+
+                if should_merge {
+                    // Remove intermediate transfer section if present
+                    if merge_target_idx < api_sections.len() - 1 {
+                        api_sections.pop(); // remove the transfer
+                    }
+                    let target = &mut api_sections[merge_target_idx];
+                    target.to = make_place(to_stop);
+                    target.arrival_date_time = arr_dt;
+                    target.duration += duration;
+                    // Undo the transfer count — this is not a real transfer
+                    pt_count -= 1;
+                    nb_transfers = nb_transfers.saturating_sub(1);
+                    // Append stop_date_times (skip first stop of second segment = last stop of first)
+                    if let (Some(existing_sdt), Some(new_sdt)) =
+                        (&mut target.stop_date_times, stop_date_times)
+                    {
+                        for sdt in new_sdt.into_iter().skip(1) {
+                            existing_sdt.push(sdt);
+                        }
+                    }
+                } else {
+                    api_sections.push(Section {
+                        section_type: "public_transport".to_string(),
+                        from: make_place(from_stop),
+                        to: make_place(to_stop),
+                        departure_date_time: dep_dt,
+                        arrival_date_time: arr_dt,
+                        duration,
+                        display_informations: display_info,
+                        stop_date_times,
+                        shape: None,
+                        distance: None,
+                    });
+                }
             }
             SectionType::Transfer => {
                 api_sections.push(Section {
@@ -381,6 +724,8 @@ fn build_journey(data: &RaptorData, sections: &[raptor::JourneySection], date: &
                     duration,
                     display_informations: None,
                     stop_date_times: None,
+                    shape: None,
+                    distance: None,
                 });
             }
         }
@@ -548,6 +893,7 @@ mod tests {
             calendars,
             calendar_dates: vec![],
             transfers: vec![],
+            pathways: vec![],
         };
         Arc::new(raptor::RaptorData::build(gtfs_data, 120))
     }
@@ -607,6 +953,8 @@ mod tests {
                     duration: 300,
                     display_informations: None,
                     stop_date_times: None,
+                    shape: None,
+                    distance: None,
                 }],
             },
             Journey {
@@ -636,14 +984,13 @@ mod tests {
         let active = data.active_services("20260406");
         let result = raptor::raptor_query(
             &data,
-            source,
-            target,
+            &[(source, 0)],
             28000,
             &active,
             3,
             &rustc_hash::FxHashSet::default(),
         );
-        let section_sets = raptor::reconstruct_journeys(&data, &result, target);
+        let section_sets = raptor::reconstruct_journeys(&data, &result, &[(target, 0)]);
         assert!(!section_sets.is_empty());
         let journey = build_journey(&data, &section_sets[0], "20260406");
         assert!(journey.duration > 0);
@@ -660,14 +1007,13 @@ mod tests {
         let active = data.active_services("20260406");
         let result = raptor::raptor_query(
             &data,
-            source,
-            target,
+            &[(source, 0)],
             28000,
             &active,
             3,
             &rustc_hash::FxHashSet::default(),
         );
-        let section_sets = raptor::reconstruct_journeys(&data, &result, target);
+        let section_sets = raptor::reconstruct_journeys(&data, &result, &[(target, 0)]);
         let journey = build_journey(&data, &section_sets[0], "20260406");
         let pt_sections: Vec<_> = journey
             .sections

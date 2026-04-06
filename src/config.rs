@@ -191,6 +191,12 @@ pub struct RoutingConfig {
     /// Maximum journey duration in seconds.
     #[serde(default = "default_max_duration")]
     pub max_duration: u32,
+
+    /// Maximum walking distance to reach the nearest stop (meters).
+    /// Coordinates beyond this radius will be rejected.
+    /// Default: 1500 m (~20 min at 5 km/h).
+    #[serde(default = "default_max_nearest_stop_distance")]
+    pub max_nearest_stop_distance: u32,
 }
 
 impl Default for RoutingConfig {
@@ -200,6 +206,7 @@ impl Default for RoutingConfig {
             max_transfers: default_max_transfers(),
             default_transfer_time: default_transfer_time(),
             max_duration: default_max_duration(),
+            max_nearest_stop_distance: default_max_nearest_stop_distance(),
         }
     }
 }
@@ -215,6 +222,9 @@ fn default_transfer_time() -> u32 {
 }
 fn default_max_duration() -> u32 {
     10800
+}
+fn default_max_nearest_stop_distance() -> u32 {
+    1500
 }
 
 // ---------------------------------------------------------------------------
