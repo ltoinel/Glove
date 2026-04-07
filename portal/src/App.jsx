@@ -136,6 +136,18 @@ function toApiDatetime(val) {
   return clean.slice(0, 8) + 'T' + clean.slice(8).padEnd(6, '0')
 }
 
+// RER lines: A-E, everything else for route_type=2 is Transilien or TER
+const RER_LINES = new Set(['A', 'B', 'C', 'D', 'E'])
+
+function translateMode(mode, label, t) {
+  if (mode === 'rail') {
+    if (label && label.startsWith('TER')) return t('mode_rail_ter')
+    if (label && RER_LINES.has(label.toUpperCase())) return t('mode_rail_rer')
+    return t('mode_rail_transilien')
+  }
+  return t(`mode_${mode}`) || mode
+}
+
 // --- Elevation-colored segments for bike routes ---
 
 function elevationSegments(coords, heights) {
@@ -538,7 +550,7 @@ function JourneyCard({ journey, selected, onSelect, animDelay }) {
                 }} />
                 <Box sx={{ flex: 1, minWidth: 0 }}>
                   <Typography variant="caption" fontWeight={600} color="text.primary">
-                    {isPt ? <>{t(`mode_${di?.commercial_mode}`) || di?.commercial_mode} <strong>{di?.label}</strong></> : s.type === 'street_network' ? (
+                    {isPt ? <>{translateMode(di?.commercial_mode, di?.label, t)} <strong>{di?.label}</strong></> : s.type === 'street_network' ? (
                       <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
                         <DirectionsWalk sx={{ fontSize: 14, color: '#90a4ae' }} /> {t('walkToStation')}
                       </Box>

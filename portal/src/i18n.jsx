@@ -54,7 +54,9 @@ const translations = {
     modeBus: 'Bus',
     // Commercial mode labels (journey detail)
     mode_metro: 'Métro',
-    mode_rail: 'RER',
+    mode_rail_rer: 'RER',
+    mode_rail_ter: 'TER',
+    mode_rail_transilien: 'Transilien',
     mode_tramway: 'Tramway',
     mode_bus: 'Bus',
     mode_funicular: 'Funiculaire',
@@ -148,7 +150,9 @@ const translations = {
     modeBus: 'Bus',
     // Commercial mode labels (journey detail)
     mode_metro: 'Metro',
-    mode_rail: 'RER',
+    mode_rail_rer: 'RER',
+    mode_rail_ter: 'TER',
+    mode_rail_transilien: 'Transilien',
     mode_tramway: 'Tramway',
     mode_bus: 'Bus',
     mode_funicular: 'Funicular',
