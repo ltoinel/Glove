@@ -1,9 +1,8 @@
 # Summary
 
-[Introduction](./introduction.md)
-
 # Getting Started
 
+- [Introduction](./introduction.md)
 - [Installation](./getting-started/installation.md)
 - [Configuration](./getting-started/configuration.md)
 - [Docker](./getting-started/docker.md)

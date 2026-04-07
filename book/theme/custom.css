@@ -221,6 +221,33 @@ table tbody td:first-child { font-weight: 600; }
     line-height: 0;
 }
 
+/* ── Collapsible section wrapper ── */
+.sidebar-section-items {
+    overflow: hidden;
+    max-height: 800px;
+    transition: max-height 0.25s ease, opacity 0.2s ease;
+    opacity: 1;
+}
+
+.sidebar-section-items.collapsed {
+    max-height: 0;
+    opacity: 0;
+}
+
+/* ── Chevron on section titles ── */
+.section-chevron {
+    display: inline-block;
+    margin-right: 0.5em;
+    font-size: 0.55rem;
+    vertical-align: middle;
+    opacity: 0.6;
+    transition: opacity 0.15s ease;
+}
+
+.sidebar .chapter li.part-title:hover .section-chevron {
+    opacity: 1;
+}
+
 /* ── All nav links ── */
 .sidebar ol.chapter li.chapter-item a {
     display: block;
