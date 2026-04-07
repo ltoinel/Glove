@@ -173,11 +173,19 @@ pub async fn get_walk(query: web::Query<WalkQuery>, config: web::Data<AppConfig>
         config.valhalla.host, config.valhalla.port
     );
 
-    // Build costing_options with walking speed if provided (Valhalla range: 0.5–25.5 km/h)
-    let costing_options = query.walking_speed.map(|speed| {
-        let clamped = speed.clamp(0.5, 25.5);
-        serde_json::json!({ "pedestrian": { "walking_speed": clamped } })
-    });
+    // Build costing_options with walking speed and station navigation penalties
+    let costing_options = {
+        let mut opts = serde_json::json!({
+            "pedestrian": {
+                "step_penalty": 30,
+                "elevator_penalty": 60
+            }
+        });
+        if let Some(speed) = query.walking_speed {
+            opts["pedestrian"]["walking_speed"] = serde_json::json!(speed.clamp(0.5, 25.5));
+        }
+        Some(opts)
+    };
 
     let valhalla_req = ValhallaRequest {
         locations: vec![

@@ -48,6 +48,7 @@ $DOCKER run -d \
     -e build_admins=True \
     -e build_time_zones=True \
     -e server_threads=2 \
+    -e include_platforms=True \
     ghcr.io/gis-ops/docker-valhalla/valhalla:latest
 
 ok "Valhalla container started: $CONTAINER_NAME"

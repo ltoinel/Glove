@@ -79,10 +79,18 @@ pub async fn pedestrian_route(
     to: (f64, f64),   // (lon, lat)
     walking_speed: Option<f64>,
 ) -> Option<WalkLeg> {
-    let costing_options = walking_speed.map(|speed| {
-        let clamped = speed.clamp(0.5, 25.5);
-        serde_json::json!({ "pedestrian": { "walking_speed": clamped } })
-    });
+    let costing_options = {
+        let mut opts = serde_json::json!({
+            "pedestrian": {
+                "step_penalty": 30,
+                "elevator_penalty": 60
+            }
+        });
+        if let Some(speed) = walking_speed {
+            opts["pedestrian"]["walking_speed"] = serde_json::json!(speed.clamp(0.5, 25.5));
+        }
+        Some(opts)
+    };
 
     let req = RouteRequest {
         locations: vec![
