@@ -77,7 +77,7 @@ Valhalla pedestrian routing enriches transfer sections with indoor maneuvers whe
 | Juvisy | 304 | 74% |
 | Gare de l'Est | 260 | 32% |
 
-For the full analysis, see [Indoor Routing Coverage](../operations/indoor-coverage.md).
+For the full analysis, see [Indoor Routing Coverage](./indoor-coverage.md).
 
 ## Valhalla Routing Modes
 
