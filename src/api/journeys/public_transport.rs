@@ -534,6 +534,34 @@ pub async fn get_journeys(
                     journey.sections.last().unwrap().arrival_date_time.clone();
             }
         }
+
+        // Enrich transfer sections with Valhalla pedestrian routing
+        for journey in &mut journeys {
+            for section in &mut journey.sections {
+                if section.section_type != "transfer" {
+                    continue;
+                }
+                let from_coord = section
+                    .from
+                    .stop_point
+                    .as_ref()
+                    .map(|sp| (sp.coord.lon, sp.coord.lat));
+                let to_coord = section
+                    .to
+                    .stop_point
+                    .as_ref()
+                    .map(|sp| (sp.coord.lon, sp.coord.lat));
+                if let Some((from, to)) = from_coord.zip(to_coord) {
+                    let walk =
+                        valhalla::pedestrian_route(&valhalla_base, from, to, walking_speed).await;
+                    if let Some(walk) = walk {
+                        section.shape = Some(walk.shape);
+                        section.distance = Some(walk.distance);
+                        section.maneuvers = Some(walk.maneuvers);
+                    }
+                }
+            }
+        }
     }
 
     tag_journeys(&mut journeys);

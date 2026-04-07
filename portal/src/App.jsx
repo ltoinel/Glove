@@ -569,8 +569,8 @@ function JourneyCard({ journey, selected, onSelect, animDelay }) {
                       {t('direction')} {di.direction}
                     </Typography>
                   )}
-                  {s.type === 'street_network' && s.maneuvers && (
-                    <ManeuverList maneuvers={s.maneuvers} color="#90a4ae" />
+                  {(s.type === 'street_network' || s.type === 'transfer') && s.maneuvers && (
+                    <ManeuverList maneuvers={s.maneuvers} color={s.type === 'transfer' ? '#ffb800' : '#90a4ae'} />
                   )}
                 </Box>
                 <Typography variant="caption" color="text.secondary" sx={{ flexShrink: 0, pt: 0.2, opacity: 0.7 }}>
