@@ -12,6 +12,7 @@ import {
   DirectionsBike, DirectionsCar, MonitorHeart, Memory, Speed, Dns, Http,
   Stairs, Elevator, MeetingRoom, TurnLeft, TurnRight, Straight, UTurnLeft,
   RoundaboutLeft, Flag, MyLocation, ForkLeft, ForkRight, MergeType,
+  Commute, Tune,
 } from '@mui/icons-material'
 import SwaggerUI from 'swagger-ui-react'
 import 'swagger-ui-react/swagger-ui.css'
@@ -1551,9 +1552,12 @@ export default function App() {
                           }}
                         />
 
-                        <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: 11, mt: 1, mb: 0.5, display: 'block' }}>
-                          {t('transportModes')}
-                        </Typography>
+                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mt: 1, mb: 0.5 }}>
+                          <Commute sx={{ fontSize: 16, color: 'text.secondary' }} />
+                          <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: 11 }}>
+                            {t('transportModes')}
+                          </Typography>
+                        </Box>
                         <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.25 }}>
                           {[
                             { key: 'metro', icon: <Subway sx={{ fontSize: 16 }} />, label: t('modeMetro') },
@@ -1582,6 +1586,13 @@ export default function App() {
                               }}
                             />
                           ))}
+                        </Box>
+
+                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mt: 1.5, mb: 0.5 }}>
+                          <Tune sx={{ fontSize: 16, color: 'text.secondary' }} />
+                          <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: 11 }}>
+                            {t('advancedOptions')}
+                          </Typography>
                         </Box>
 
                         <FormControlLabel
