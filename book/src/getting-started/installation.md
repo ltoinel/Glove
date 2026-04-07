@@ -2,9 +2,11 @@
 
 ## Prerequisites
 
+```admonish info title="Requirements"
 - [Rust](https://rustup.rs/) 1.85+
 - [Node.js](https://nodejs.org/) 18+
 - [Docker](https://www.docker.com/) (optional, for Valhalla walk/bike/car routing)
+```
 
 ## Download Data
 
@@ -20,7 +22,9 @@ bin/download.sh osm      # OpenStreetMap data (for Valhalla)
 bin/download.sh ban      # BAN French addresses (for autocomplete)
 ```
 
+```admonish note
 By default, this downloads data for **Ile-de-France** (Paris region). You can change the data URLs in `config.yaml` to use GTFS feeds from other regions.
+```
 
 ## Start Valhalla (Optional)
 

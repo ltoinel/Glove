@@ -106,7 +106,9 @@ Uses Valhalla with configurable bike profiles.
 | `to` | string | Yes | Destination (`lon;lat`) |
 | `profile` | string | No | Bike profile: `city`, `ebike`, or `road` (default: `city`) |
 
+```admonish info title="Elevation Colors"
 The response includes elevation data and maneuver-by-maneuver directions. The frontend uses elevation data to color the route polyline (green = descent, red = climb).
+```
 
 ## Driving
 

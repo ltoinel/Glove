@@ -12,6 +12,18 @@ Glove loads [GTFS](https://gtfs.org/) data into memory, builds a [RAPTOR](https:
 
 The React portal provides an interactive map-based interface with autocomplete, route visualization, and multilingual support (FR/EN).
 
+```admonish tip title="Quick Start"
+Get up and running in 3 commands:
+
+~~~bash
+bin/download.sh all      # Download data
+bin/valhalla.sh          # Start Valhalla (optional)
+bin/start.sh             # Start the server
+~~~
+
+Then open [http://localhost:8080](http://localhost:8080)
+```
+
 ## Key Features
 
 ### Routing

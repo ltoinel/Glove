@@ -42,7 +42,9 @@ curl -X POST http://localhost:8080/api/reload \
   -H "Authorization: Bearer your-secret-key"
 ```
 
+```admonish warning
 If `api_key` is empty in the config, the reload endpoint is disabled.
+```
 
 ## Rate Limiting
 

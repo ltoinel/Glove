@@ -33,17 +33,21 @@ Glove is a monorepo with a Rust backend and React frontend.
 
 ## Design Principles
 
-### All In-Memory
+```admonish example title="All In-Memory"
 There is no database. All GTFS data is loaded from CSV files at startup and held in memory. This gives extremely fast query times at the cost of startup time (10-30 seconds for index building).
+```
 
-### Lock-Free Hot-Reload
+```admonish example title="Lock-Free Hot-Reload"
 The RAPTOR index is wrapped in [ArcSwap](https://docs.rs/arc-swap), which allows atomic pointer swaps. When new GTFS data is loaded via `POST /api/reload`, the entire index is rebuilt in a background thread and swapped in atomically. No request is ever blocked or sees partial data.
+```
 
-### Pattern Grouping
+```admonish example title="Pattern Grouping"
 Trips with identical stop sequences are grouped into **patterns**. This dramatically reduces memory usage and speeds up the RAPTOR scan phase, because the algorithm only needs to evaluate one entry per pattern instead of one per trip.
+```
 
-### Navitia API Compatibility
+```admonish example title="Navitia API Compatibility"
 The API mirrors [Navitia](https://navitia.io/) query parameters and response structure, making Glove a potential drop-in replacement for Navitia-based applications.
+```
 
 ## Technology Stack
 

@@ -77,4 +77,6 @@ services:
       - ./data/osm:/custom_files
 ```
 
-> **Note**: Adjust `valhalla.host` in `config.yaml` to `valhalla` (the service name) when using Docker Compose networking.
+```admonish warning
+Adjust `valhalla.host` in `config.yaml` to `valhalla` (the service name) when using Docker Compose networking.
+```

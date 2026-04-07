@@ -1,0 +1,293 @@
+/* ── Modern Glove Theme ── */
+
+/* Import Inter for body and JetBrains Mono for code */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+/* ── Root variables ── */
+:root {
+    --content-max-width: 860px;
+    --sidebar-width: 280px;
+    --glove-accent: #6C63FF;
+    --glove-accent-light: #8B83FF;
+    --glove-accent-dark: #5046E4;
+    --radius: 8px;
+    --radius-lg: 12px;
+}
+
+/* ── Typography ── */
+body, .sidebar, .content {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+.content main {
+    max-width: var(--content-max-width);
+    line-height: 1.75;
+    font-size: 1rem;
+}
+
+/* ── Headings ── */
+.content main h1 {
+    font-weight: 700;
+    font-size: 2.2rem;
+    letter-spacing: -0.03em;
+    margin-top: 0;
+    padding-bottom: 0.4em;
+    border-bottom: 2px solid var(--glove-accent);
+}
+
+.content main h2 {
+    font-weight: 600;
+    font-size: 1.55rem;
+    letter-spacing: -0.02em;
+    margin-top: 2.5rem;
+}
+
+.content main h3 {
+    font-weight: 600;
+    font-size: 1.2rem;
+    letter-spacing: -0.01em;
+    margin-top: 2rem;
+}
+
+/* ── Code blocks ── */
+code, pre code {
+    font-family: 'JetBrains Mono', 'Fira Code', monospace !important;
+    font-size: 0.875rem;
+}
+
+pre {
+    border-radius: var(--radius) !important;
+    padding: 1.2em !important;
+    border: 1px solid rgba(128, 128, 128, 0.15);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+/* Inline code */
+.content main p > code,
+.content main li > code,
+.content main td > code {
+    padding: 0.15em 0.4em;
+    border-radius: 4px;
+    font-size: 0.85em;
+}
+
+/* ── Navy theme (dark) code and inline code ── */
+.navy pre {
+    border-color: rgba(255, 255, 255, 0.08);
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.2);
+}
+
+.navy .content main p > code,
+.navy .content main li > code,
+.navy .content main td > code {
+    background: rgba(108, 99, 255, 0.12);
+    color: var(--glove-accent-light);
+}
+
+/* ── Tables ── */
+table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    border-radius: var(--radius);
+    overflow: hidden;
+    border: 1px solid rgba(128, 128, 128, 0.15);
+    margin: 1.5em 0;
+}
+
+table thead tr {
+    background: var(--glove-accent) !important;
+    color: white !important;
+}
+
+table thead th {
+    padding: 0.75em 1em;
+    font-weight: 600;
+    font-size: 0.875rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    border: none;
+}
+
+table tbody td {
+    padding: 0.65em 1em;
+    border-bottom: 1px solid rgba(128, 128, 128, 0.1);
+    font-size: 0.925rem;
+}
+
+table tbody tr:last-child td {
+    border-bottom: none;
+}
+
+table tbody tr:hover {
+    background: rgba(108, 99, 255, 0.05);
+}
+
+.navy table {
+    border-color: rgba(255, 255, 255, 0.08);
+}
+
+.navy table tbody tr:hover {
+    background: rgba(108, 99, 255, 0.1);
+}
+
+/* ── Sidebar ── */
+.sidebar {
+    font-size: 0.9rem;
+}
+
+.sidebar .sidebar-scrollbox {
+    padding: 1.5rem 1rem;
+}
+
+.sidebar ol.chapter li a {
+    padding: 0.45em 0.8em;
+    border-radius: 6px;
+    transition: all 0.15s ease;
+}
+
+.sidebar ol.chapter li a:hover {
+    background: rgba(108, 99, 255, 0.1);
+    color: var(--glove-accent-light);
+}
+
+.sidebar ol.chapter li.chapter-item.expanded a,
+.sidebar ol.chapter li a.active {
+    color: var(--glove-accent-light) !important;
+    font-weight: 600;
+    background: rgba(108, 99, 255, 0.12);
+    border-left: 3px solid var(--glove-accent);
+}
+
+.sidebar .chapter li.part-title {
+    font-weight: 700;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--glove-accent-light);
+    margin-top: 1.5em;
+    margin-bottom: 0.3em;
+    padding-left: 0.8em;
+}
+
+/* ── Blockquotes as tips ── */
+blockquote {
+    border-left: 4px solid var(--glove-accent);
+    border-radius: 0 var(--radius) var(--radius) 0;
+    background: rgba(108, 99, 255, 0.06);
+    padding: 0.8em 1.2em;
+    margin: 1.5em 0;
+}
+
+.navy blockquote {
+    background: rgba(108, 99, 255, 0.1);
+}
+
+blockquote p {
+    margin: 0.3em 0;
+}
+
+/* ── Links ── */
+.content a {
+    color: var(--glove-accent-light);
+    text-decoration: none;
+    border-bottom: 1px solid transparent;
+    transition: border-color 0.15s ease;
+}
+
+.content a:hover {
+    border-bottom-color: var(--glove-accent-light);
+}
+
+/* ── Nav buttons (previous/next) ── */
+.nav-chapters {
+    font-size: 0.9rem;
+    opacity: 0.6;
+    transition: opacity 0.2s ease;
+}
+
+.nav-chapters:hover {
+    opacity: 1;
+    color: var(--glove-accent-light);
+}
+
+/* ── ASCII diagrams / pre without code ── */
+pre > code {
+    line-height: 1.5;
+}
+
+/* ── Badges on intro page ── */
+.content main img[src*="badge"],
+.content main img[src*="shields"] {
+    display: inline-block;
+    margin: 0 4px 4px 0;
+    vertical-align: middle;
+}
+
+/* ── Screenshot ── */
+.content main img:not([src*="badge"]):not([src*="shields"]) {
+    border-radius: var(--radius-lg);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+    margin: 1.5em 0;
+    max-width: 100%;
+}
+
+.navy .content main img:not([src*="badge"]):not([src*="shields"]) {
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+}
+
+/* ── Smooth transitions ── */
+* {
+    transition-property: background-color, border-color, color;
+    transition-duration: 0.15s;
+    transition-timing-function: ease;
+}
+
+/* Exclude elements that shouldn't transition */
+pre, pre *, code, .hljs, .hljs * {
+    transition: none !important;
+}
+
+/* ── Menu bar polish ── */
+#menu-bar {
+    border-bottom: 1px solid rgba(128, 128, 128, 0.1);
+}
+
+#menu-bar .icon-button {
+    border-radius: 6px;
+    transition: background 0.15s ease;
+}
+
+#menu-bar .icon-button:hover {
+    background: rgba(108, 99, 255, 0.1);
+}
+
+/* ── Page footer ── */
+.content .page-footer {
+    margin-top: 3em;
+    padding-top: 1.5em;
+    border-top: 1px solid rgba(128, 128, 128, 0.1);
+    opacity: 0.6;
+    font-size: 0.85rem;
+}
+
+/* ── Scrollbar (webkit) ── */
+::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+    background: rgba(128, 128, 128, 0.25);
+    border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: rgba(128, 128, 128, 0.4);
+}

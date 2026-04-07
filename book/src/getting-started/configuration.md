@@ -27,7 +27,9 @@ server:
 | `cors_origins` | List of allowed CORS origins. `["*"]` allows all | `[]` |
 | `rate_limit` | Maximum requests per second per IP address | `20` |
 
-> **Tip**: Override the log level at runtime with `RUST_LOG=debug cargo run`.
+```admonish tip
+Override the log level at runtime with `RUST_LOG=debug cargo run`.
+```
 
 ## Data Sources
 

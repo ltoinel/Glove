@@ -14,3 +14,12 @@ preferred-dark-theme = "navy"
 git-repository-url = "https://github.com/ltoinel/Glove"
 edit-url-template = "https://github.com/ltoinel/Glove/edit/master/book/{path}"
 site-url = "/Glove/"
+additional-css = ["mdbook-admonish.css", "theme/custom.css"]
+additional-js = ["theme/custom.js"]
+
+[output.html.playground]
+editable = false
+
+[preprocessor.admonish]
+command = "mdbook-admonish"
+assets_version = "3.0.2"
