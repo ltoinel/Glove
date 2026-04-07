@@ -68,7 +68,6 @@ struct ValhallaLeg {
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 struct ValhallaManeuver {
     instruction: String,
     length: f64,
@@ -110,6 +109,9 @@ pub struct WalkJourney {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct Maneuver {
     pub instruction: String,
+    /// Valhalla maneuver type (e.g. 39=elevator, 40=stairs, 41=escalator, 42=enter building, 43=exit building).
+    #[serde(rename = "type")]
+    pub maneuver_type: u32,
     /// Distance in meters.
     pub distance: u32,
     /// Duration in seconds.
@@ -247,6 +249,7 @@ pub async fn get_walk(query: web::Query<WalkQuery>, config: web::Data<AppConfig>
         .iter()
         .map(|m| Maneuver {
             instruction: m.instruction.clone(),
+            maneuver_type: m.maneuver_type,
             distance: (m.length * 1000.0) as u32,
             duration: m.time as u32,
         })

@@ -67,7 +67,6 @@ struct ValhallaLeg {
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 struct ValhallaManeuver {
     instruction: String,
     length: f64,
@@ -133,6 +132,9 @@ pub struct BikeJourney {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct Maneuver {
     pub instruction: String,
+    /// Valhalla maneuver type.
+    #[serde(rename = "type")]
+    pub maneuver_type: u32,
     /// Distance in meters.
     pub distance: u32,
     /// Duration in seconds.
@@ -399,6 +401,7 @@ async fn process_valhalla_response(
         .iter()
         .map(|m| Maneuver {
             instruction: m.instruction.clone(),
+            maneuver_type: m.maneuver_type,
             distance: (m.length * 1000.0) as u32,
             duration: m.time as u32,
         })

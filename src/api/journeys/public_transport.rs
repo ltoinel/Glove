@@ -471,6 +471,7 @@ pub async fn get_journeys(
                     stop_date_times: None,
                     shape: Some(walk.shape.clone()),
                     distance: Some(walk.distance),
+                    maneuvers: Some(walk.maneuvers.clone()),
                 };
                 journey.sections.insert(0, section);
                 journey.duration += walk.duration;
@@ -525,6 +526,7 @@ pub async fn get_journeys(
                     stop_date_times: None,
                     shape: Some(walk.shape.clone()),
                     distance: Some(walk.distance),
+                    maneuvers: Some(walk.maneuvers.clone()),
                 };
                 journey.sections.push(section);
                 journey.duration += walk.duration;
@@ -710,6 +712,7 @@ fn build_journey(data: &RaptorData, sections: &[raptor::JourneySection], date: &
                         stop_date_times,
                         shape: None,
                         distance: None,
+                        maneuvers: None,
                     });
                 }
             }
@@ -725,6 +728,7 @@ fn build_journey(data: &RaptorData, sections: &[raptor::JourneySection], date: &
                     stop_date_times: None,
                     shape: None,
                     distance: None,
+                    maneuvers: None,
                 });
             }
         }
@@ -954,6 +958,7 @@ mod tests {
                     stop_date_times: None,
                     shape: None,
                     distance: None,
+                    maneuvers: None,
                 }],
             },
             Journey {

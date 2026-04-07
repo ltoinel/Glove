@@ -10,6 +10,8 @@ import {
   NearMe, ArrowRightAlt, Place, AccessTime, Settings,
   Route, Timer, MultipleStop, Storage, CalendarMonth, Close, Language, Api,
   DirectionsBike, DirectionsCar, MonitorHeart, Memory, Speed, Dns, Http,
+  Stairs, Elevator, MeetingRoom, TurnLeft, TurnRight, Straight, UTurnLeft,
+  RoundaboutLeft, Flag, MyLocation, ForkLeft, ForkRight, MergeType,
 } from '@mui/icons-material'
 import SwaggerUI from 'swagger-ui-react'
 import 'swagger-ui-react/swagger-ui.css'
@@ -483,10 +485,13 @@ function JourneyCard({ journey, rank, selected, onSelect, animDelay }) {
                     )
                   }
                   if ((s.type === 'street_network' || s.type === 'transfer') && s.duration > 0) {
+                    const isTransfer = s.type === 'transfer'
                     return (
                       <Box key={i} sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.3 }}>
-                        <DirectionsWalk sx={{ fontSize: 14, color: 'text.disabled' }} />
-                        <Typography variant="caption" sx={{ fontSize: 10, color: 'text.disabled', fontWeight: 600 }}>
+                        {isTransfer
+                          ? <TransferWithinAStation sx={{ fontSize: 14, color: '#ffb800' }} />
+                          : <DirectionsWalk sx={{ fontSize: 14, color: 'text.disabled' }} />}
+                        <Typography variant="caption" sx={{ fontSize: 10, color: isTransfer ? '#ffb800' : 'text.disabled', fontWeight: 600 }}>
                           {formatDuration(s.duration)}
                         </Typography>
                       </Box>
@@ -551,7 +556,11 @@ function JourneyCard({ journey, rank, selected, onSelect, animDelay }) {
                 }} />
                 <Box sx={{ flex: 1, minWidth: 0 }}>
                   <Typography variant="caption" fontWeight={600} color="text.primary">
-                    {isPt ? <>{di?.commercial_mode} <strong>{di?.label}</strong></> : (
+                    {isPt ? <>{di?.commercial_mode} <strong>{di?.label}</strong></> : s.type === 'street_network' ? (
+                      <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                        <DirectionsWalk sx={{ fontSize: 14, color: '#90a4ae' }} /> {t('walkToStation')}
+                      </Box>
+                    ) : (
                       <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
                         <TransferWithinAStation sx={{ fontSize: 14, color: '#ffb800' }} /> {t('transfer')}
                       </Box>
@@ -566,6 +575,9 @@ function JourneyCard({ journey, rank, selected, onSelect, animDelay }) {
                       {t('direction')} {di.direction}
                     </Typography>
                   )}
+                  {s.type === 'street_network' && s.maneuvers && (
+                    <ManeuverList maneuvers={s.maneuvers} color="#90a4ae" />
+                  )}
                 </Box>
                 <Typography variant="caption" color="text.secondary" sx={{ flexShrink: 0, pt: 0.2, opacity: 0.7 }}>
                   {formatDuration(s.duration)}
@@ -576,6 +588,89 @@ function JourneyCard({ journey, rank, selected, onSelect, animDelay }) {
         </Box>
       </Collapse>
     </Card>
+  )
+}
+
+// Valhalla maneuver type → icon mapping
+// See https://valhalla.github.io/valhalla/api/turn-by-turn/api-reference/
+function maneuverIcon(type) {
+  const sx = { fontSize: 16, color: 'text.secondary' }
+  switch (type) {
+    case 0: return <MyLocation sx={sx} />          // kNone / depart
+    case 1: return <Straight sx={sx} />             // kStart
+    case 2: return <Straight sx={sx} />             // kStartRight
+    case 3: return <Straight sx={sx} />             // kStartLeft
+    case 4: return <Flag sx={sx} />                 // kDestination
+    case 5: return <Flag sx={sx} />                 // kDestinationRight
+    case 6: return <Flag sx={sx} />                 // kDestinationLeft
+    case 7: return <Straight sx={sx} />             // kBecomes
+    case 8: return <Straight sx={sx} />             // kContinue
+    case 9: return <TurnRight sx={{ ...sx, transform: 'rotate(-45deg)' }} /> // kSlightRight
+    case 10: return <TurnRight sx={sx} />           // kRight
+    case 11: return <TurnRight sx={{ ...sx, transform: 'rotate(45deg)' }} /> // kSharpRight
+    case 12: return <UTurnLeft sx={{ ...sx, transform: 'scaleX(-1)' }} />   // kUturnRight
+    case 13: return <UTurnLeft sx={sx} />           // kUturnLeft
+    case 14: return <TurnLeft sx={{ ...sx, transform: 'rotate(45deg)' }} /> // kSharpLeft
+    case 15: return <TurnLeft sx={sx} />            // kLeft
+    case 16: return <TurnLeft sx={{ ...sx, transform: 'rotate(-45deg)' }} /> // kSlightLeft
+    case 17: return <Straight sx={sx} />            // kRampStraight
+    case 18: return <TurnRight sx={sx} />           // kRampRight
+    case 19: return <TurnLeft sx={sx} />            // kRampLeft
+    case 20: return <Straight sx={sx} />            // kExitRight
+    case 21: return <Straight sx={sx} />            // kExitLeft
+    case 22: return <Straight sx={sx} />            // kStayStraight
+    case 23: return <ForkRight sx={sx} />           // kStayRight
+    case 24: return <ForkLeft sx={sx} />            // kStayLeft
+    case 25: return <MergeType sx={sx} />           // kMerge
+    case 26: return <RoundaboutLeft sx={sx} />      // kRoundaboutEnter
+    case 27: return <RoundaboutLeft sx={sx} />      // kRoundaboutExit
+    case 28: return <DirectionsBus sx={sx} />       // kFerryEnter
+    case 29: return <DirectionsBus sx={sx} />       // kFerryExit
+    case 39: return <Elevator sx={{ fontSize: 16, color: '#00bcd4' }} />     // kElevatorEnter
+    case 40: return <Stairs sx={{ fontSize: 16, color: '#ff9800' }} />       // kStepsEnter
+    case 41: return <Stairs sx={{ fontSize: 16, color: '#ab47bc' }} />       // kEscalatorEnter
+    case 42: return <MeetingRoom sx={{ fontSize: 16, color: '#4caf50' }} />  // kBuildingEnter
+    case 43: return <MeetingRoom sx={{ fontSize: 16, color: '#ef5350', transform: 'scaleX(-1)' }} /> // kBuildingExit
+    default: return <Straight sx={sx} />
+  }
+}
+
+function ManeuverList({ maneuvers, color = 'text.secondary' }) {
+  const [expanded, setExpanded] = useState(false)
+  if (!maneuvers || maneuvers.length === 0) return null
+  return (
+    <Box sx={{ mt: 1 }}>
+      <Box
+        onClick={(e) => { e.stopPropagation(); setExpanded(!expanded) }}
+        sx={{ display: 'flex', alignItems: 'center', gap: 0.5, cursor: 'pointer', '&:hover': { opacity: 0.8 } }}
+      >
+        <Route sx={{ fontSize: 14, color }} />
+        <Typography variant="caption" sx={{ fontSize: 10, color, fontWeight: 600 }}>
+          {maneuvers.length} instructions
+        </Typography>
+        {expanded ? <ExpandLess sx={{ fontSize: 14, color }} /> : <ExpandMore sx={{ fontSize: 14, color }} />}
+      </Box>
+      <Collapse in={expanded}>
+        <Box sx={{ mt: 0.5, ml: 0.5, borderLeft: '2px solid', borderColor: 'divider', pl: 1.5 }}>
+          {maneuvers.map((m, i) => (
+            <Box key={i} sx={{ display: 'flex', alignItems: 'flex-start', gap: 1, py: 0.4 }}>
+              {maneuverIcon(m.type)}
+              <Box sx={{ flex: 1, minWidth: 0 }}>
+                <Typography variant="caption" sx={{ fontSize: 11, lineHeight: 1.3, display: 'block' }}>
+                  {m.instruction}
+                </Typography>
+                {m.distance > 0 && (
+                  <Typography variant="caption" sx={{ fontSize: 10, color: 'text.disabled' }}>
+                    {m.distance >= 1000 ? `${(m.distance / 1000).toFixed(1)} km` : `${m.distance} m`}
+                    {m.duration > 0 && ` · ${Math.ceil(m.duration / 60)} min`}
+                  </Typography>
+                )}
+              </Box>
+            </Box>
+          ))}
+        </Box>
+      </Collapse>
+    </Box>
   )
 }
 
@@ -627,6 +722,7 @@ function WalkCard({ journey, selected, onSelect }) {
               </Typography>
             </Box>
           </Box>
+          <ManeuverList maneuvers={journey.maneuvers} color="#ffb800" />
         </CardContent>
       </CardActionArea>
     </Card>
@@ -683,6 +779,7 @@ function BikeCard({ journey, selected, onSelect }) {
               </Typography>
             </Box>
           </Box>
+          <ManeuverList maneuvers={journey.maneuvers} color={color} />
         </CardContent>
       </CardActionArea>
     </Card>
@@ -730,6 +827,7 @@ function CarCard({ journey }) {
             </Typography>
           </Box>
         </Box>
+        <ManeuverList maneuvers={journey.maneuvers} color={color} />
       </CardContent>
     </Card>
   )

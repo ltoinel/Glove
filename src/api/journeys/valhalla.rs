@@ -4,6 +4,7 @@
 //! endpoint and the public_transport endpoint (first/last mile).
 
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 // ---------------------------------------------------------------------------
 // Valhalla request / response types
@@ -43,6 +44,17 @@ struct Trip {
 #[derive(Deserialize)]
 struct Leg {
     shape: String,
+    #[serde(default)]
+    maneuvers: Vec<ValhallaManeuver>,
+}
+
+#[derive(Deserialize)]
+struct ValhallaManeuver {
+    instruction: String,
+    length: f64,
+    time: f64,
+    #[serde(rename = "type")]
+    maneuver_type: u32,
 }
 
 #[derive(Deserialize)]
@@ -52,8 +64,20 @@ struct Summary {
 }
 
 // ---------------------------------------------------------------------------
-// Public result type
+// Public result types
 // ---------------------------------------------------------------------------
+
+/// A single maneuver in a pedestrian route.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct WalkManeuver {
+    pub instruction: String,
+    #[serde(rename = "type")]
+    pub maneuver_type: u32,
+    /// Distance in meters.
+    pub distance: u32,
+    /// Duration in seconds.
+    pub duration: u32,
+}
 
 /// Result of a pedestrian route computation.
 #[derive(Clone)]
@@ -64,6 +88,8 @@ pub struct WalkLeg {
     pub distance: u32,
     /// Encoded polyline (Valhalla precision-6).
     pub shape: String,
+    /// Turn-by-turn maneuvers.
+    pub maneuvers: Vec<WalkManeuver>,
 }
 
 // ---------------------------------------------------------------------------
@@ -124,9 +150,21 @@ pub async fn pedestrian_route(
     let route: RouteResponse = resp.json().await.ok()?;
     let leg = route.trip.legs.first()?;
 
+    let maneuvers = leg
+        .maneuvers
+        .iter()
+        .map(|m| WalkManeuver {
+            instruction: m.instruction.clone(),
+            maneuver_type: m.maneuver_type,
+            distance: (m.length * 1000.0) as u32,
+            duration: m.time as u32,
+        })
+        .collect();
+
     Some(WalkLeg {
         duration: route.trip.summary.time as u32,
         distance: (route.trip.summary.length * 1000.0) as u32,
         shape: leg.shape.clone(),
+        maneuvers,
     })
 }

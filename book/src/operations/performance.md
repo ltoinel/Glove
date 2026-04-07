@@ -25,7 +25,7 @@ python3 bin/benchmark.py --rounds 10 --concurrency 1
 The benchmark script:
 1. Sends requests to 12 representative origin/destination pairs
 2. Measures response times across multiple rounds
-3. Generates a chart (`docs/benchmark.png`) with statistics
+3. Generates a chart with statistics
 
 ## Key Optimizations
 

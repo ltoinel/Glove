@@ -69,6 +69,9 @@ pub struct Section {
     /// Distance in meters (for street_network sections).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub distance: Option<u32>,
+    /// Turn-by-turn maneuvers (for street_network sections via Valhalla).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub maneuvers: Option<Vec<journeys::valhalla::WalkManeuver>>,
 }
 
 /// A stop visit within a public transport section.

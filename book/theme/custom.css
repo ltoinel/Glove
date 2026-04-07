@@ -1,120 +1,156 @@
-/* ── Modern Glove Theme ── */
+/* ── Glove Dark Theme ──
+   Matches the React portal: dark blue-black background, cyan accent,
+   glassmorphism effects, Figtree/Syne/JetBrains Mono fonts.
+*/
 
-/* Import Inter for body and JetBrains Mono for code */
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&family=Syne:wght@600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
 
 /* ── Root variables ── */
 :root {
-    --content-max-width: 860px;
-    --sidebar-width: 280px;
-    --glove-accent: #6C63FF;
-    --glove-accent-light: #8B83FF;
-    --glove-accent-dark: #5046E4;
-    --radius: 8px;
-    --radius-lg: 12px;
+    --content-max-width: 960px;
+    --sidebar-width: 300px;
+    --glove-bg: #0a0a12;
+    --glove-bg-paper: #12121e;
+    --glove-bg-elevated: rgba(20, 20, 35, 0.75);
+    --glove-cyan: #00e5ff;
+    --glove-cyan-dim: rgba(0, 229, 255, 0.15);
+    --glove-amber: #ffb800;
+    --glove-text: #e8e6f0;
+    --glove-text-secondary: #8b89a0;
+    --glove-border: rgba(255, 255, 255, 0.06);
+    --glove-border-hover: rgba(255, 255, 255, 0.12);
+    --radius: 12px;
+    --radius-lg: 14px;
+}
+
+/* ── Force dark background on all themes ── */
+.navy,
+.ayu,
+.coal,
+.rust,
+.light {
+    --bg: var(--glove-bg) !important;
+    --sidebar-bg: var(--glove-bg-paper) !important;
+    --sidebar-fg: var(--glove-text) !important;
+    --sidebar-active: var(--glove-cyan) !important;
+    --fg: var(--glove-text) !important;
+    --links: var(--glove-cyan) !important;
+}
+
+html {
+    font-size: 17px;
 }
 
 /* ── Typography ── */
 body, .sidebar, .content {
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important;
+    font-family: 'Figtree', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    color: var(--glove-text);
 }
 
 .content main {
     max-width: var(--content-max-width);
-    line-height: 1.75;
+    line-height: 1.8;
     font-size: 1rem;
+    padding: 0 1.5rem;
 }
 
-/* ── Headings ── */
+/* ── Headings (Syne, like the portal) ── */
 .content main h1 {
-    font-weight: 700;
-    font-size: 2.2rem;
+    font-family: 'Syne', sans-serif !important;
+    font-weight: 800;
+    font-size: 2.4rem;
     letter-spacing: -0.03em;
     margin-top: 0;
-    padding-bottom: 0.4em;
-    border-bottom: 2px solid var(--glove-accent);
+    padding-bottom: 0.5em;
+    border-bottom: 2px solid var(--glove-cyan);
+    color: var(--glove-text);
 }
 
 .content main h2 {
-    font-weight: 600;
-    font-size: 1.55rem;
+    font-family: 'Syne', sans-serif !important;
+    font-weight: 700;
+    font-size: 1.65rem;
     letter-spacing: -0.02em;
     margin-top: 2.5rem;
+    color: var(--glove-text);
 }
 
 .content main h3 {
+    font-family: 'Syne', sans-serif !important;
     font-weight: 600;
-    font-size: 1.2rem;
+    font-size: 1.3rem;
     letter-spacing: -0.01em;
     margin-top: 2rem;
+    color: var(--glove-text);
+}
+
+.content main h4 {
+    font-family: 'Syne', sans-serif !important;
+    font-weight: 600;
+    font-size: 1.1rem;
+    margin-top: 1.5rem;
 }
 
 /* ── Code blocks ── */
 code, pre code {
     font-family: 'JetBrains Mono', 'Fira Code', monospace !important;
-    font-size: 0.875rem;
+    font-size: 0.9rem;
 }
 
 pre {
     border-radius: var(--radius) !important;
-    padding: 1.2em !important;
-    border: 1px solid rgba(128, 128, 128, 0.15);
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+    padding: 1.4em 1.6em !important;
+    background: var(--glove-bg-elevated) !important;
+    border: 1px solid var(--glove-border);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+    backdrop-filter: blur(12px);
 }
 
 /* Inline code */
 .content main p > code,
 .content main li > code,
 .content main td > code {
-    padding: 0.15em 0.4em;
-    border-radius: 4px;
-    font-size: 0.85em;
+    padding: 0.2em 0.5em;
+    border-radius: 6px;
+    font-size: 0.88em;
+    background: var(--glove-cyan-dim) !important;
+    color: var(--glove-cyan) !important;
 }
 
-/* ── Navy theme (dark) code and inline code ── */
-.navy pre {
-    border-color: rgba(255, 255, 255, 0.08);
-    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.2);
-}
-
-.navy .content main p > code,
-.navy .content main li > code,
-.navy .content main td > code {
-    background: rgba(108, 99, 255, 0.12);
-    color: var(--glove-accent-light);
-}
-
-/* ── Tables ── */
+/* ── Tables (glassmorphism card style) ── */
 table {
     width: 100%;
     border-collapse: separate;
     border-spacing: 0;
     border-radius: var(--radius);
     overflow: hidden;
-    border: 1px solid rgba(128, 128, 128, 0.15);
+    border: 1px solid var(--glove-border);
     margin: 1.5em 0;
+    background: var(--glove-bg-elevated);
+    backdrop-filter: blur(12px);
 }
 
 table thead tr {
-    background: var(--glove-accent) !important;
-    color: white !important;
+    background: rgba(0, 229, 255, 0.12) !important;
 }
 
 table thead th {
-    padding: 0.75em 1em;
+    padding: 0.85em 1.2em;
+    font-family: 'Syne', sans-serif;
     font-weight: 600;
-    font-size: 0.875rem;
+    font-size: 0.85rem;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0.06em;
     border: none;
+    color: var(--glove-cyan) !important;
 }
 
 table tbody td {
-    padding: 0.65em 1em;
-    border-bottom: 1px solid rgba(128, 128, 128, 0.1);
-    font-size: 0.925rem;
+    padding: 0.75em 1.2em;
+    border-bottom: 1px solid var(--glove-border);
+    font-size: 0.95rem;
 }
 
 table tbody tr:last-child td {
@@ -122,67 +158,60 @@ table tbody tr:last-child td {
 }
 
 table tbody tr:hover {
-    background: rgba(108, 99, 255, 0.05);
+    background: rgba(0, 229, 255, 0.05);
 }
 
-.navy table {
-    border-color: rgba(255, 255, 255, 0.08);
-}
-
-.navy table tbody tr:hover {
-    background: rgba(108, 99, 255, 0.1);
-}
-
-/* ── Sidebar ── */
+/* ── Sidebar (dark paper, cyan accents) ── */
 .sidebar {
-    font-size: 0.9rem;
+    background: var(--glove-bg-paper) !important;
+    border-right: 1px solid var(--glove-border) !important;
+    font-size: 0.95rem;
 }
 
 .sidebar .sidebar-scrollbox {
-    padding: 1.5rem 1rem;
+    padding: 1.5rem 1.2rem;
+    background: transparent !important;
 }
 
 .sidebar ol.chapter li a {
-    padding: 0.45em 0.8em;
-    border-radius: 6px;
+    padding: 0.5em 0.9em;
+    border-radius: 8px;
     transition: all 0.15s ease;
+    color: var(--glove-text-secondary) !important;
 }
 
 .sidebar ol.chapter li a:hover {
-    background: rgba(108, 99, 255, 0.1);
-    color: var(--glove-accent-light);
+    background: var(--glove-cyan-dim);
+    color: var(--glove-cyan) !important;
 }
 
 .sidebar ol.chapter li.chapter-item.expanded a,
 .sidebar ol.chapter li a.active {
-    color: var(--glove-accent-light) !important;
+    color: var(--glove-cyan) !important;
     font-weight: 600;
-    background: rgba(108, 99, 255, 0.12);
-    border-left: 3px solid var(--glove-accent);
+    background: var(--glove-cyan-dim);
+    border-left: 3px solid var(--glove-cyan);
 }
 
 .sidebar .chapter li.part-title {
+    font-family: 'Syne', sans-serif;
     font-weight: 700;
-    font-size: 0.75rem;
+    font-size: 0.7rem;
     text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: var(--glove-accent-light);
-    margin-top: 1.5em;
-    margin-bottom: 0.3em;
-    padding-left: 0.8em;
+    letter-spacing: 0.1em;
+    color: var(--glove-amber);
+    margin-top: 1.8em;
+    margin-bottom: 0.4em;
+    padding-left: 0.9em;
 }
 
-/* ── Blockquotes as tips ── */
+/* ── Blockquotes ── */
 blockquote {
-    border-left: 4px solid var(--glove-accent);
+    border-left: 4px solid var(--glove-cyan);
     border-radius: 0 var(--radius) var(--radius) 0;
-    background: rgba(108, 99, 255, 0.06);
-    padding: 0.8em 1.2em;
+    background: var(--glove-cyan-dim);
+    padding: 1em 1.4em;
     margin: 1.5em 0;
-}
-
-.navy blockquote {
-    background: rgba(108, 99, 255, 0.1);
 }
 
 blockquote p {
@@ -191,34 +220,34 @@ blockquote p {
 
 /* ── Links ── */
 .content a {
-    color: var(--glove-accent-light);
+    color: var(--glove-cyan) !important;
     text-decoration: none;
     border-bottom: 1px solid transparent;
     transition: border-color 0.15s ease;
 }
 
 .content a:hover {
-    border-bottom-color: var(--glove-accent-light);
+    border-bottom-color: var(--glove-cyan);
 }
 
 /* ── Nav buttons (previous/next) ── */
 .nav-chapters {
-    font-size: 0.9rem;
-    opacity: 0.6;
-    transition: opacity 0.2s ease;
+    font-size: 0.95rem;
+    opacity: 0.5;
+    transition: all 0.2s ease;
 }
 
 .nav-chapters:hover {
     opacity: 1;
-    color: var(--glove-accent-light);
+    color: var(--glove-cyan) !important;
 }
 
-/* ── ASCII diagrams / pre without code ── */
+/* ── Code line height ── */
 pre > code {
-    line-height: 1.5;
+    line-height: 1.6;
 }
 
-/* ── Badges on intro page ── */
+/* ── Badges ── */
 .content main img[src*="badge"],
 .content main img[src*="shields"] {
     display: inline-block;
@@ -226,54 +255,74 @@ pre > code {
     vertical-align: middle;
 }
 
-/* ── Screenshot ── */
+/* ── Images (card style with shadow) ── */
 .content main img:not([src*="badge"]):not([src*="shields"]) {
     border-radius: var(--radius-lg);
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+    border: 1px solid var(--glove-border);
     margin: 1.5em 0;
     max-width: 100%;
 }
 
-.navy .content main img:not([src*="badge"]):not([src*="shields"]) {
-    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
-}
-
-/* ── Smooth transitions ── */
-* {
-    transition-property: background-color, border-color, color;
-    transition-duration: 0.15s;
-    transition-timing-function: ease;
-}
-
-/* Exclude elements that shouldn't transition */
-pre, pre *, code, .hljs, .hljs * {
-    transition: none !important;
-}
-
-/* ── Menu bar polish ── */
+/* ── Menu bar ── */
 #menu-bar {
-    border-bottom: 1px solid rgba(128, 128, 128, 0.1);
+    background: var(--glove-bg-paper) !important;
+    border-bottom: 1px solid var(--glove-border);
+    backdrop-filter: blur(16px);
 }
 
 #menu-bar .icon-button {
-    border-radius: 6px;
+    border-radius: 8px;
     transition: background 0.15s ease;
+    color: var(--glove-text-secondary) !important;
 }
 
 #menu-bar .icon-button:hover {
-    background: rgba(108, 99, 255, 0.1);
+    background: var(--glove-cyan-dim);
+    color: var(--glove-cyan) !important;
+}
+
+/* ── Theme selector ── */
+#theme-list {
+    background: var(--glove-bg-paper) !important;
+    border: 1px solid var(--glove-border) !important;
+    border-radius: 8px;
+}
+
+/* ── Search bar ── */
+#searchbar {
+    background: var(--glove-bg-elevated) !important;
+    border: 1px solid var(--glove-border) !important;
+    border-radius: 8px !important;
+    color: var(--glove-text) !important;
+    font-size: 1rem;
+}
+
+#searchbar:focus {
+    border-color: var(--glove-cyan) !important;
+    box-shadow: 0 0 0 2px rgba(0, 229, 255, 0.2) !important;
+}
+
+.search-results {
+    background: var(--glove-bg-paper) !important;
+    border: 1px solid var(--glove-border) !important;
+    border-radius: var(--radius) !important;
+}
+
+.search-results .search-results-item {
+    border-bottom-color: var(--glove-border) !important;
 }
 
 /* ── Page footer ── */
 .content .page-footer {
     margin-top: 3em;
     padding-top: 1.5em;
-    border-top: 1px solid rgba(128, 128, 128, 0.1);
-    opacity: 0.6;
+    border-top: 1px solid var(--glove-border);
+    opacity: 0.5;
     font-size: 0.85rem;
 }
 
-/* ── Scrollbar (webkit) ── */
+/* ── Scrollbar (thin, matching theme) ── */
 ::-webkit-scrollbar {
     width: 6px;
     height: 6px;
@@ -284,10 +333,48 @@ pre, pre *, code, .hljs, .hljs * {
 }
 
 ::-webkit-scrollbar-thumb {
-    background: rgba(128, 128, 128, 0.25);
+    background: rgba(0, 229, 255, 0.15);
     border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-    background: rgba(128, 128, 128, 0.4);
+    background: rgba(0, 229, 255, 0.3);
+}
+
+/* ── Smooth transitions (exclude code for perf) ── */
+* {
+    transition-property: background-color, border-color, color, opacity;
+    transition-duration: 0.15s;
+    transition-timing-function: ease;
+}
+
+pre, pre *, code, .hljs, .hljs * {
+    transition: none !important;
+}
+
+/* ── Admonish overrides (match glassmorphism) ── */
+.admonition {
+    border-radius: var(--radius) !important;
+    border: 1px solid var(--glove-border) !important;
+    background: var(--glove-bg-elevated) !important;
+    backdrop-filter: blur(12px);
+}
+
+/* ── Strong / bold ── */
+strong {
+    color: var(--glove-text);
+    font-weight: 700;
+}
+
+/* ── Lists ── */
+.content main ul, .content main ol {
+    padding-left: 1.5em;
+}
+
+.content main li {
+    margin-bottom: 0.4em;
+}
+
+.content main li strong {
+    color: var(--glove-cyan);
 }

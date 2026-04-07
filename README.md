@@ -11,7 +11,7 @@ A fast **multi-modal journey planner** built in Rust with a React frontend.
 
 Glove loads GTFS data into memory, builds a RAPTOR index, and exposes a Navitia-compatible REST API for journey planning. It supports public transit, walking, cycling, and driving via [Valhalla](https://github.com/valhalla/valhalla) integration. The React portal provides an interactive map-based interface with autocomplete, route visualization, and multilingual support (FR/EN).
 
-![Glove screenshot](docs/screenshot.jpg)
+![Glove screenshot](book/src/images/screenshot.jpg)
 
 ## Features
 
