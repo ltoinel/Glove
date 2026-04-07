@@ -422,7 +422,7 @@ const TAG_COLORS = {
   least_walking: '#b388ff',
 }
 
-function JourneyCard({ journey, rank, selected, onSelect, animDelay }) {
+function JourneyCard({ journey, selected, onSelect, animDelay }) {
   const { t } = useI18n()
   const [open, setOpen] = useState(false)
 
@@ -450,13 +450,11 @@ function JourneyCard({ journey, rank, selected, onSelect, animDelay }) {
             <Box sx={{
               width: 36, height: 36, borderRadius: '50%',
               display: 'flex', alignItems: 'center', justifyContent: 'center',
-              bgcolor: rank === 1 ? 'rgba(0, 229, 255, 0.15)' : 'rgba(255, 255, 255, 0.04)',
-              color: rank === 1 ? '#00e5ff' : 'text.secondary',
-              border: rank === 1 ? '1px solid rgba(0, 229, 255, 0.3)' : '1px solid rgba(255,255,255,0.06)',
-              fontWeight: 700, fontSize: 14, flexShrink: 0,
-              fontFamily: '"Syne", sans-serif',
+              bgcolor: selected ? 'rgba(0, 229, 255, 0.15)' : 'rgba(255, 255, 255, 0.04)',
+              border: selected ? '1px solid rgba(0, 229, 255, 0.3)' : '1px solid rgba(255,255,255,0.06)',
+              flexShrink: 0,
             }}>
-              {rank}
+              <DirectionsBus sx={{ fontSize: 18, color: selected ? '#00e5ff' : 'text.secondary' }} />
             </Box>
 
             <Box sx={{ flex: 1, minWidth: 0 }}>
@@ -466,14 +464,15 @@ function JourneyCard({ journey, rank, selected, onSelect, animDelay }) {
                 {formatTime(journey.arrival_date_time)}
               </Typography>
               <Stack direction="row" spacing={0.5} sx={{ mt: 0.5 }} flexWrap="wrap" useFlexGap alignItems="center">
-                {journey.sections.filter(s => s.type === 'public_transport' || s.type === 'street_network' || s.type === 'transfer').map((s, i, arr) => {
+                {journey.sections.filter(s => s.type === 'public_transport' || s.type === 'street_network' || s.type === 'transfer').map((s, i) => {
+                  const chevron = i > 0 ? <Typography variant="caption" sx={{ color: 'text.disabled', mx: 0.2, fontSize: 10 }}>›</Typography> : null
                   if (s.type === 'public_transport' && s.display_informations) {
                     const di = s.display_informations
                     const bg = modeColor(di.commercial_mode, di.color)
                     const fg = di.text_color ? `#${di.text_color}` : '#fff'
                     return (
                       <Box key={i} sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.3 }}>
-                        {i > 0 && arr[i - 1]?.type === 'public_transport' && <Typography variant="caption" sx={{ color: 'text.disabled', mx: 0.2 }}>›</Typography>}
+                        {chevron}
                         <Chip icon={modeIcon(di.commercial_mode)} label={di.label || di.commercial_mode}
                           size="small"
                           sx={{
@@ -486,13 +485,15 @@ function JourneyCard({ journey, rank, selected, onSelect, animDelay }) {
                   }
                   if ((s.type === 'street_network' || s.type === 'transfer') && s.duration > 0) {
                     const isTransfer = s.type === 'transfer'
+                    const mins = Math.floor(s.duration / 60)
                     return (
                       <Box key={i} sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.3 }}>
+                        {chevron}
                         {isTransfer
                           ? <TransferWithinAStation sx={{ fontSize: 14, color: '#ffb800' }} />
                           : <DirectionsWalk sx={{ fontSize: 14, color: 'text.disabled' }} />}
                         <Typography variant="caption" sx={{ fontSize: 10, color: isTransfer ? '#ffb800' : 'text.disabled', fontWeight: 600 }}>
-                          {formatDuration(s.duration)}
+                          {mins}'
                         </Typography>
                       </Box>
                     )
@@ -1677,7 +1678,7 @@ export default function App() {
                         {resultsText}
                       </Typography>
                       {journeys.map((j, i) => (
-                        <JourneyCard key={i} journey={j} rank={i + 1}
+                        <JourneyCard key={i} journey={j}
                           selected={i === selectedJourney}
                           onSelect={() => setSelectedJourney(i)}
                           animDelay={i * 80} />
