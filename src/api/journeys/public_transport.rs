@@ -557,62 +557,93 @@ pub async fn get_journeys(
             }
         }
 
-        // Enrich transfer sections with Valhalla pedestrian routing (only when maneuvers are requested),
-        // but only keep the data if the route contains indoor maneuvers
-        // (types 39-43: elevator, stairs, escalator, enter/exit building).
-        // Otherwise the route is outdoor and likely incorrect for station transfers.
+        // Enrich transfer sections with Valhalla pedestrian routing.
+        //
+        // Two cases:
+        // - Outdoor transfers (different parent_station): always call Valhalla
+        //   for the shape (walking route on map) + distance. Include maneuvers
+        //   only when requested.
+        // - Indoor transfers (same parent_station): only keep data if Valhalla
+        //   returns indoor maneuver types (39-43), since outdoor routes would
+        //   be incorrect for in-station walks.
         const INDOOR_TYPES: [u32; 5] = [39, 40, 41, 42, 43];
-        if include_maneuvers {
-            // Collect all transfer section coordinates for batch Valhalla calls
-            type TransferReq = (usize, usize, (f64, f64), (f64, f64));
+        {
+            // Collect all transfer section coordinates + outdoor flag
+            type TransferReq = (usize, usize, (f64, f64), (f64, f64), bool);
             let mut transfer_requests: Vec<TransferReq> = Vec::new();
             for (j_idx, journey) in journeys.iter().enumerate() {
                 for (s_idx, section) in journey.sections.iter().enumerate() {
                     if section.section_type != "transfer" {
                         continue;
                     }
-                    let from_c = section
-                        .from
-                        .stop_point
-                        .as_ref()
-                        .map(|sp| (sp.coord.lon, sp.coord.lat));
-                    let to_c = section
-                        .to
-                        .stop_point
-                        .as_ref()
-                        .map(|sp| (sp.coord.lon, sp.coord.lat));
+                    let from_sp = section.from.stop_point.as_ref();
+                    let to_sp = section.to.stop_point.as_ref();
+                    let from_c = from_sp.map(|sp| (sp.coord.lon, sp.coord.lat));
+                    let to_c = to_sp.map(|sp| (sp.coord.lon, sp.coord.lat));
                     if let Some((from, to)) = from_c.zip(to_c) {
-                        transfer_requests.push((j_idx, s_idx, from, to));
+                        // Check if outdoor: resolve parent_station from stops
+                        let from_id = &section.from.id;
+                        let to_id = &section.to.id;
+                        let from_parent = raptor_data
+                            .stop_index
+                            .get(from_id.as_str())
+                            .map(|&idx| &raptor_data.stops[idx].parent_station);
+                        let to_parent = raptor_data
+                            .stop_index
+                            .get(to_id.as_str())
+                            .map(|&idx| &raptor_data.stops[idx].parent_station);
+                        let is_outdoor = match (from_parent, to_parent) {
+                            (Some(fp), Some(tp)) => fp.is_empty() || tp.is_empty() || fp != tp,
+                            _ => true,
+                        };
+                        transfer_requests.push((j_idx, s_idx, from, to, is_outdoor));
                     }
                 }
             }
 
-            // Run all Valhalla calls in parallel
-            let futs: Vec<_> = transfer_requests
+            // Only call Valhalla for outdoor transfers, or all when maneuvers requested
+            let requests_to_call: Vec<_> = transfer_requests
                 .iter()
-                .map(|(_, _, from, to)| {
+                .filter(|(_, _, _, _, is_outdoor)| *is_outdoor || include_maneuvers)
+                .collect();
+
+            let futs: Vec<_> = requests_to_call
+                .iter()
+                .map(|(_, _, from, to, _)| {
                     valhalla::pedestrian_route(&valhalla_base, *from, *to, walking_speed)
                 })
                 .collect();
             let results = futures::future::join_all(futs).await;
 
-            // Apply results back to corresponding sections
-            for (req, walk) in transfer_requests.iter().zip(results) {
-                let (j_idx, s_idx, _, _) = *req;
+            for (req, walk) in requests_to_call.iter().zip(results) {
+                let (j_idx, s_idx, _, _, is_outdoor) = **req;
                 if let Some(walk) = walk {
-                    let has_indoor = walk
-                        .maneuvers
-                        .iter()
-                        .any(|m| INDOOR_TYPES.contains(&m.maneuver_type));
-                    if has_indoor {
+                    if is_outdoor {
+                        // Outdoor transfer: always show shape + distance
                         let section = &mut journeys[j_idx].sections[s_idx];
                         section.shape = Some(walk.shape);
                         section.distance = Some(walk.distance);
-                        section.maneuvers = Some(walk.maneuvers);
+                        if include_maneuvers {
+                            section.maneuvers = Some(walk.maneuvers);
+                        }
+                    } else {
+                        // Indoor transfer: only keep if indoor maneuvers found
+                        let has_indoor = walk
+                            .maneuvers
+                            .iter()
+                            .any(|m| INDOOR_TYPES.contains(&m.maneuver_type));
+                        if has_indoor {
+                            let section = &mut journeys[j_idx].sections[s_idx];
+                            section.shape = Some(walk.shape);
+                            section.distance = Some(walk.distance);
+                            if include_maneuvers {
+                                section.maneuvers = Some(walk.maneuvers);
+                            }
+                        }
                     }
                 }
             }
-        } // end if include_maneuvers
+        }
     }
 
     tag_journeys(&mut journeys);
