@@ -32,6 +32,15 @@ Four transport modes are available as tabs:
 
 Transit and Walk/Bike/Car queries are sent in parallel; results are displayed as they arrive.
 
+### Transport Mode Labels
+The frontend displays real commercial names for transit lines rather than generic mode names. For example:
+- **RER A** instead of "rail A"
+- **Transilien H** instead of "rail H"
+- **TER** for regional trains
+- **Metro 4** instead of "subway 4"
+
+This provides a familiar experience for users of the Ile-de-France transit network.
+
 ### Search & Autocomplete
 The search form provides:
 - Origin and destination fields with fuzzy autocomplete

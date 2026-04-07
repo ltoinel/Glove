@@ -45,6 +45,7 @@ Glove/
 ├── book/                        # Documentation (mdBook)
 │   ├── book.toml
 │   └── src/
+│       └── images/              # Documentation images (screenshots, benchmarks)
 │
 ├── data/                        # Data files (not committed)
 │   ├── gtfs/                    # GTFS transit schedules

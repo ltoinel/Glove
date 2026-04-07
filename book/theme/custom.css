@@ -1,42 +1,65 @@
-/* ── Glove Dark Theme ──
-   Matches the React portal: dark blue-black background, cyan accent,
-   glassmorphism effects, Figtree/Syne/JetBrains Mono fonts.
-*/
+/* ═══════════════════════════════════════════════════════════════
+   GLOVE DOCUMENTATION — Dark Transit Theme
+   Mirrors the React portal: deep space black, glassmorphism,
+   cyan/amber accents, noise texture, Syne + Figtree typography.
+   ═══════════════════════════════════════════════════════════════ */
 
-@import url('https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&family=Syne:wght@600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Figtree:wght@300;400;500;600;700&family=Syne:wght@500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
 
-/* ── Root variables ── */
+/* ── Design tokens ── */
 :root {
-    --content-max-width: 980px;
-    --sidebar-width: 300px;
-    --glove-bg: #0a0a12;
-    --glove-bg-paper: #12121e;
-    --glove-bg-elevated: rgba(20, 20, 35, 0.75);
-    --glove-bg-card: rgba(20, 20, 35, 0.5);
+    --glove-bg-deep: #0a0a12;
+    --glove-bg-surface: #12121e;
+    --glove-bg-card: rgba(20, 20, 35, 0.75);
+    --glove-bg-glass: rgba(18, 18, 32, 0.65);
+    --glove-border: rgba(255, 255, 255, 0.06);
+    --glove-border-mid: rgba(255, 255, 255, 0.10);
+    --glove-border-glow: rgba(0, 229, 255, 0.15);
     --glove-cyan: #00e5ff;
-    --glove-cyan-dim: rgba(0, 229, 255, 0.12);
-    --glove-cyan-glow: rgba(0, 229, 255, 0.06);
+    --glove-cyan-dim: rgba(0, 229, 255, 0.10);
+    --glove-cyan-glow: rgba(0, 229, 255, 0.05);
     --glove-amber: #ffb800;
+    --glove-amber-dim: rgba(255, 184, 0, 0.12);
+    --glove-green: #00e676;
+    --glove-red: #ff5252;
     --glove-text: #e8e6f0;
     --glove-text-secondary: #8b89a0;
-    --glove-border: rgba(255, 255, 255, 0.06);
-    --glove-border-hover: rgba(255, 255, 255, 0.12);
+    --glove-text-muted: #56546a;
+    --content-max-width: 980px;
     --radius: 12px;
     --radius-lg: 14px;
 }
 
-/* ── Force dark background on all themes ── */
+/* ── Force dark on every mdBook theme ── */
 .navy, .ayu, .coal, .rust, .light {
-    --bg: var(--glove-bg) !important;
-    --sidebar-bg: var(--glove-bg-paper) !important;
+    --bg: var(--glove-bg-deep) !important;
+    --sidebar-bg: var(--glove-bg-surface) !important;
     --sidebar-fg: var(--glove-text) !important;
     --sidebar-active: var(--glove-cyan) !important;
     --fg: var(--glove-text) !important;
     --links: var(--glove-cyan) !important;
 }
 
+/* ── Base ── */
 html {
     font-size: 18px;
+    scroll-behavior: smooth;
+}
+
+body {
+    background: var(--glove-bg-deep) !important;
+}
+
+/* Noise texture overlay — matches the portal */
+body::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 9999;
+    opacity: 0.025;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    background-size: 128px 128px;
 }
 
 /* ── Typography ── */
@@ -54,24 +77,43 @@ body, .sidebar, .content {
     padding: 0 2rem;
 }
 
-/* ── Headings (Syne, like the portal) ── */
+.content main p {
+    margin-bottom: 1.15em;
+}
+
+/* ── Headings — Syne display font ── */
 .content main h1 {
     font-family: 'Syne', sans-serif !important;
     font-weight: 800;
-    font-size: 2.4rem;
-    letter-spacing: -0.03em;
+    font-size: 2.5rem;
+    letter-spacing: -0.035em;
     margin-top: 0;
     padding-bottom: 0.5em;
-    border-bottom: 2px solid var(--glove-cyan);
+    border-bottom: none;
     color: var(--glove-text);
+    background: linear-gradient(135deg, var(--glove-text), var(--glove-cyan));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+
+.content main h1::after {
+    content: '';
+    display: block;
+    width: 80px;
+    height: 3px;
+    margin-top: 0.5em;
+    background: linear-gradient(90deg, var(--glove-cyan), transparent);
+    border-radius: 2px;
 }
 
 .content main h2 {
     font-family: 'Syne', sans-serif !important;
     font-weight: 700;
-    font-size: 1.7rem;
-    letter-spacing: -0.02em;
-    margin-top: 2.5rem;
+    font-size: 1.75rem;
+    letter-spacing: -0.025em;
+    margin-top: 3rem;
+    margin-bottom: 0.8em;
     color: var(--glove-text);
 }
 
@@ -80,7 +122,7 @@ body, .sidebar, .content {
     font-weight: 600;
     font-size: 1.35rem;
     letter-spacing: -0.01em;
-    margin-top: 2rem;
+    margin-top: 2.2rem;
     color: var(--glove-text);
 }
 
@@ -89,14 +131,10 @@ body, .sidebar, .content {
     font-weight: 600;
     font-size: 1.15rem;
     margin-top: 1.5rem;
+    color: var(--glove-text-secondary);
 }
 
-/* ── Paragraphs ── */
-.content main p {
-    margin-bottom: 1.1em;
-}
-
-/* ── Code blocks ── */
+/* ── Code blocks — glass card style ── */
 code, pre code {
     font-family: 'JetBrains Mono', 'Fira Code', monospace !important;
     font-size: 0.88rem;
@@ -105,9 +143,9 @@ code, pre code {
 pre {
     border-radius: var(--radius) !important;
     padding: 1.4em 1.6em !important;
-    background: var(--glove-bg-elevated) !important;
-    border: 1px solid var(--glove-border);
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+    background: var(--glove-bg-card) !important;
+    border: 1px solid var(--glove-border-mid);
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255,255,255,0.03);
     backdrop-filter: blur(12px);
 }
 
@@ -115,143 +153,181 @@ pre {
 .content main p > code,
 .content main li > code,
 .content main td > code {
-    padding: 0.2em 0.5em;
+    padding: 0.2em 0.55em;
     border-radius: 6px;
     font-size: 0.85em;
     background: var(--glove-cyan-dim) !important;
     color: var(--glove-cyan) !important;
+    border: 1px solid var(--glove-border-glow);
     white-space: nowrap;
 }
 
-/* ══════════════════════════════════════════════════════════════
-   TABLES — card-style with colored header and striped rows
-   ══════════════════════════════════════════════════════════════ */
+/* ═══════════════════════════════════════════════════════════════
+   TABLES — transit-card style
+   ═══════════════════════════════════════════════════════════════ */
 table {
     width: 100%;
     border-collapse: separate;
     border-spacing: 0;
-    border-radius: var(--radius);
+    border-radius: var(--radius-lg);
     overflow: hidden;
-    border: 1px solid var(--glove-border-hover);
-    margin: 1.8em 0;
+    border: 1px solid var(--glove-border-mid);
+    margin: 2em 0;
     background: var(--glove-bg-card);
-    backdrop-filter: blur(12px);
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+    backdrop-filter: blur(16px);
+    box-shadow:
+        0 4px 24px rgba(0, 0, 0, 0.25),
+        inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
 table thead tr {
-    background: linear-gradient(135deg, rgba(0, 229, 255, 0.18), rgba(0, 229, 255, 0.08)) !important;
+    background: linear-gradient(
+        135deg,
+        rgba(0, 229, 255, 0.14) 0%,
+        rgba(0, 229, 255, 0.04) 100%
+    ) !important;
 }
 
 table thead th {
-    padding: 1em 1.3em;
+    padding: 1em 1.4em;
     font-family: 'Syne', sans-serif;
     font-weight: 700;
-    font-size: 0.82rem;
+    font-size: 0.78rem;
     text-transform: uppercase;
-    letter-spacing: 0.08em;
+    letter-spacing: 0.1em;
     border: none;
+    border-bottom: 1px solid var(--glove-border-glow);
     color: var(--glove-cyan) !important;
     text-align: left;
 }
 
 table tbody td {
-    padding: 0.85em 1.3em;
+    padding: 0.9em 1.4em;
     border-bottom: 1px solid var(--glove-border);
     font-size: 1rem;
-    line-height: 1.6;
+    line-height: 1.65;
 }
 
 table tbody tr:nth-child(even) {
-    background: rgba(255, 255, 255, 0.015);
+    background: rgba(255, 255, 255, 0.012);
 }
 
 table tbody tr:last-child td {
     border-bottom: none;
 }
 
+table tbody tr {
+    transition: background 0.2s ease;
+}
+
 table tbody tr:hover {
     background: var(--glove-cyan-glow);
 }
 
-/* First column bold */
 table tbody td:first-child {
-    font-weight: 500;
+    font-weight: 600;
     color: var(--glove-text);
 }
 
-/* ══════════════════════════════════════════════════════════════
-   SIDEBAR — modern nav with hover cards and glow effects
-   ══════════════════════════════════════════════════════════════ */
+/* ═══════════════════════════════════════════════════════════════
+   SIDEBAR — transit navigation panel
+   ═══════════════════════════════════════════════════════════════ */
 .sidebar {
-    background: var(--glove-bg-paper) !important;
+    background: var(--glove-bg-surface) !important;
     border-right: 1px solid var(--glove-border) !important;
-    font-size: 1rem;
+    font-size: 0.98rem;
 }
 
 .sidebar .sidebar-scrollbox {
-    padding: 1.2rem 0.8rem;
+    padding: 1rem 0.6rem 2rem 0.6rem;
     background: transparent !important;
 }
 
-/* Nav items */
 .sidebar ol.chapter {
     padding: 0;
     list-style: none;
 }
 
 .sidebar ol.chapter li {
-    margin: 1px 0;
+    margin: 2px 0;
 }
 
 .sidebar ol.chapter li a {
-    display: block;
-    padding: 0.55em 1em;
+    display: flex;
+    align-items: center;
+    padding: 0.6em 1em;
     border-radius: 10px;
-    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
     color: var(--glove-text-secondary) !important;
-    font-size: 0.92rem;
+    font-size: 0.93rem;
     font-weight: 400;
     text-decoration: none;
     border-left: 3px solid transparent;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    position: relative;
 }
 
 .sidebar ol.chapter li a:hover {
     background: var(--glove-cyan-dim);
     color: var(--glove-cyan) !important;
     border-left-color: rgba(0, 229, 255, 0.3);
-    transform: translateX(2px);
+    transform: translateX(3px);
+    box-shadow: 0 0 16px rgba(0, 229, 255, 0.04);
 }
 
-/* Active item */
 .sidebar ol.chapter li.chapter-item.expanded a,
 .sidebar ol.chapter li a.active {
     color: var(--glove-cyan) !important;
     font-weight: 600;
-    background: var(--glove-cyan-dim);
+    background: linear-gradient(90deg, var(--glove-cyan-dim), transparent);
     border-left: 3px solid var(--glove-cyan);
-    box-shadow: 0 0 12px rgba(0, 229, 255, 0.08);
+    box-shadow: 0 0 20px rgba(0, 229, 255, 0.06);
 }
 
-/* Section titles (Getting Started, Architecture, etc.) */
+/* Glow dot on active */
+.sidebar ol.chapter li a.active::before {
+    content: '';
+    position: absolute;
+    left: -3px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 3px;
+    height: 60%;
+    background: var(--glove-cyan);
+    border-radius: 0 2px 2px 0;
+    box-shadow: 0 0 8px var(--glove-cyan);
+}
+
+/* Section headings — amber transit labels */
 .sidebar .chapter li.part-title {
     font-family: 'Syne', sans-serif;
     font-weight: 800;
-    font-size: 0.68rem;
+    font-size: 0.65rem;
     text-transform: uppercase;
-    letter-spacing: 0.12em;
+    letter-spacing: 0.14em;
     color: var(--glove-amber);
-    margin-top: 2em;
-    margin-bottom: 0.5em;
-    padding-left: 1em;
-    opacity: 0.9;
+    margin-top: 2.2em;
+    margin-bottom: 0.6em;
+    padding: 0.4em 1em;
+    position: relative;
 }
 
-/* Nested items */
+.sidebar .chapter li.part-title::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 100%;
+    background: var(--glove-amber-dim);
+    border-radius: 8px;
+    z-index: -1;
+}
+
+/* Nested nav items */
 .sidebar ol.chapter li ol {
-    padding-left: 0.6em;
+    padding-left: 0.4em;
+    margin-left: 1.1em;
     border-left: 1px solid var(--glove-border);
-    margin-left: 1.2em;
 }
 
 .sidebar ol.chapter li ol li a {
@@ -261,11 +337,12 @@ table tbody td:first-child {
 
 /* ── Blockquotes ── */
 blockquote {
-    border-left: 4px solid var(--glove-cyan);
+    border-left: 3px solid var(--glove-cyan);
     border-radius: 0 var(--radius) var(--radius) 0;
     background: var(--glove-cyan-dim);
     padding: 1em 1.4em;
-    margin: 1.5em 0;
+    margin: 1.8em 0;
+    backdrop-filter: blur(8px);
 }
 
 blockquote p {
@@ -276,59 +353,71 @@ blockquote p {
 .content a {
     color: var(--glove-cyan) !important;
     text-decoration: none;
-    border-bottom: 1px solid transparent;
-    transition: border-color 0.15s ease;
+    border-bottom: 1px solid rgba(0, 229, 255, 0.2);
+    transition: border-color 0.2s ease;
 }
 
 .content a:hover {
     border-bottom-color: var(--glove-cyan);
+    text-shadow: 0 0 12px rgba(0, 229, 255, 0.15);
 }
 
 /* ── Nav buttons (previous/next) ── */
 .nav-chapters {
     font-size: 1rem;
-    opacity: 0.4;
-    transition: all 0.2s ease;
+    opacity: 0.35;
+    transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .nav-chapters:hover {
     opacity: 1;
     color: var(--glove-cyan) !important;
+    text-shadow: 0 0 16px rgba(0, 229, 255, 0.2);
 }
 
 /* ── Code line height ── */
 pre > code {
-    line-height: 1.6;
+    line-height: 1.65;
 }
 
 /* ── Badges ── */
 .content main img[src*="badge"],
 .content main img[src*="shields"] {
     display: inline-block;
-    margin: 0 4px 4px 0;
+    margin: 0 4px 6px 0;
     vertical-align: middle;
 }
 
-/* ── Images (card style with shadow) ── */
+/* ── Images — card with glow ── */
 .content main img:not([src*="badge"]):not([src*="shields"]) {
     border-radius: var(--radius-lg);
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
-    border: 1px solid var(--glove-border);
-    margin: 1.5em 0;
+    box-shadow:
+        0 8px 40px rgba(0, 0, 0, 0.5),
+        0 0 1px rgba(0, 229, 255, 0.1);
+    border: 1px solid var(--glove-border-mid);
+    margin: 2em 0;
     max-width: 100%;
+    transition: box-shadow 0.3s ease, transform 0.3s ease;
+}
+
+.content main img:not([src*="badge"]):not([src*="shields"]):hover {
+    box-shadow:
+        0 12px 48px rgba(0, 0, 0, 0.6),
+        0 0 24px rgba(0, 229, 255, 0.08);
+    transform: translateY(-2px);
 }
 
 /* ── Menu bar ── */
 #menu-bar {
-    background: var(--glove-bg-paper) !important;
+    background: var(--glove-bg-surface) !important;
     border-bottom: 1px solid var(--glove-border);
     backdrop-filter: blur(16px);
 }
 
 #menu-bar .icon-button {
     border-radius: 8px;
-    transition: background 0.15s ease;
-    color: var(--glove-text-secondary) !important;
+    transition: all 0.2s ease;
+    color: var(--glove-text-muted) !important;
 }
 
 #menu-bar .icon-button:hover {
@@ -338,30 +427,35 @@ pre > code {
 
 /* ── Theme selector ── */
 #theme-list {
-    background: var(--glove-bg-paper) !important;
-    border: 1px solid var(--glove-border) !important;
-    border-radius: 8px;
+    background: var(--glove-bg-surface) !important;
+    border: 1px solid var(--glove-border-mid) !important;
+    border-radius: 10px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
 }
 
-/* ── Search bar ── */
+/* ── Search ── */
 #searchbar {
-    background: var(--glove-bg-elevated) !important;
+    background: var(--glove-bg-card) !important;
     border: 1px solid var(--glove-border) !important;
     border-radius: 10px !important;
     color: var(--glove-text) !important;
     font-size: 1rem;
-    padding: 0.5em 1em !important;
+    padding: 0.55em 1em !important;
+    backdrop-filter: blur(12px);
 }
 
 #searchbar:focus {
     border-color: var(--glove-cyan) !important;
-    box-shadow: 0 0 0 3px rgba(0, 229, 255, 0.15) !important;
+    box-shadow:
+        0 0 0 3px rgba(0, 229, 255, 0.12),
+        0 0 16px rgba(0, 229, 255, 0.06) !important;
 }
 
 .search-results {
-    background: var(--glove-bg-paper) !important;
-    border: 1px solid var(--glove-border) !important;
+    background: var(--glove-bg-surface) !important;
+    border: 1px solid var(--glove-border-mid) !important;
     border-radius: var(--radius) !important;
+    box-shadow: 0 12px 48px rgba(0, 0, 0, 0.5);
 }
 
 .search-results .search-results-item {
@@ -370,17 +464,17 @@ pre > code {
 
 /* ── Page footer ── */
 .content .page-footer {
-    margin-top: 3em;
+    margin-top: 4em;
     padding-top: 1.5em;
     border-top: 1px solid var(--glove-border);
-    opacity: 0.5;
-    font-size: 0.85rem;
+    opacity: 0.4;
+    font-size: 0.82rem;
 }
 
-/* ── Scrollbar (thin, matching theme) ── */
+/* ── Scrollbar ── */
 ::-webkit-scrollbar {
-    width: 6px;
-    height: 6px;
+    width: 5px;
+    height: 5px;
 }
 
 ::-webkit-scrollbar-track {
@@ -388,15 +482,15 @@ pre > code {
 }
 
 ::-webkit-scrollbar-thumb {
-    background: rgba(0, 229, 255, 0.15);
-    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 10px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-    background: rgba(0, 229, 255, 0.3);
+    background: rgba(255, 255, 255, 0.15);
 }
 
-/* ── Smooth transitions (exclude code for perf) ── */
+/* ── Transitions ── */
 * {
     transition-property: background-color, border-color, color, opacity, transform, box-shadow;
     transition-duration: 0.2s;
@@ -407,21 +501,21 @@ pre, pre *, code, .hljs, .hljs * {
     transition: none !important;
 }
 
-/* ── Admonish overrides (match glassmorphism) ── */
+/* ── Admonish — glass card ── */
 .admonition {
     border-radius: var(--radius) !important;
-    border: 1px solid var(--glove-border-hover) !important;
-    background: var(--glove-bg-elevated) !important;
-    backdrop-filter: blur(12px);
-    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.15);
+    border: 1px solid var(--glove-border-mid) !important;
+    background: var(--glove-bg-card) !important;
+    backdrop-filter: blur(16px);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255,255,255,0.03);
     font-size: 1.02rem;
 }
 
 .admonition .admonition-title {
     font-family: 'Syne', sans-serif;
     font-weight: 700;
-    font-size: 0.9rem;
-    letter-spacing: 0.02em;
+    font-size: 0.88rem;
+    letter-spacing: 0.03em;
 }
 
 /* ── Strong / bold ── */
@@ -437,7 +531,7 @@ strong {
 
 .content main li {
     margin-bottom: 0.5em;
-    line-height: 1.7;
+    line-height: 1.75;
 }
 
 .content main li strong {
@@ -447,6 +541,13 @@ strong {
 /* ── Horizontal rules ── */
 .content main hr {
     border: none;
-    border-top: 1px solid var(--glove-border);
-    margin: 2.5em 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--glove-border-mid), transparent);
+    margin: 3em 0;
+}
+
+/* ── Focus ── */
+*:focus-visible {
+    outline: 2px solid var(--glove-cyan);
+    outline-offset: 2px;
 }

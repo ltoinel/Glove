@@ -44,6 +44,11 @@ This script:
 2. Builds routing tiles from the downloaded OSM data
 3. Starts the container on port **8002**
 
+The Valhalla configuration includes:
+- `include_platforms=True` to import platform/indoor data from OSM
+- `step_penalty` and `elevator_penalty` in pedestrian costing to fine-tune indoor routing preferences
+- Indoor maneuver support (elevator, stairs, escalator, enter/exit building) when OSM data is available
+
 Make sure `config.yaml` points to the Valhalla host:
 
 ```yaml
