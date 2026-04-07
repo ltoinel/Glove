@@ -136,15 +136,6 @@ function toApiDatetime(val) {
   return clean.slice(0, 8) + 'T' + clean.slice(8).padEnd(6, '0')
 }
 
-function modeIcon(mode) {
-  switch (mode) {
-    case 'metro': return <Subway fontSize="small" />
-    case 'rail': return <Train fontSize="small" />
-    case 'tramway': return <Tram fontSize="small" />
-    default: return <DirectionsBus fontSize="small" />
-  }
-}
-
 // --- Elevation-colored segments for bike routes ---
 
 function elevationSegments(coords, heights) {
@@ -446,17 +437,7 @@ function JourneyCard({ journey, selected, onSelect, animDelay }) {
     >
       <CardActionArea onClick={() => { setOpen(!open); onSelect() }}>
         <CardContent sx={{ py: 1.5, px: 2.5 }}>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-            <Box sx={{
-              width: 36, height: 36, borderRadius: '50%',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              bgcolor: selected ? 'rgba(0, 229, 255, 0.15)' : 'rgba(255, 255, 255, 0.04)',
-              border: selected ? '1px solid rgba(0, 229, 255, 0.3)' : '1px solid rgba(255,255,255,0.06)',
-              flexShrink: 0,
-            }}>
-              <DirectionsBus sx={{ fontSize: 18, color: selected ? '#00e5ff' : 'text.secondary' }} />
-            </Box>
-
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
             <Box sx={{ flex: 1, minWidth: 0 }}>
               <Typography variant="body2" fontWeight={600} sx={{ fontFamily: '"Syne", sans-serif' }}>
                 {formatTime(journey.departure_date_time)}
@@ -473,12 +454,12 @@ function JourneyCard({ journey, selected, onSelect, animDelay }) {
                     return (
                       <Box key={i} sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.3 }}>
                         {chevron}
-                        <Chip icon={modeIcon(di.commercial_mode)} label={di.label || di.commercial_mode}
+                        <Chip label={di.label || di.commercial_mode}
                           size="small"
                           sx={{
-                            bgcolor: bg, color: fg, fontWeight: 700, fontSize: 11, height: 24,
+                            bgcolor: bg, color: fg, fontWeight: 700, fontSize: 11, height: 22,
                             boxShadow: `0 0 8px ${alpha(bg, 0.3)}`,
-                            '& .MuiChip-icon': { color: fg, ml: 0.5 },
+                            '& .MuiChip-label': { px: 0.8 },
                           }} />
                       </Box>
                     )
@@ -518,8 +499,8 @@ function JourneyCard({ journey, selected, onSelect, animDelay }) {
             </Box>
 
             <Box sx={{ textAlign: 'right', flexShrink: 0, pl: 1 }}>
-              <Typography variant="body1" fontWeight={800} lineHeight={1.2} color="text.primary"
-                sx={{ fontFamily: '"Syne", sans-serif' }}>
+              <Typography variant="body2" fontWeight={800} lineHeight={1.2} color="text.primary"
+                sx={{ fontFamily: '"Syne", sans-serif', fontSize: 14 }}>
                 {formatDuration(journey.duration)}
               </Typography>
               {journey.nb_transfers > 0 && (
