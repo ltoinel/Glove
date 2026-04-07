@@ -1778,7 +1778,7 @@ export default function App() {
 
           {fromPos && toPos && !hasResults && (
             <Polyline positions={[fromPos, toPos]}
-              pathOptions={{ color: '#56546a', weight: 2, opacity: 0.7, dashArray: '8, 8' }} />
+              pathOptions={{ color: '#56546a', weight: 2, opacity: 0.5 }} />
           )}
 
           {mapData.lines.map((line, i) => (
