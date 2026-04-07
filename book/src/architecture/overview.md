@@ -45,6 +45,10 @@ The RAPTOR index is wrapped in [ArcSwap](https://docs.rs/arc-swap), which allows
 Trips with identical stop sequences are grouped into **patterns**. This dramatically reduces memory usage and speeds up the RAPTOR scan phase, because the algorithm only needs to evaluate one entry per pattern instead of one per trip.
 ```
 
+```admonish example title="Indoor Routing"
+Valhalla supports indoor maneuvers such as elevators, stairs, escalators, and building enter/exit transitions. When OSM data includes indoor information, transfer sections in public transport journeys include detailed maneuvers to guide users through stations and buildings. Transfer sections only show maneuvers when indoor data is available from OSM.
+```
+
 ```admonish example title="Navitia API Compatibility"
 The API mirrors [Navitia](https://navitia.io/) query parameters and response structure, making Glove a potential drop-in replacement for Navitia-based applications.
 ```
@@ -55,7 +59,7 @@ The API mirrors [Navitia](https://navitia.io/) query parameters and response str
 |-----------|-----------|
 | Backend | Rust, Actix-web 4 |
 | Routing | RAPTOR algorithm (custom implementation) |
-| Walk/Bike/Car | Valhalla (Docker) |
+| Walk/Bike/Car | Valhalla (Docker, with indoor routing support) |
 | Frontend | React 19, Vite, MUI 7, Leaflet |
 | Data format | GTFS (General Transit Feed Specification) |
 | Address search | BAN (Base Adresse Nationale) |

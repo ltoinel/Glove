@@ -26,6 +26,8 @@ The journey planning endpoints use query parameters compatible with the [Navitia
 
 This allows Glove to serve as a drop-in replacement for Navitia in existing applications.
 
+All journey responses (walk, bike, car, and public transport) include a `maneuver_type` field (Valhalla type number) in maneuver objects, enabling clients to display turn-by-turn navigation with indoor maneuver support.
+
 ## Authentication
 
 Most endpoints are public. The `POST /api/reload` endpoint requires an API key configured in `config.yaml`:

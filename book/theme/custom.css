@@ -7,13 +7,15 @@
 
 /* ── Root variables ── */
 :root {
-    --content-max-width: 960px;
+    --content-max-width: 980px;
     --sidebar-width: 300px;
     --glove-bg: #0a0a12;
     --glove-bg-paper: #12121e;
     --glove-bg-elevated: rgba(20, 20, 35, 0.75);
+    --glove-bg-card: rgba(20, 20, 35, 0.5);
     --glove-cyan: #00e5ff;
-    --glove-cyan-dim: rgba(0, 229, 255, 0.15);
+    --glove-cyan-dim: rgba(0, 229, 255, 0.12);
+    --glove-cyan-glow: rgba(0, 229, 255, 0.06);
     --glove-amber: #ffb800;
     --glove-text: #e8e6f0;
     --glove-text-secondary: #8b89a0;
@@ -24,11 +26,7 @@
 }
 
 /* ── Force dark background on all themes ── */
-.navy,
-.ayu,
-.coal,
-.rust,
-.light {
+.navy, .ayu, .coal, .rust, .light {
     --bg: var(--glove-bg) !important;
     --sidebar-bg: var(--glove-bg-paper) !important;
     --sidebar-fg: var(--glove-text) !important;
@@ -38,7 +36,7 @@
 }
 
 html {
-    font-size: 17px;
+    font-size: 18px;
 }
 
 /* ── Typography ── */
@@ -51,9 +49,9 @@ body, .sidebar, .content {
 
 .content main {
     max-width: var(--content-max-width);
-    line-height: 1.8;
-    font-size: 1rem;
-    padding: 0 1.5rem;
+    line-height: 1.85;
+    font-size: 1.05rem;
+    padding: 0 2rem;
 }
 
 /* ── Headings (Syne, like the portal) ── */
@@ -71,7 +69,7 @@ body, .sidebar, .content {
 .content main h2 {
     font-family: 'Syne', sans-serif !important;
     font-weight: 700;
-    font-size: 1.65rem;
+    font-size: 1.7rem;
     letter-spacing: -0.02em;
     margin-top: 2.5rem;
     color: var(--glove-text);
@@ -80,7 +78,7 @@ body, .sidebar, .content {
 .content main h3 {
     font-family: 'Syne', sans-serif !important;
     font-weight: 600;
-    font-size: 1.3rem;
+    font-size: 1.35rem;
     letter-spacing: -0.01em;
     margin-top: 2rem;
     color: var(--glove-text);
@@ -89,14 +87,19 @@ body, .sidebar, .content {
 .content main h4 {
     font-family: 'Syne', sans-serif !important;
     font-weight: 600;
-    font-size: 1.1rem;
+    font-size: 1.15rem;
     margin-top: 1.5rem;
+}
+
+/* ── Paragraphs ── */
+.content main p {
+    margin-bottom: 1.1em;
 }
 
 /* ── Code blocks ── */
 code, pre code {
     font-family: 'JetBrains Mono', 'Fira Code', monospace !important;
-    font-size: 0.9rem;
+    font-size: 0.88rem;
 }
 
 pre {
@@ -114,43 +117,53 @@ pre {
 .content main td > code {
     padding: 0.2em 0.5em;
     border-radius: 6px;
-    font-size: 0.88em;
+    font-size: 0.85em;
     background: var(--glove-cyan-dim) !important;
     color: var(--glove-cyan) !important;
+    white-space: nowrap;
 }
 
-/* ── Tables (glassmorphism card style) ── */
+/* ══════════════════════════════════════════════════════════════
+   TABLES — card-style with colored header and striped rows
+   ══════════════════════════════════════════════════════════════ */
 table {
     width: 100%;
     border-collapse: separate;
     border-spacing: 0;
     border-radius: var(--radius);
     overflow: hidden;
-    border: 1px solid var(--glove-border);
-    margin: 1.5em 0;
-    background: var(--glove-bg-elevated);
+    border: 1px solid var(--glove-border-hover);
+    margin: 1.8em 0;
+    background: var(--glove-bg-card);
     backdrop-filter: blur(12px);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
 }
 
 table thead tr {
-    background: rgba(0, 229, 255, 0.12) !important;
+    background: linear-gradient(135deg, rgba(0, 229, 255, 0.18), rgba(0, 229, 255, 0.08)) !important;
 }
 
 table thead th {
-    padding: 0.85em 1.2em;
+    padding: 1em 1.3em;
     font-family: 'Syne', sans-serif;
-    font-weight: 600;
-    font-size: 0.85rem;
+    font-weight: 700;
+    font-size: 0.82rem;
     text-transform: uppercase;
-    letter-spacing: 0.06em;
+    letter-spacing: 0.08em;
     border: none;
     color: var(--glove-cyan) !important;
+    text-align: left;
 }
 
 table tbody td {
-    padding: 0.75em 1.2em;
+    padding: 0.85em 1.3em;
     border-bottom: 1px solid var(--glove-border);
-    font-size: 0.95rem;
+    font-size: 1rem;
+    line-height: 1.6;
+}
+
+table tbody tr:nth-child(even) {
+    background: rgba(255, 255, 255, 0.015);
 }
 
 table tbody tr:last-child td {
@@ -158,51 +171,92 @@ table tbody tr:last-child td {
 }
 
 table tbody tr:hover {
-    background: rgba(0, 229, 255, 0.05);
+    background: var(--glove-cyan-glow);
 }
 
-/* ── Sidebar (dark paper, cyan accents) ── */
+/* First column bold */
+table tbody td:first-child {
+    font-weight: 500;
+    color: var(--glove-text);
+}
+
+/* ══════════════════════════════════════════════════════════════
+   SIDEBAR — modern nav with hover cards and glow effects
+   ══════════════════════════════════════════════════════════════ */
 .sidebar {
     background: var(--glove-bg-paper) !important;
     border-right: 1px solid var(--glove-border) !important;
-    font-size: 0.95rem;
+    font-size: 1rem;
 }
 
 .sidebar .sidebar-scrollbox {
-    padding: 1.5rem 1.2rem;
+    padding: 1.2rem 0.8rem;
     background: transparent !important;
 }
 
+/* Nav items */
+.sidebar ol.chapter {
+    padding: 0;
+    list-style: none;
+}
+
+.sidebar ol.chapter li {
+    margin: 1px 0;
+}
+
 .sidebar ol.chapter li a {
-    padding: 0.5em 0.9em;
-    border-radius: 8px;
-    transition: all 0.15s ease;
+    display: block;
+    padding: 0.55em 1em;
+    border-radius: 10px;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
     color: var(--glove-text-secondary) !important;
+    font-size: 0.92rem;
+    font-weight: 400;
+    text-decoration: none;
+    border-left: 3px solid transparent;
 }
 
 .sidebar ol.chapter li a:hover {
     background: var(--glove-cyan-dim);
     color: var(--glove-cyan) !important;
+    border-left-color: rgba(0, 229, 255, 0.3);
+    transform: translateX(2px);
 }
 
+/* Active item */
 .sidebar ol.chapter li.chapter-item.expanded a,
 .sidebar ol.chapter li a.active {
     color: var(--glove-cyan) !important;
     font-weight: 600;
     background: var(--glove-cyan-dim);
     border-left: 3px solid var(--glove-cyan);
+    box-shadow: 0 0 12px rgba(0, 229, 255, 0.08);
 }
 
+/* Section titles (Getting Started, Architecture, etc.) */
 .sidebar .chapter li.part-title {
     font-family: 'Syne', sans-serif;
-    font-weight: 700;
-    font-size: 0.7rem;
+    font-weight: 800;
+    font-size: 0.68rem;
     text-transform: uppercase;
-    letter-spacing: 0.1em;
+    letter-spacing: 0.12em;
     color: var(--glove-amber);
-    margin-top: 1.8em;
-    margin-bottom: 0.4em;
-    padding-left: 0.9em;
+    margin-top: 2em;
+    margin-bottom: 0.5em;
+    padding-left: 1em;
+    opacity: 0.9;
+}
+
+/* Nested items */
+.sidebar ol.chapter li ol {
+    padding-left: 0.6em;
+    border-left: 1px solid var(--glove-border);
+    margin-left: 1.2em;
+}
+
+.sidebar ol.chapter li ol li a {
+    font-size: 0.88rem;
+    padding: 0.4em 0.9em;
 }
 
 /* ── Blockquotes ── */
@@ -232,8 +286,8 @@ blockquote p {
 
 /* ── Nav buttons (previous/next) ── */
 .nav-chapters {
-    font-size: 0.95rem;
-    opacity: 0.5;
+    font-size: 1rem;
+    opacity: 0.4;
     transition: all 0.2s ease;
 }
 
@@ -293,14 +347,15 @@ pre > code {
 #searchbar {
     background: var(--glove-bg-elevated) !important;
     border: 1px solid var(--glove-border) !important;
-    border-radius: 8px !important;
+    border-radius: 10px !important;
     color: var(--glove-text) !important;
     font-size: 1rem;
+    padding: 0.5em 1em !important;
 }
 
 #searchbar:focus {
     border-color: var(--glove-cyan) !important;
-    box-shadow: 0 0 0 2px rgba(0, 229, 255, 0.2) !important;
+    box-shadow: 0 0 0 3px rgba(0, 229, 255, 0.15) !important;
 }
 
 .search-results {
@@ -343,9 +398,9 @@ pre > code {
 
 /* ── Smooth transitions (exclude code for perf) ── */
 * {
-    transition-property: background-color, border-color, color, opacity;
-    transition-duration: 0.15s;
-    transition-timing-function: ease;
+    transition-property: background-color, border-color, color, opacity, transform, box-shadow;
+    transition-duration: 0.2s;
+    transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 pre, pre *, code, .hljs, .hljs * {
@@ -355,9 +410,18 @@ pre, pre *, code, .hljs, .hljs * {
 /* ── Admonish overrides (match glassmorphism) ── */
 .admonition {
     border-radius: var(--radius) !important;
-    border: 1px solid var(--glove-border) !important;
+    border: 1px solid var(--glove-border-hover) !important;
     background: var(--glove-bg-elevated) !important;
     backdrop-filter: blur(12px);
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.15);
+    font-size: 1.02rem;
+}
+
+.admonition .admonition-title {
+    font-family: 'Syne', sans-serif;
+    font-weight: 700;
+    font-size: 0.9rem;
+    letter-spacing: 0.02em;
 }
 
 /* ── Strong / bold ── */
@@ -372,9 +436,17 @@ strong {
 }
 
 .content main li {
-    margin-bottom: 0.4em;
+    margin-bottom: 0.5em;
+    line-height: 1.7;
 }
 
 .content main li strong {
     color: var(--glove-cyan);
+}
+
+/* ── Horizontal rules ── */
+.content main hr {
+    border: none;
+    border-top: 1px solid var(--glove-border);
+    margin: 2.5em 0;
 }

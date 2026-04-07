@@ -77,7 +77,7 @@ valhalla:
   port: 8002
 ```
 
-The Valhalla routing engine is used for walking, cycling, and driving directions. It runs as a separate Docker container.
+The Valhalla routing engine is used for walking, cycling, and driving directions. It runs as a separate Docker container. When OSM data includes indoor information, Valhalla provides indoor maneuvers (elevator, stairs, escalator, enter/exit building) in transfer and walking sections.
 
 ## Map
 

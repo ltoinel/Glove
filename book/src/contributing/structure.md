@@ -36,7 +36,8 @@ Glove/
 │   ├── start.sh                 # Start script (production & dev)
 │   ├── download.sh              # Data download (GTFS, OSM, BAN)
 │   ├── valhalla.sh              # Valhalla Docker setup
-│   └── benchmark.py             # Performance benchmark with charts
+│   ├── benchmark.py             # Performance benchmark with charts
+│   └── check_indoor.py          # Check GTFS transfers for indoor routing data
 │
 ├── docker/
 │   └── Dockerfile               # Multi-stage build (Node + Rust + Debian)

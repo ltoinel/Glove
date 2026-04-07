@@ -41,7 +41,13 @@ The response follows the Navitia journey format:
           "type": "street_network",
           "mode": "walking",
           "duration": 300,
-          "geojson": { ... }
+          "geojson": { ... },
+          "maneuvers": [
+            {
+              "instruction": "Walk south on Rue de Rivoli.",
+              "maneuver_type": 2
+            }
+          ]
         },
         {
           "type": "public_transport",
@@ -60,7 +66,13 @@ The response follows the Navitia journey format:
         },
         {
           "type": "transfer",
-          "duration": 180
+          "duration": 180,
+          "maneuvers": [
+            {
+              "instruction": "Take the elevator to level 0.",
+              "maneuver_type": 37
+            }
+          ]
         },
         {
           "type": "public_transport",
@@ -78,6 +90,21 @@ Each journey may have one or more tags:
 - `fastest` — Shortest total duration
 - `least_transfers` — Fewest number of transfers
 - `least_walking` — Least walking time
+
+### Maneuvers
+
+Street network sections and transfer sections may include a `maneuvers` array with turn-by-turn directions. Each maneuver contains:
+
+| Field | Description |
+|-------|-------------|
+| `instruction` | Human-readable direction text |
+| `maneuver_type` | Valhalla maneuver type number (e.g., 2 = turn right, 37 = elevator, 38 = stairs, 39 = escalator) |
+
+Transfer sections only include maneuvers when indoor routing data is available from OSM. Indoor maneuver types include elevator (37), stairs (38), escalator (39), enter building (40), and exit building (41).
+
+```admonish info title="Maneuver Types"
+The `maneuver_type` field is a Valhalla type number included in all walk, bike, and car responses, as well as in `street_network` and `transfer` sections of public transport responses.
+```
 
 ## Walking
 

@@ -69,4 +69,11 @@ python3 bin/benchmark.py --rounds 10
 
 # Start Valhalla for walk/bike/car routing
 bin/valhalla.sh
+
+# Check which GTFS transfer pairs have indoor routing data in Valhalla
+python3 bin/check_indoor.py
+```
+
+```admonish info title="Indoor Coverage Analysis"
+The `check_indoor.py` script queries Valhalla for each GTFS transfer pair to determine which ones have indoor routing data available from OSM. This is useful for understanding indoor coverage in your deployment area.
 ```
