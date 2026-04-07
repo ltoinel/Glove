@@ -34,8 +34,11 @@
     --links: var(--glove-cyan) !important;
 }
 
+:root {
+    font-size: 17px !important;
+}
+
 html {
-    font-size: 17px;
     scroll-behavior: smooth;
 }
 
