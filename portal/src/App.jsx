@@ -538,7 +538,7 @@ function JourneyCard({ journey, selected, onSelect, animDelay }) {
                 }} />
                 <Box sx={{ flex: 1, minWidth: 0 }}>
                   <Typography variant="caption" fontWeight={600} color="text.primary">
-                    {isPt ? <>{di?.commercial_mode} <strong>{di?.label}</strong></> : s.type === 'street_network' ? (
+                    {isPt ? <>{t(`mode_${di?.commercial_mode}`) || di?.commercial_mode} <strong>{di?.label}</strong></> : s.type === 'street_network' ? (
                       <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
                         <DirectionsWalk sx={{ fontSize: 14, color: '#90a4ae' }} /> {t('walkToStation')}
                       </Box>
