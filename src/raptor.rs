@@ -22,7 +22,6 @@
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::Path;
 use tracing::info;
 
@@ -107,7 +106,7 @@ pub struct RaptorData {
     /// For each stop: list of `(target_stop_idx, transfer_duration_secs)`.
     pub stop_transfers: Vec<Vec<(usize, u32)>>,
     /// Route metadata for display (colors, names, types).
-    pub routes: HashMap<String, gtfs::Route>,
+    pub routes: FxHashMap<String, gtfs::Route>,
     /// All stops ordered by numeric index.
     pub stops: Vec<gtfs::Stop>,
     /// Loading statistics and metadata.
@@ -117,7 +116,7 @@ pub struct RaptorData {
     /// Interned service IDs: `service_idx → service_id`.
     service_ids: Vec<String>,
     /// Calendar rules indexed by service_id.
-    calendars: HashMap<String, gtfs::Calendar>,
+    calendars: FxHashMap<String, gtfs::Calendar>,
     /// Calendar exceptions: `service_id → { date → exception_type }` for O(1) lookup.
     calendar_exceptions: FxHashMap<String, FxHashMap<String, u8>>,
 }
@@ -187,7 +186,7 @@ impl RaptorData {
 
         // Step 3: Group stop_times by trip_id and sort by sequence
         info!("Grouping stop_times by trip...");
-        let mut trip_stop_times: HashMap<&str, Vec<(u32, u32, u32, &str)>> = HashMap::new();
+        let mut trip_stop_times: FxHashMap<&str, Vec<(u32, u32, u32, &str)>> = FxHashMap::default();
         for st in &gtfs.stop_times {
             let arr = gtfs::parse_time(&st.arrival_time).unwrap_or(0);
             let dep = gtfs::parse_time(&st.departure_time).unwrap_or(0);
@@ -1309,7 +1308,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn make_test_gtfs() -> gtfs::GtfsData {
-        let mut stops = HashMap::new();
+        let mut stops = FxHashMap::default();
         stops.insert(
             "S1".to_string(),
             gtfs::Stop {
@@ -1351,7 +1350,7 @@ mod tests {
             },
         );
 
-        let mut routes = HashMap::new();
+        let mut routes = FxHashMap::default();
         routes.insert(
             "R1".to_string(),
             gtfs::Route {
@@ -1365,7 +1364,7 @@ mod tests {
             },
         );
 
-        let mut trips = HashMap::new();
+        let mut trips = FxHashMap::default();
         trips.insert(
             "T1".to_string(),
             gtfs::Trip {
@@ -1430,7 +1429,7 @@ mod tests {
             },
         ];
 
-        let mut calendars = HashMap::new();
+        let mut calendars = FxHashMap::default();
         calendars.insert(
             "SVC1".to_string(),
             gtfs::Calendar {

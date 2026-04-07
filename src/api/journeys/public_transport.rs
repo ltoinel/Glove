@@ -9,6 +9,8 @@ use chrono::Timelike;
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
+use std::sync::Arc;
+
 use crate::config::AppConfig;
 use crate::raptor::{self, RaptorData, SectionType};
 
@@ -314,6 +316,7 @@ pub async fn get_journeys(
         }
 
         // Exploit all Pareto-optimal journeys from this RAPTOR run
+        let prev_count = journeys.len();
         for sections in &section_sets {
             let journey = build_journey(&raptor_data, sections, &date);
 
@@ -331,6 +334,11 @@ pub async fn get_journeys(
 
             excluded_patterns.extend(raptor::used_patterns(sections));
         }
+
+        // Early termination: no new journeys found in this iteration
+        if journeys.len() == prev_count {
+            break;
+        }
     }
 
     journeys.sort_by_key(|j| j.duration);
@@ -345,9 +353,9 @@ pub async fn get_journeys(
         let include_maneuvers = query.maneuvers.unwrap_or(false);
 
         // Cache: stop_idx → WalkLeg (avoid recomputing for the same stop across journeys)
-        let mut first_mile_cache: rustc_hash::FxHashMap<usize, Option<valhalla::WalkLeg>> =
+        let mut first_mile_cache: rustc_hash::FxHashMap<usize, Option<Arc<valhalla::WalkLeg>>> =
             rustc_hash::FxHashMap::default();
-        let mut last_mile_cache: rustc_hash::FxHashMap<usize, Option<valhalla::WalkLeg>> =
+        let mut last_mile_cache: rustc_hash::FxHashMap<usize, Option<Arc<valhalla::WalkLeg>>> =
             rustc_hash::FxHashMap::default();
 
         for journey in &mut journeys {
@@ -389,7 +397,8 @@ pub async fn get_journeys(
                         (stop.stop_lon, stop.stop_lat),
                         walking_speed,
                     )
-                    .await;
+                    .await
+                    .map(Arc::new);
                     (stop_idx, result)
                 } else {
                     (0, None)
@@ -413,7 +422,8 @@ pub async fn get_journeys(
                         to_c,
                         walking_speed,
                     )
-                    .await;
+                    .await
+                    .map(Arc::new);
                     (stop_idx, result)
                 } else {
                     (0, None)
@@ -552,39 +562,53 @@ pub async fn get_journeys(
         // (types 39-43: elevator, stairs, escalator, enter/exit building).
         // Otherwise the route is outdoor and likely incorrect for station transfers.
         const INDOOR_TYPES: [u32; 5] = [39, 40, 41, 42, 43];
-        if !include_maneuvers {
-            // Skip transfer enrichment entirely when maneuvers are not requested
-        } else {
-            for journey in &mut journeys {
-                for section in &mut journey.sections {
+        if include_maneuvers {
+            // Collect all transfer section coordinates for batch Valhalla calls
+            type TransferReq = (usize, usize, (f64, f64), (f64, f64));
+            let mut transfer_requests: Vec<TransferReq> = Vec::new();
+            for (j_idx, journey) in journeys.iter().enumerate() {
+                for (s_idx, section) in journey.sections.iter().enumerate() {
                     if section.section_type != "transfer" {
                         continue;
                     }
-                    let from_coord = section
+                    let from_c = section
                         .from
                         .stop_point
                         .as_ref()
                         .map(|sp| (sp.coord.lon, sp.coord.lat));
-                    let to_coord = section
+                    let to_c = section
                         .to
                         .stop_point
                         .as_ref()
                         .map(|sp| (sp.coord.lon, sp.coord.lat));
-                    if let Some((from, to)) = from_coord.zip(to_coord) {
-                        let walk =
-                            valhalla::pedestrian_route(&valhalla_base, from, to, walking_speed)
-                                .await;
-                        if let Some(walk) = walk {
-                            let has_indoor = walk
-                                .maneuvers
-                                .iter()
-                                .any(|m| INDOOR_TYPES.contains(&m.maneuver_type));
-                            if has_indoor {
-                                section.shape = Some(walk.shape);
-                                section.distance = Some(walk.distance);
-                                section.maneuvers = Some(walk.maneuvers);
-                            }
-                        }
+                    if let Some((from, to)) = from_c.zip(to_c) {
+                        transfer_requests.push((j_idx, s_idx, from, to));
+                    }
+                }
+            }
+
+            // Run all Valhalla calls in parallel
+            let futs: Vec<_> = transfer_requests
+                .iter()
+                .map(|(_, _, from, to)| {
+                    valhalla::pedestrian_route(&valhalla_base, *from, *to, walking_speed)
+                })
+                .collect();
+            let results = futures::future::join_all(futs).await;
+
+            // Apply results back to corresponding sections
+            for (req, walk) in transfer_requests.iter().zip(results) {
+                let (j_idx, s_idx, _, _) = *req;
+                if let Some(walk) = walk {
+                    let has_indoor = walk
+                        .maneuvers
+                        .iter()
+                        .any(|m| INDOOR_TYPES.contains(&m.maneuver_type));
+                    if has_indoor {
+                        let section = &mut journeys[j_idx].sections[s_idx];
+                        section.shape = Some(walk.shape);
+                        section.distance = Some(walk.distance);
+                        section.maneuvers = Some(walk.maneuvers);
                     }
                 }
             }
@@ -859,11 +883,10 @@ fn tag_journeys(journeys: &mut [Journey]) {
 mod tests {
     use super::*;
     use crate::gtfs;
-    use std::collections::HashMap;
-    use std::sync::Arc;
+    use rustc_hash::FxHashMap;
 
     fn make_test_raptor_data() -> Arc<RaptorData> {
-        let mut stops = HashMap::new();
+        let mut stops = FxHashMap::default();
         for (id, name, lon, lat) in &[
             ("S1", "StopA", 2.347, 48.858),
             ("S2", "StopB", 2.373, 48.844),
@@ -880,7 +903,7 @@ mod tests {
                 },
             );
         }
-        let mut routes = HashMap::new();
+        let mut routes = FxHashMap::default();
         routes.insert(
             "R1".to_string(),
             gtfs::Route {
@@ -893,7 +916,7 @@ mod tests {
                 route_text_color: "000000".to_string(),
             },
         );
-        let mut trips = HashMap::new();
+        let mut trips = FxHashMap::default();
         trips.insert(
             "T1".to_string(),
             gtfs::Trip {
@@ -926,7 +949,7 @@ mod tests {
                 stop_sequence: 2,
             },
         ];
-        let mut calendars = HashMap::new();
+        let mut calendars = FxHashMap::default();
         calendars.insert(
             "SVC1".to_string(),
             gtfs::Calendar {

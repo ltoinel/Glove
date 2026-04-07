@@ -18,7 +18,7 @@ data:
   departments: [75, 77, 78, 91, 92, 93, 94, 95]
 
 routing:
-  max_journeys: 5
+  max_journeys: 4
   max_transfers: 5
   default_transfer_time: 120    # seconds
   max_duration: 10800           # 3 hours in seconds

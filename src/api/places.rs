@@ -122,10 +122,10 @@ pub async fn get_places(
 mod tests {
     use super::*;
     use crate::{ban, config, gtfs, raptor};
-    use std::collections::HashMap;
+    use rustc_hash::FxHashMap;
 
     fn make_test_data() -> (Arc<RaptorData>, Arc<BanData>) {
-        let mut stops = HashMap::new();
+        let mut stops = FxHashMap::default();
         stops.insert(
             "S1".into(),
             gtfs::Stop {
@@ -146,7 +146,7 @@ mod tests {
                 parent_station: String::new(),
             },
         );
-        let mut trips = HashMap::new();
+        let mut trips = FxHashMap::default();
         trips.insert(
             "T1".into(),
             gtfs::Trip {
@@ -172,7 +172,7 @@ mod tests {
                 stop_sequence: 1,
             },
         ];
-        let mut calendars = HashMap::new();
+        let mut calendars = FxHashMap::default();
         calendars.insert(
             "SVC1".into(),
             gtfs::Calendar {
@@ -188,7 +188,7 @@ mod tests {
                 end_date: "20261231".into(),
             },
         );
-        let mut routes = HashMap::new();
+        let mut routes = FxHashMap::default();
         routes.insert(
             "R1".into(),
             gtfs::Route {

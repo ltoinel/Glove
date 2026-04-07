@@ -4,9 +4,9 @@
 //! into in-memory structures. Each file is parsed with flexible CSV handling
 //! to tolerate minor format variations in real-world feeds.
 
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
 use std::path::Path;
 use tracing::{info, warn};
 
@@ -136,11 +136,11 @@ pub struct Pathway {
 /// Container for all raw GTFS data loaded from CSV files.
 pub struct GtfsData {
     pub agencies: Vec<Agency>,
-    pub routes: HashMap<String, Route>,
-    pub stops: HashMap<String, Stop>,
-    pub trips: HashMap<String, Trip>,
+    pub routes: FxHashMap<String, Route>,
+    pub stops: FxHashMap<String, Stop>,
+    pub trips: FxHashMap<String, Trip>,
     pub stop_times: Vec<StopTime>,
-    pub calendars: HashMap<String, Calendar>,
+    pub calendars: FxHashMap<String, Calendar>,
     pub calendar_dates: Vec<CalendarDate>,
     pub transfers: Vec<Transfer>,
     pub pathways: Vec<Pathway>,
