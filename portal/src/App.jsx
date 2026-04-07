@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import {
-  Typography, Paper, TextField, Button, Slider, Checkbox, FormControlLabel,
+  Typography, Paper, TextField, Button, Slider, Checkbox, FormControlLabel, Switch,
   Box, Card, CardContent, CardActionArea, Chip, Collapse, Alert,
   CircularProgress, Divider, Stack, IconButton, Tooltip, Autocomplete, alpha,
 } from '@mui/material'
@@ -1586,15 +1586,18 @@ export default function App() {
 
                         <FormControlLabel
                           control={
-                            <Checkbox
+                            <Switch
                               checked={showManeuvers}
                               onChange={(e) => handleManeuversChange(e.target.checked)}
                               size="small"
-                              sx={{ color: 'text.disabled', '&.Mui-checked': { color: '#00e5ff' }, p: 0.5 }}
+                              sx={{
+                                '& .MuiSwitch-switchBase.Mui-checked': { color: '#00e5ff' },
+                                '& .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track': { backgroundColor: '#00e5ff' },
+                              }}
                             />
                           }
                           label={t('showManeuvers')}
-                          sx={{ mt: 1, '& .MuiFormControlLabel-label': { fontSize: 11, color: 'text.secondary' } }}
+                          sx={{ mt: 1, ml: 0, '& .MuiFormControlLabel-label': { fontSize: 11, color: 'text.secondary' } }}
                         />
                       </Box>
                     </Collapse>
