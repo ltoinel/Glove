@@ -847,7 +847,7 @@ fn tag_journeys(journeys: &mut [Journey]) {
         .map(|j| {
             j.sections
                 .iter()
-                .filter(|s| s.section_type == "transfer")
+                .filter(|s| s.section_type == "transfer" || s.section_type == "street_network")
                 .map(|s| s.duration)
                 .sum()
         })
