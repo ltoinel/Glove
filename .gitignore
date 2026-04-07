@@ -21,5 +21,8 @@ portal/dist
 .DS_Store
 Thumbs.db
 
+# mdBook build output
+/docs/book
+
 # Claude Code
 .claude

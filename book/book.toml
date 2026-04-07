@@ -1,0 +1,16 @@
+[book]
+title = "Glove Documentation"
+description = "A fast multi-modal journey planner built in Rust"
+authors = ["Ludovic Toinel"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "../docs/book"
+
+[output.html]
+default-theme = "navy"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/ltoinel/Glove"
+edit-url-template = "https://github.com/ltoinel/Glove/edit/master/book/{path}"
+site-url = "/Glove/"
