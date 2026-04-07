@@ -24,6 +24,8 @@ pub struct WalkQuery {
     pub to: String,
     /// Walking speed in km/h (Valhalla range: 0.5–25.5, default ≈ 5.1).
     pub walking_speed: Option<f64>,
+    /// Include turn-by-turn maneuvers in the response (default: false).
+    pub maneuvers: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -101,8 +103,9 @@ pub struct WalkJourney {
     pub distance: u32,
     /// Encoded polyline shape of the route.
     pub shape: String,
-    /// Turn-by-turn maneuvers.
-    pub maneuvers: Vec<Maneuver>,
+    /// Turn-by-turn maneuvers (only included when requested).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub maneuvers: Option<Vec<Maneuver>>,
 }
 
 /// A single maneuver in a walking journey.
@@ -244,16 +247,22 @@ pub async fn get_walk(query: web::Query<WalkQuery>, config: web::Data<AppConfig>
         }
     };
 
-    let maneuvers: Vec<Maneuver> = leg
-        .maneuvers
-        .iter()
-        .map(|m| Maneuver {
-            instruction: m.instruction.clone(),
-            maneuver_type: m.maneuver_type,
-            distance: (m.length * 1000.0) as u32,
-            duration: m.time as u32,
-        })
-        .collect();
+    let include_maneuvers = query.maneuvers.unwrap_or(false);
+    let maneuvers = if include_maneuvers {
+        Some(
+            leg.maneuvers
+                .iter()
+                .map(|m| Maneuver {
+                    instruction: m.instruction.clone(),
+                    maneuver_type: m.maneuver_type,
+                    distance: (m.length * 1000.0) as u32,
+                    duration: m.time as u32,
+                })
+                .collect(),
+        )
+    } else {
+        None
+    };
 
     let journey = WalkJourney {
         duration: trip.summary.time as u32,

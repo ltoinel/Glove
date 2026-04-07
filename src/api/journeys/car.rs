@@ -22,6 +22,8 @@ pub struct CarQuery {
     pub from: String,
     /// Destination as `lon;lat`.
     pub to: String,
+    /// Include turn-by-turn maneuvers in the response (default: false).
+    pub maneuvers: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -97,8 +99,9 @@ pub struct CarJourney {
     pub distance: u32,
     /// Encoded polyline shape of the route.
     pub shape: String,
-    /// Turn-by-turn maneuvers.
-    pub maneuvers: Vec<Maneuver>,
+    /// Turn-by-turn maneuvers (only included when requested).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub maneuvers: Option<Vec<Maneuver>>,
 }
 
 /// A single maneuver in a driving journey.
@@ -225,16 +228,22 @@ pub async fn get_car(query: web::Query<CarQuery>, config: web::Data<AppConfig>) 
         }
     };
 
-    let maneuvers: Vec<Maneuver> = leg
-        .maneuvers
-        .iter()
-        .map(|m| Maneuver {
-            instruction: m.instruction.clone(),
-            maneuver_type: m.maneuver_type,
-            distance: (m.length * 1000.0) as u32,
-            duration: m.time as u32,
-        })
-        .collect();
+    let include_maneuvers = query.maneuvers.unwrap_or(false);
+    let maneuvers = if include_maneuvers {
+        Some(
+            leg.maneuvers
+                .iter()
+                .map(|m| Maneuver {
+                    instruction: m.instruction.clone(),
+                    maneuver_type: m.maneuver_type,
+                    distance: (m.length * 1000.0) as u32,
+                    duration: m.time as u32,
+                })
+                .collect(),
+        )
+    } else {
+        None
+    };
 
     let journey = CarJourney {
         duration: trip.summary.time as u32,

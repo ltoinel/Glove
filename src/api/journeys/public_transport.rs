@@ -91,6 +91,9 @@ pub struct JourneysQuery {
     pub bss_stands: Option<bool>,
     pub equipment_details: Option<bool>,
     pub language: Option<String>,
+
+    /// Include turn-by-turn maneuvers in walking/transfer sections (default: false).
+    pub maneuvers: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, ToSchema)]
@@ -339,6 +342,7 @@ pub async fn get_journeys(
     if !journeys.is_empty() && (from_coord.is_some() || to_coord.is_some()) {
         let valhalla_base = format!("http://{}:{}", config.valhalla.host, config.valhalla.port);
         let walking_speed = query.walking_speed;
+        let include_maneuvers = query.maneuvers.unwrap_or(false);
 
         // Cache: stop_idx → WalkLeg (avoid recomputing for the same stop across journeys)
         let mut first_mile_cache: rustc_hash::FxHashMap<usize, Option<valhalla::WalkLeg>> =
@@ -471,7 +475,11 @@ pub async fn get_journeys(
                     stop_date_times: None,
                     shape: Some(walk.shape.clone()),
                     distance: Some(walk.distance),
-                    maneuvers: Some(walk.maneuvers.clone()),
+                    maneuvers: if include_maneuvers {
+                        Some(walk.maneuvers.clone())
+                    } else {
+                        None
+                    },
                 };
                 journey.sections.insert(0, section);
                 journey.duration += walk.duration;
@@ -526,7 +534,11 @@ pub async fn get_journeys(
                     stop_date_times: None,
                     shape: Some(walk.shape.clone()),
                     distance: Some(walk.distance),
-                    maneuvers: Some(walk.maneuvers.clone()),
+                    maneuvers: if include_maneuvers {
+                        Some(walk.maneuvers.clone())
+                    } else {
+                        None
+                    },
                 };
                 journey.sections.push(section);
                 journey.duration += walk.duration;
@@ -535,43 +547,48 @@ pub async fn get_journeys(
             }
         }
 
-        // Enrich transfer sections with Valhalla pedestrian routing,
+        // Enrich transfer sections with Valhalla pedestrian routing (only when maneuvers are requested),
         // but only keep the data if the route contains indoor maneuvers
         // (types 39-43: elevator, stairs, escalator, enter/exit building).
         // Otherwise the route is outdoor and likely incorrect for station transfers.
         const INDOOR_TYPES: [u32; 5] = [39, 40, 41, 42, 43];
-        for journey in &mut journeys {
-            for section in &mut journey.sections {
-                if section.section_type != "transfer" {
-                    continue;
-                }
-                let from_coord = section
-                    .from
-                    .stop_point
-                    .as_ref()
-                    .map(|sp| (sp.coord.lon, sp.coord.lat));
-                let to_coord = section
-                    .to
-                    .stop_point
-                    .as_ref()
-                    .map(|sp| (sp.coord.lon, sp.coord.lat));
-                if let Some((from, to)) = from_coord.zip(to_coord) {
-                    let walk =
-                        valhalla::pedestrian_route(&valhalla_base, from, to, walking_speed).await;
-                    if let Some(walk) = walk {
-                        let has_indoor = walk
-                            .maneuvers
-                            .iter()
-                            .any(|m| INDOOR_TYPES.contains(&m.maneuver_type));
-                        if has_indoor {
-                            section.shape = Some(walk.shape);
-                            section.distance = Some(walk.distance);
-                            section.maneuvers = Some(walk.maneuvers);
+        if !include_maneuvers {
+            // Skip transfer enrichment entirely when maneuvers are not requested
+        } else {
+            for journey in &mut journeys {
+                for section in &mut journey.sections {
+                    if section.section_type != "transfer" {
+                        continue;
+                    }
+                    let from_coord = section
+                        .from
+                        .stop_point
+                        .as_ref()
+                        .map(|sp| (sp.coord.lon, sp.coord.lat));
+                    let to_coord = section
+                        .to
+                        .stop_point
+                        .as_ref()
+                        .map(|sp| (sp.coord.lon, sp.coord.lat));
+                    if let Some((from, to)) = from_coord.zip(to_coord) {
+                        let walk =
+                            valhalla::pedestrian_route(&valhalla_base, from, to, walking_speed)
+                                .await;
+                        if let Some(walk) = walk {
+                            let has_indoor = walk
+                                .maneuvers
+                                .iter()
+                                .any(|m| INDOOR_TYPES.contains(&m.maneuver_type));
+                            if has_indoor {
+                                section.shape = Some(walk.shape);
+                                section.distance = Some(walk.distance);
+                                section.maneuvers = Some(walk.maneuvers);
+                            }
                         }
                     }
                 }
             }
-        }
+        } // end if include_maneuvers
     }
 
     tag_journeys(&mut journeys);

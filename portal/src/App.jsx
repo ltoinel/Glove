@@ -1138,6 +1138,14 @@ export default function App() {
     localStorage.setItem('glove_walking_speed', String(v))
   }
 
+  const [showManeuvers, setShowManeuvers] = useState(() => {
+    return localStorage.getItem('glove_maneuvers') === 'true'
+  })
+  const handleManeuversChange = (checked) => {
+    setShowManeuvers(checked)
+    localStorage.setItem('glove_maneuvers', String(checked))
+  }
+
   const defaultModes = { metro: true, rail: true, bus: true, tramway: true, walk: true, bike: true, car: true }
   const [modes, setModes] = useState(() => {
     const saved = localStorage.getItem('glove_modes')
@@ -1182,6 +1190,7 @@ export default function App() {
       const ptTo = toCoord ? `${toCoord.lon};${toCoord.lat}` : to.id
       const ptParams = new URLSearchParams({ from: ptFrom, to: ptTo, datetime: toApiDatetime(effectiveDatetime) })
       if (walkingSpeed !== 5) ptParams.set('walking_speed', String(walkingSpeed))
+      if (showManeuvers) ptParams.set('maneuvers', 'true')
       const forbidden = ['metro', 'rail', 'bus', 'tramway'].filter(m => !modes[m])
       if (forbidden.length > 0) ptParams.set('forbidden_modes', forbidden.join(','))
       const ptT0 = performance.now()
@@ -1201,6 +1210,7 @@ export default function App() {
         if (modes.walk) {
           const walkParams = new URLSearchParams(coordParams)
           if (walkingSpeed !== 5) walkParams.set('walking_speed', String(walkingSpeed))
+          if (showManeuvers) walkParams.set('maneuvers', 'true')
           const walkT0 = performance.now()
           walkFetch = fetch(`/api/journeys/walk?${walkParams}`)
             .then(r => r.ok ? r.json() : null)
@@ -1209,14 +1219,18 @@ export default function App() {
         }
         if (modes.bike) {
           const bikeT0 = performance.now()
-          bikeFetch = fetch(`/api/journeys/bike?${coordParams}`)
+          const bikeParams = new URLSearchParams(coordParams)
+          if (showManeuvers) bikeParams.set('maneuvers', 'true')
+          bikeFetch = fetch(`/api/journeys/bike?${bikeParams}`)
             .then(r => r.ok ? r.json() : null)
             .then(data => { setBikeTime(Math.round(performance.now() - bikeT0)); return data })
             .catch(() => null)
         }
         if (modes.car) {
           const carT0 = performance.now()
-          carFetch = fetch(`/api/journeys/car?${coordParams}`)
+          const carParams = new URLSearchParams(coordParams)
+          if (showManeuvers) carParams.set('maneuvers', 'true')
+          carFetch = fetch(`/api/journeys/car?${carParams}`)
             .then(r => r.ok ? r.json() : null)
             .then(data => { setCarTime(Math.round(performance.now() - carT0)); return data })
             .catch(() => null)
@@ -1569,6 +1583,19 @@ export default function App() {
                             />
                           ))}
                         </Box>
+
+                        <FormControlLabel
+                          control={
+                            <Checkbox
+                              checked={showManeuvers}
+                              onChange={(e) => handleManeuversChange(e.target.checked)}
+                              size="small"
+                              sx={{ color: 'text.disabled', '&.Mui-checked': { color: '#00e5ff' }, p: 0.5 }}
+                            />
+                          }
+                          label={t('showManeuvers')}
+                          sx={{ mt: 1, '& .MuiFormControlLabel-label': { fontSize: 11, color: 'text.secondary' } }}
+                        />
                       </Box>
                     </Collapse>
                   </Box>

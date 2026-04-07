@@ -23,6 +23,8 @@ pub struct BikeQuery {
     pub from: String,
     /// Destination as `lon;lat`.
     pub to: String,
+    /// Include turn-by-turn maneuvers in the response (default: false).
+    pub maneuvers: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -124,8 +126,9 @@ pub struct BikeJourney {
     pub shape: String,
     /// Elevation values (meters) sampled along the route.
     pub heights: Vec<f64>,
-    /// Turn-by-turn maneuvers.
-    pub maneuvers: Vec<Maneuver>,
+    /// Turn-by-turn maneuvers (only included when requested).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub maneuvers: Option<Vec<Maneuver>>,
 }
 
 /// A single maneuver in a cycling journey.
@@ -348,8 +351,11 @@ pub async fn get_bike(query: web::Query<BikeQuery>, config: web::Data<AppConfig>
             },
         };
 
+        let include_maneuvers = query.maneuvers.unwrap_or(false);
         let resp = client.post(&valhalla_url).json(&req).send().await;
-        match process_valhalla_response(resp, type_name, &client, &valhalla_base).await {
+        match process_valhalla_response(resp, type_name, &client, &valhalla_base, include_maneuvers)
+            .await
+        {
             Ok(j) => journeys.push(j),
             Err(e) => return e,
         }
@@ -364,6 +370,7 @@ async fn process_valhalla_response(
     bike_type: &str,
     client: &reqwest::Client,
     valhalla_base: &str,
+    include_maneuvers: bool,
 ) -> Result<BikeJourney, HttpResponse> {
     let resp = resp.map_err(|e| {
         HttpResponse::BadGateway().json(serde_json::json!({
@@ -396,16 +403,21 @@ async fn process_valhalla_response(
     let heights = fetch_elevation(client, valhalla_base, &coords).await;
     let (elevation_gain, elevation_loss) = compute_elevation(&heights);
 
-    let maneuvers: Vec<Maneuver> = leg
-        .maneuvers
-        .iter()
-        .map(|m| Maneuver {
-            instruction: m.instruction.clone(),
-            maneuver_type: m.maneuver_type,
-            distance: (m.length * 1000.0) as u32,
-            duration: m.time as u32,
-        })
-        .collect();
+    let maneuvers = if include_maneuvers {
+        Some(
+            leg.maneuvers
+                .iter()
+                .map(|m| Maneuver {
+                    instruction: m.instruction.clone(),
+                    maneuver_type: m.maneuver_type,
+                    distance: (m.length * 1000.0) as u32,
+                    duration: m.time as u32,
+                })
+                .collect(),
+        )
+    } else {
+        None
+    };
 
     Ok(BikeJourney {
         bike_type: bike_type.to_string(),
