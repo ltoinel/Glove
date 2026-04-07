@@ -365,15 +365,20 @@ function extractMapData(journey) {
       if (coords.length >= 2) lines.push({ coords, color: '#90a4ae', dashed: true })
       continue
     }
-    // Transfer walking legs (straight line between stops)
+    // Transfer walking legs (Valhalla route if available, else straight line)
     if (section.type === 'transfer') {
-      const fromCoord = section.from?.stop_point?.coord
-      const toCoord = section.to?.stop_point?.coord
-      if (fromCoord && toCoord) {
-        lines.push({
-          coords: [[fromCoord.lat, fromCoord.lon], [toCoord.lat, toCoord.lon]],
-          color: '#90a4ae', dashed: true,
-        })
+      if (section.shape) {
+        const coords = decodePolyline(section.shape)
+        if (coords.length >= 2) lines.push({ coords, color: '#90a4ae', dashed: true })
+      } else {
+        const fromCoord = section.from?.stop_point?.coord
+        const toCoord = section.to?.stop_point?.coord
+        if (fromCoord && toCoord) {
+          lines.push({
+            coords: [[fromCoord.lat, fromCoord.lon], [toCoord.lat, toCoord.lon]],
+            color: '#90a4ae', dashed: true,
+          })
+        }
       }
       continue
     }
