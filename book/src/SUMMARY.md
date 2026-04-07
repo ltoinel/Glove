@@ -27,6 +27,7 @@
 
 - [Performance](./operations/performance.md)
 - [Monitoring](./operations/monitoring.md)
+- [Indoor Routing Coverage](./operations/indoor-coverage.md)
 
 # Contributing
 
