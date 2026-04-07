@@ -9,16 +9,4 @@ document.addEventListener('DOMContentLoaded', function () {
             }
         });
     });
-
-    // Stagger fade-in for content sections
-    var sections = document.querySelectorAll('.content main > h2, .content main > h3, .content main > p, .content main > pre, .content main > table, .content main > ul, .content main > ol, .content main > blockquote, .content main > .admonition');
-    sections.forEach(function (el, i) {
-        el.style.opacity = '0';
-        el.style.transform = 'translateY(8px)';
-        el.style.transition = 'opacity 0.4s ease, transform 0.4s ease';
-        setTimeout(function () {
-            el.style.opacity = '1';
-            el.style.transform = 'translateY(0)';
-        }, 60 + i * 30);
-    });
 });
