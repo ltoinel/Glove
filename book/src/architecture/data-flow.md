@@ -158,3 +158,13 @@ The hot reload mechanism allows updating GTFS data without downtime:
 3. The new index is swapped in atomically via `ArcSwap`
 4. All in-flight requests continue using the old index until they complete
 5. The old index is dropped when the last reference is released
+
+## Transfer Enrichment
+
+When `maneuvers=true` is requested, transfer sections in public transport journeys are enriched with Valhalla walking routes. The enrichment logic depends on the transfer type:
+
+- **Outdoor transfers** (stops with different `parent_station`): Valhalla is always called to obtain the actual walking route shape, which is displayed on the map as a polyline.
+- **Indoor transfers** (stops sharing the same `parent_station`): Valhalla is only called when indoor maneuvers (elevator, stairs, escalator) exist in OSM data for that station.
+- **Polyline rendering**: transfer sections use the Valhalla shape (actual walking route) when available; otherwise a straight line is drawn between the two stops.
+
+Transfer enrichment calls are batched in parallel using `futures::join_all` for performance. When `maneuvers` is not requested (the default), transfer Valhalla enrichment is skipped entirely

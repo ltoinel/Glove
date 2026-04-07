@@ -13,6 +13,7 @@ GET /api/journeys/public_transport
 | `from` | string | Yes | Origin coordinates (`lon;lat`) |
 | `to` | string | Yes | Destination coordinates (`lon;lat`) |
 | `datetime` | string | No | Departure time (ISO 8601, e.g. `20240315T083000`). Defaults to now |
+| `maneuvers` | bool | No | Include turn-by-turn maneuvers in response (default: `false`). When absent, maneuvers are omitted and transfer Valhalla enrichment is skipped |
 
 ### Example
 
@@ -89,11 +90,11 @@ The response follows the Navitia journey format:
 Each journey may have one or more tags:
 - `fastest` — Shortest total duration
 - `least_transfers` — Fewest number of transfers
-- `least_walking` — Least walking time
+- `least_walking` — Least total walking time, including both street_network sections (first/last mile) and transfer durations
 
 ### Maneuvers
 
-Street network sections and transfer sections may include a `maneuvers` array with turn-by-turn directions. Each maneuver contains:
+Maneuvers are **disabled by default**. To include them, pass `?maneuvers=true` on any endpoint. When enabled, street network sections and transfer sections include a `maneuvers` array with turn-by-turn directions. Each maneuver contains:
 
 | Field | Description |
 |-------|-------------|
@@ -118,6 +119,7 @@ Uses Valhalla for pedestrian routing.
 |-----------|------|----------|-------------|
 | `from` | string | Yes | Origin (`lon;lat`) |
 | `to` | string | Yes | Destination (`lon;lat`) |
+| `maneuvers` | bool | No | Include turn-by-turn maneuvers (default: `false`) |
 
 ## Cycling
 
@@ -132,6 +134,7 @@ Uses Valhalla with configurable bike profiles.
 | `from` | string | Yes | Origin (`lon;lat`) |
 | `to` | string | Yes | Destination (`lon;lat`) |
 | `profile` | string | No | Bike profile: `city`, `ebike`, or `road` (default: `city`) |
+| `maneuvers` | bool | No | Include turn-by-turn maneuvers (default: `false`) |
 
 ```admonish info title="Elevation Colors"
 The response includes elevation data and maneuver-by-maneuver directions. The frontend uses elevation data to color the route polyline (green = descent, red = climb).
@@ -149,3 +152,4 @@ Uses Valhalla for driving directions.
 |-----------|------|----------|-------------|
 | `from` | string | Yes | Origin (`lon;lat`) |
 | `to` | string | Yes | Destination (`lon;lat`) |
+| `maneuvers` | bool | No | Include turn-by-turn maneuvers (default: `false`) |

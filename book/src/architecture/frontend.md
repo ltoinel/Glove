@@ -41,6 +41,12 @@ The frontend displays real commercial names for transit lines rather than generi
 
 This provides a familiar experience for users of the Ile-de-France transit network.
 
+### Settings Panel
+The settings panel is organized into three titled sections, each with an icon:
+- **Walking Speed** (DirectionsWalk icon) — adjusts walking speed for transit journey calculations
+- **Transport Modes** (Commute icon) — select which transit modes to include
+- **Advanced Options** (Tune icon) — includes a "Show detailed instructions" switch ("Afficher les instructions detaillees") that enables turn-by-turn maneuvers in journey responses. This switch is disabled by default; when toggled on, the `maneuvers=true` parameter is sent to all journey endpoints.
+
 ### Search & Autocomplete
 The search form provides:
 - Origin and destination fields with fuzzy autocomplete

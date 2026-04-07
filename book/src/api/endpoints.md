@@ -26,7 +26,7 @@ The journey planning endpoints use query parameters compatible with the [Navitia
 
 This allows Glove to serve as a drop-in replacement for Navitia in existing applications.
 
-All journey responses (walk, bike, car, and public transport) include a `maneuver_type` field (Valhalla type number) in maneuver objects, enabling clients to display turn-by-turn navigation with indoor maneuver support.
+All journey endpoints accept an optional `maneuvers=true` query parameter. When enabled, responses include a `maneuver_type` field (Valhalla type number) in maneuver objects, enabling clients to display turn-by-turn navigation with indoor maneuver support. Maneuvers are disabled by default to reduce response size and skip transfer Valhalla enrichment.
 
 ## Authentication
 

@@ -36,10 +36,19 @@ The `find_earliest_trip` function uses binary search (O(log n)) to find the firs
 Label arrays and working buffers are allocated once and reused across RAPTOR rounds, eliminating per-round allocation overhead.
 
 ### FxHashMap
-Uses `rustc-hash`'s FxHashMap for the stop index and calendar exceptions. FxHash is significantly faster than the default SipHash for integer and string keys.
+Uses `rustc-hash`'s FxHashMap throughout both `GtfsData` and `RaptorData`, replacing all standard library `HashMap` instances. FxHash is significantly faster than the default SipHash for integer and string keys.
 
 ### Lock-Free Hot-Reload
 ArcSwap provides atomic pointer swaps with zero contention. Readers never block, even during a reload. There is no mutex, no RwLock, and no read-side overhead.
+
+### Early Termination in Diversity Loop
+The RAPTOR diversity loop (which re-runs the algorithm with pattern exclusion to find alternative journeys) now terminates early when a round produces no new journeys, avoiding unnecessary iterations.
+
+### Arc&lt;WalkLeg&gt; Cache
+Walking leg results from Valhalla are wrapped in `Arc<WalkLeg>` and cached, avoiding deep cloning of polyline coordinates when the same walk leg is referenced by multiple journeys.
+
+### Batch Valhalla Calls
+Transfer enrichment requests to Valhalla are dispatched in parallel using `futures::join_all`, rather than sequentially, significantly reducing latency for journeys with multiple transfers.
 
 ### Pareto-Optimal Exploitation
 All Pareto-optimal journeys from a single RAPTOR run are collected before the algorithm is re-run with pattern exclusion. This avoids redundant computation.

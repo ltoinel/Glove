@@ -68,7 +68,7 @@ Trips with identical stop sequences are grouped into **patterns**. This dramatic
 ```
 
 ```admonish example title="Indoor Routing"
-Valhalla supports indoor maneuvers such as elevators, stairs, escalators, and building enter/exit transitions. When OSM data includes indoor information, transfer sections in public transport journeys include detailed maneuvers to guide users through stations and buildings. Transfer sections only show maneuvers when indoor data is available from OSM.
+Valhalla supports indoor maneuvers such as elevators, stairs, escalators, and building enter/exit transitions. Transfers are classified by parent_station: outdoor transfers (different parent_station) always get a Valhalla walking route for the map polyline, while indoor transfers (same parent_station) are only enriched when indoor maneuvers exist in OSM. Transfer polylines use the Valhalla shape (actual walking route) when available, falling back to a straight line otherwise. This enrichment only runs when `maneuvers=true` is requested.
 ```
 
 ```admonish example title="Navitia API Compatibility"
