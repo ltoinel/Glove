@@ -513,7 +513,7 @@ function JourneyCard({ journey, selected, onSelect, animDelay }) {
 
             <Box sx={{ textAlign: 'right', flexShrink: 0, pl: 1 }}>
               <Typography variant="body2" fontWeight={800} lineHeight={1.2} color="text.primary"
-                sx={{ fontFamily: '"Syne", sans-serif', fontSize: 14 }}>
+                sx={{ fontFamily: '"Syne", sans-serif', fontSize: 15 }}>
                 {formatDuration(journey.duration)}
               </Typography>
               {journey.nb_transfers > 0 && (
@@ -712,7 +712,7 @@ function WalkCard({ journey, selected, onSelect }) {
               </Typography>
             </Box>
             <Box sx={{ textAlign: 'right', flexShrink: 0 }}>
-              <Typography variant="body1" fontWeight={800} lineHeight={1.2} sx={{ fontFamily: '"Syne", sans-serif', color: '#ffb800' }}>
+              <Typography variant="body2" fontWeight={800} lineHeight={1.2} sx={{ fontFamily: '"Syne", sans-serif', fontSize: 15, color: '#ffb800' }}>
                 {formatDuration(journey.duration)}
               </Typography>
             </Box>
@@ -769,7 +769,7 @@ function BikeCard({ journey, selected, onSelect }) {
               </Typography>
             </Box>
             <Box sx={{ textAlign: 'right', flexShrink: 0 }}>
-              <Typography variant="body1" fontWeight={800} lineHeight={1.2} sx={{ fontFamily: '"Syne", sans-serif', color }}>
+              <Typography variant="body2" fontWeight={800} lineHeight={1.2} sx={{ fontFamily: '"Syne", sans-serif', fontSize: 15, color }}>
                 {formatDuration(journey.duration)}
               </Typography>
             </Box>
@@ -817,7 +817,7 @@ function CarCard({ journey }) {
             </Typography>
           </Box>
           <Box sx={{ textAlign: 'right', flexShrink: 0 }}>
-            <Typography variant="body1" fontWeight={800} lineHeight={1.2} sx={{ fontFamily: '"Syne", sans-serif', color }}>
+            <Typography variant="body2" fontWeight={800} lineHeight={1.2} sx={{ fontFamily: '"Syne", sans-serif', fontSize: 15, color }}>
               {formatDuration(journey.duration)}
             </Typography>
           </Box>
