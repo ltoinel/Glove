@@ -535,7 +535,11 @@ pub async fn get_journeys(
             }
         }
 
-        // Enrich transfer sections with Valhalla pedestrian routing
+        // Enrich transfer sections with Valhalla pedestrian routing,
+        // but only keep the data if the route contains indoor maneuvers
+        // (types 39-43: elevator, stairs, escalator, enter/exit building).
+        // Otherwise the route is outdoor and likely incorrect for station transfers.
+        const INDOOR_TYPES: [u32; 5] = [39, 40, 41, 42, 43];
         for journey in &mut journeys {
             for section in &mut journey.sections {
                 if section.section_type != "transfer" {
@@ -555,9 +559,15 @@ pub async fn get_journeys(
                     let walk =
                         valhalla::pedestrian_route(&valhalla_base, from, to, walking_speed).await;
                     if let Some(walk) = walk {
-                        section.shape = Some(walk.shape);
-                        section.distance = Some(walk.distance);
-                        section.maneuvers = Some(walk.maneuvers);
+                        let has_indoor = walk
+                            .maneuvers
+                            .iter()
+                            .any(|m| INDOOR_TYPES.contains(&m.maneuver_type));
+                        if has_indoor {
+                            section.shape = Some(walk.shape);
+                            section.distance = Some(walk.distance);
+                            section.maneuvers = Some(walk.maneuvers);
+                        }
                     }
                 }
             }
