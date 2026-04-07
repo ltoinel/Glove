@@ -868,7 +868,6 @@ pub fn raptor_query(
         if !marked.iter().any(|&m| m) {
             break;
         }
-
     }
 
     let source_set: FxHashSet<usize> = sources.iter().map(|&(idx, _)| idx).collect();

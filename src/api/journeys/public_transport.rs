@@ -318,9 +318,9 @@ pub async fn get_journeys(
                 continue;
             }
 
-            let dominated = journeys.iter().any(|existing| {
-                journey_sections_equal(existing, &journey)
-            });
+            let dominated = journeys
+                .iter()
+                .any(|existing| journey_sections_equal(existing, &journey));
 
             if !dominated {
                 journeys.push(journey);
@@ -504,8 +504,7 @@ pub async fn get_journeys(
                     .sections
                     .last()
                     .and_then(|s| {
-                        raptor::parse_datetime(&s.arrival_date_time)
-                            .map(|(_, t)| t + walk.duration)
+                        raptor::parse_datetime(&s.arrival_date_time).map(|(_, t)| t + walk.duration)
                     })
                     .unwrap_or(0);
                 let walk_arr = raptor::format_datetime(&date, walk_arr_secs);
