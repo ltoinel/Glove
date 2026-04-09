@@ -15,13 +15,29 @@ Glove loads GTFS data into memory, builds a RAPTOR index, and exposes a Navitia-
 
 ## Features
 
+### Routing
 - **RAPTOR algorithm** — Round-based public transit routing with diverse alternatives
 - **Multi-modal** — Public transit, walking, cycling (3 bike profiles), driving
+- **Indoor-aware transfers** — Valhalla pedestrian routing with zero step/elevator penalties for intra-station walks, favoring underground passages
+- **Station-aware resolution** — Stop IDs resolve to all platforms via parent_station, enabling correct routing through large station complexes (metro, RER, TGV)
+- **After-midnight routing** — Queries before 4am automatically use previous day GTFS services for night buses and late trains
+
+### Data & Search
 - **Fuzzy autocomplete** — Stop and address search with French diacritics normalization
+- **GTFS validation** — 19 automated data quality checks (referential integrity, calendars, coordinates, transfers, pathways, display)
 - **Hot reload** — Update GTFS data via API without downtime (lock-free with ArcSwap)
-- **Interactive map** — Leaflet with route polylines, elevation-colored bike routes, dark theme
+- **Tile caching proxy** — Map tiles fetched from configurable upstream server, cached locally on disk
+
+### Frontend
+- **Interactive map** — Leaflet with route polylines, elevation-colored bike routes, indoor/outdoor transfer distinction, dark theme
+- **Vertical nav rail** — Quick access to search, GTFS validation, dataset info, API docs, metrics
+- **Multilingual** — French and English (i18n)
+
+### API & Operations
 - **Navitia-compatible API** — Drop-in replacement with OpenAPI documentation
-- **Prometheus metrics** — Built-in monitoring endpoint
+- **Prometheus metrics** — Built-in monitoring endpoint (CPU, memory, HTTP counters)
+- **Rate limiting** — Configurable per-IP rate limiting (tile proxy excluded)
+- **Clean Code** — Rust backend with 179 tests, React frontend with 21 vitest tests
 
 ## Quick Start
 
