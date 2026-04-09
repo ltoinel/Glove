@@ -191,35 +191,20 @@ pub async fn get_journeys(
         }
     };
 
-    // Parse origin/destination — may be stop IDs or "lon;lat" coordinates
     let from_coord = parse_coord(from_str);
     let to_coord = parse_coord(to_str);
 
     let max_dist = config.routing.max_nearest_stop_distance;
     let walking_speed = query.walking_speed.unwrap_or(5.0);
 
-    // Resolve sources: coordinates → all nearby stops; stop ID → single stop
-    let sources: Vec<(usize, u32)> = if let Some((lon, lat)) = from_coord {
-        raptor_data.find_nearby_stops(lon, lat, max_dist, walking_speed)
-    } else if let Some(idx) = raptor_data.resolve_stop(from_str, max_dist) {
-        vec![(idx, 0)]
-    } else {
-        vec![]
-    };
+    let sources = resolve_stops(&raptor_data, from_str, from_coord, max_dist, walking_speed);
     if sources.is_empty() {
         return HttpResponse::BadRequest().json(serde_json::json!({
             "error": { "id": "unknown_object", "message": format!("No stop found within {} m of {from_str}", max_dist) }
         }));
     }
 
-    // Resolve targets: coordinates → all nearby stops; stop ID → single stop
-    let targets: Vec<(usize, u32)> = if let Some((lon, lat)) = to_coord {
-        raptor_data.find_nearby_stops(lon, lat, max_dist, walking_speed)
-    } else if let Some(idx) = raptor_data.resolve_stop(to_str, max_dist) {
-        vec![(idx, 0)]
-    } else {
-        vec![]
-    };
+    let targets = resolve_stops(&raptor_data, to_str, to_coord, max_dist, walking_speed);
     if targets.is_empty() {
         return HttpResponse::BadRequest().json(serde_json::json!({
             "error": { "id": "unknown_object", "message": format!("No stop found within {} m of {to_str}", max_dist) }
@@ -259,38 +244,34 @@ pub async fn get_journeys(
         .map(|n| (n.max(1) as usize).min(config.routing.max_journeys))
         .unwrap_or(config.routing.max_journeys);
 
-    // Pre-compute active services once for all diversity iterations
-    let active = raptor_data.active_services(&date);
+    // Pre-compute active services. For early morning queries (before 4h),
+    // also include yesterday's services with +86400s offset, because GTFS
+    // encodes after-midnight trips on the previous day (e.g. 25:30:00).
+    const EARLY_MORNING_THRESHOLD: u32 = 4 * 3600; // 04:00
 
-    // Pre-compute patterns to exclude based on forbidden transport modes
-    let forbidden_modes_str = query.forbidden_modes.as_deref().unwrap_or("");
-    let mode_excluded: rustc_hash::FxHashSet<usize> = if !forbidden_modes_str.is_empty() {
-        let forbidden_types: rustc_hash::FxHashSet<u16> = forbidden_modes_str
-            .split(',')
-            .filter_map(|m| match m.trim() {
-                "tramway" => Some(0),
-                "metro" => Some(1),
-                "rail" => Some(2),
-                "bus" => Some(3),
-                "funicular" => Some(7),
-                _ => None,
-            })
-            .collect();
-        raptor_data
-            .patterns
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| {
-                raptor_data
-                    .routes
-                    .get(&p.route_id)
-                    .is_some_and(|r| forbidden_types.contains(&r.route_type))
-            })
-            .map(|(i, _)| i)
-            .collect()
+    let (effective_date, effective_departure) = if departure_time < EARLY_MORNING_THRESHOLD {
+        // Use yesterday's date with time shifted by +24h so RAPTOR matches
+        // after-midnight trips (coded as >86400 on the previous day)
+        let yesterday = {
+            let y: i32 = date.get(0..4).and_then(|s| s.parse().ok()).unwrap_or(2026);
+            let m: u32 = date.get(4..6).and_then(|s| s.parse().ok()).unwrap_or(1);
+            let d: u32 = date.get(6..8).and_then(|s| s.parse().ok()).unwrap_or(1);
+            chrono::NaiveDate::from_ymd_opt(y, m, d)
+                .and_then(|dt| dt.pred_opt())
+                .map(|dt| dt.format("%Y%m%d").to_string())
+                .unwrap_or_else(|| date.clone())
+        };
+        (yesterday, departure_time + 86400)
     } else {
-        rustc_hash::FxHashSet::default()
+        (date.clone(), departure_time)
     };
+
+    let active = raptor_data.active_services(&effective_date);
+
+    let mode_excluded = compute_mode_exclusions(
+        &raptor_data,
+        query.forbidden_modes.as_deref().unwrap_or(""),
+    );
 
     // Iterative search with pattern exclusion for route diversity
     let mut journeys: Vec<Journey> = Vec::new();
@@ -304,7 +285,7 @@ pub async fn get_journeys(
         let result = raptor::raptor_query(
             &raptor_data,
             &sources,
-            departure_time,
+            effective_departure,
             &active,
             max_transfers,
             &excluded_patterns,
@@ -318,7 +299,7 @@ pub async fn get_journeys(
         // Exploit all Pareto-optimal journeys from this RAPTOR run
         let prev_count = journeys.len();
         for sections in &section_sets {
-            let journey = build_journey(&raptor_data, sections, &date);
+            let journey = build_journey(&raptor_data, sections, &effective_date);
 
             if journey.duration > max_duration {
                 continue;
@@ -343,312 +324,359 @@ pub async fn get_journeys(
 
     journeys.sort_by_key(|j| j.duration);
 
-    // Compute first/last mile walking legs per journey.
-    // Each journey may start/end at a different stop, so we compute the walking
-    // leg to/from the actual first/last PT stop (not the nearest-stop proxy).
-    // Results are cached by stop index to avoid redundant Valhalla calls.
-    if !journeys.is_empty() && (from_coord.is_some() || to_coord.is_some()) {
+    // Enrich journeys with Valhalla walking legs
+    if !journeys.is_empty() {
         let valhalla_base = format!("http://{}:{}", config.valhalla.host, config.valhalla.port);
         let walking_speed = query.walking_speed;
         let include_maneuvers = query.maneuvers.unwrap_or(false);
 
-        // Cache: stop_idx → WalkLeg (avoid recomputing for the same stop across journeys)
-        let mut first_mile_cache: rustc_hash::FxHashMap<usize, Option<Arc<valhalla::WalkLeg>>> =
-            rustc_hash::FxHashMap::default();
-        let mut last_mile_cache: rustc_hash::FxHashMap<usize, Option<Arc<valhalla::WalkLeg>>> =
-            rustc_hash::FxHashMap::default();
-
-        for journey in &mut journeys {
-            // Identify the actual first and last PT stops of this journey
-            let first_pt_section = journey
-                .sections
-                .iter()
-                .find(|s| s.section_type == "public_transport");
-            let last_pt_section = journey
-                .sections
-                .iter()
-                .rev()
-                .find(|s| s.section_type == "public_transport");
-
-            let first_stop_idx = first_pt_section
-                .and_then(|s| s.from.stop_point.as_ref())
-                .and_then(|sp| raptor_data.stop_index.get(&sp.id))
-                .copied();
-            let last_stop_idx = last_pt_section
-                .and_then(|s| s.to.stop_point.as_ref())
-                .and_then(|sp| raptor_data.stop_index.get(&sp.id))
-                .copied();
-
-            // Compute first-mile and last-mile in parallel
-            let first_mile_fut = async {
-                if let (Some(from_c), Some(stop_idx)) = (from_coord, first_stop_idx) {
-                    let stop = &raptor_data.stops[stop_idx];
-                    if (from_c.0 - stop.stop_lon).abs() < 1e-6
-                        && (from_c.1 - stop.stop_lat).abs() < 1e-6
-                    {
-                        return (stop_idx, None);
-                    }
-                    if let Some(cached) = first_mile_cache.get(&stop_idx) {
-                        return (stop_idx, cached.clone());
-                    }
-                    let result = valhalla::pedestrian_route(
-                        &valhalla_base,
-                        from_c,
-                        (stop.stop_lon, stop.stop_lat),
-                        walking_speed,
-                    )
-                    .await
-                    .map(Arc::new);
-                    (stop_idx, result)
-                } else {
-                    (0, None)
-                }
-            };
-
-            let last_mile_fut = async {
-                if let (Some(to_c), Some(stop_idx)) = (to_coord, last_stop_idx) {
-                    let stop = &raptor_data.stops[stop_idx];
-                    if (to_c.0 - stop.stop_lon).abs() < 1e-6
-                        && (to_c.1 - stop.stop_lat).abs() < 1e-6
-                    {
-                        return (stop_idx, None);
-                    }
-                    if let Some(cached) = last_mile_cache.get(&stop_idx) {
-                        return (stop_idx, cached.clone());
-                    }
-                    let result = valhalla::pedestrian_route(
-                        &valhalla_base,
-                        (stop.stop_lon, stop.stop_lat),
-                        to_c,
-                        walking_speed,
-                    )
-                    .await
-                    .map(Arc::new);
-                    (stop_idx, result)
-                } else {
-                    (0, None)
-                }
-            };
-
-            let ((fm_idx, first_mile), (lm_idx, last_mile)) =
-                futures::future::join(first_mile_fut, last_mile_fut).await;
-
-            // Cache results
-            if from_coord.is_some() && first_stop_idx.is_some() {
-                first_mile_cache.insert(fm_idx, first_mile.clone());
-            }
-            if to_coord.is_some() && last_stop_idx.is_some() {
-                last_mile_cache.insert(lm_idx, last_mile.clone());
-            }
-
-            // Prepend first-mile walking section
-            if let (Some(walk), Some(stop_idx)) = (&first_mile, first_stop_idx) {
-                // Remove leading transfer sections that are now redundant
-                // (the user walks directly from origin to the first PT stop)
-                while journey
-                    .sections
-                    .first()
-                    .is_some_and(|s| s.section_type == "transfer")
-                {
-                    let removed = journey.sections.remove(0);
-                    journey.duration = journey.duration.saturating_sub(removed.duration);
-                }
-
-                let first_dep = journey
-                    .sections
-                    .first()
-                    .map(|s| s.departure_date_time.clone())
-                    .unwrap_or_default();
-                let walk_dep_secs = journey
-                    .sections
-                    .first()
-                    .and_then(|s| {
-                        raptor::parse_datetime(&s.departure_date_time)
-                            .map(|(_, t)| t.saturating_sub(walk.duration))
-                    })
-                    .unwrap_or(0);
-                let walk_dep = raptor::format_datetime(&date, walk_dep_secs);
-                let (flon, flat) = from_coord.unwrap();
-                let stop = &raptor_data.stops[stop_idx];
-                let section = Section {
-                    section_type: "street_network".to_string(),
-                    from: Place {
-                        id: format!("{flon};{flat}"),
-                        name: "".to_string(),
-                        stop_point: None,
-                    },
-                    to: make_place(stop),
-                    departure_date_time: walk_dep,
-                    arrival_date_time: first_dep,
-                    duration: walk.duration,
-                    display_informations: None,
-                    stop_date_times: None,
-                    shape: Some(walk.shape.clone()),
-                    distance: Some(walk.distance),
-                    maneuvers: if include_maneuvers {
-                        Some(walk.maneuvers.clone())
-                    } else {
-                        None
-                    },
-                };
-                journey.sections.insert(0, section);
-                journey.duration += walk.duration;
-                journey.departure_date_time = journey
-                    .sections
-                    .first()
-                    .unwrap()
-                    .departure_date_time
-                    .clone();
-            }
-
-            // Append last-mile walking section
-            if let (Some(walk), Some(stop_idx)) = (&last_mile, last_stop_idx) {
-                // Remove trailing transfer sections that are now redundant
-                // (the user walks directly from the last PT stop to destination)
-                while journey
-                    .sections
-                    .last()
-                    .is_some_and(|s| s.section_type == "transfer")
-                {
-                    let removed = journey.sections.pop().unwrap();
-                    journey.duration = journey.duration.saturating_sub(removed.duration);
-                }
-
-                let last_arr = journey
-                    .sections
-                    .last()
-                    .map(|s| s.arrival_date_time.clone())
-                    .unwrap_or_default();
-                let walk_arr_secs = journey
-                    .sections
-                    .last()
-                    .and_then(|s| {
-                        raptor::parse_datetime(&s.arrival_date_time).map(|(_, t)| t + walk.duration)
-                    })
-                    .unwrap_or(0);
-                let walk_arr = raptor::format_datetime(&date, walk_arr_secs);
-                let (tlon, tlat) = to_coord.unwrap();
-                let stop = &raptor_data.stops[stop_idx];
-                let section = Section {
-                    section_type: "street_network".to_string(),
-                    from: make_place(stop),
-                    to: Place {
-                        id: format!("{tlon};{tlat}"),
-                        name: "".to_string(),
-                        stop_point: None,
-                    },
-                    departure_date_time: last_arr,
-                    arrival_date_time: walk_arr,
-                    duration: walk.duration,
-                    display_informations: None,
-                    stop_date_times: None,
-                    shape: Some(walk.shape.clone()),
-                    distance: Some(walk.distance),
-                    maneuvers: if include_maneuvers {
-                        Some(walk.maneuvers.clone())
-                    } else {
-                        None
-                    },
-                };
-                journey.sections.push(section);
-                journey.duration += walk.duration;
-                journey.arrival_date_time =
-                    journey.sections.last().unwrap().arrival_date_time.clone();
-            }
+        // First/last mile: only when origin or destination are coordinates
+        // (addresses). Stop IDs don't need first/last mile because RAPTOR
+        // routes directly to/from the stop, and intra-station walking is
+        // handled by the transfer graph.
+        if from_coord.is_some() || to_coord.is_some() {
+            enrich_first_last_mile(
+                &mut journeys,
+                &raptor_data,
+                &valhalla_base,
+                from_coord,
+                to_coord,
+                walking_speed,
+                include_maneuvers,
+                &effective_date,
+            )
+            .await;
         }
 
-        // Enrich transfer sections with Valhalla pedestrian routing.
-        //
-        // Two cases:
-        // - Outdoor transfers (different parent_station): always call Valhalla
-        //   for the shape (walking route on map) + distance. Include maneuvers
-        //   only when requested.
-        // - Indoor transfers (same parent_station): only keep data if Valhalla
-        //   returns indoor maneuver types (39-43), since outdoor routes would
-        //   be incorrect for in-station walks.
-        const INDOOR_TYPES: [u32; 5] = [39, 40, 41, 42, 43];
-        {
-            // Collect all transfer section coordinates + outdoor flag
-            type TransferReq = (usize, usize, (f64, f64), (f64, f64), bool);
-            let mut transfer_requests: Vec<TransferReq> = Vec::new();
-            for (j_idx, journey) in journeys.iter().enumerate() {
-                for (s_idx, section) in journey.sections.iter().enumerate() {
-                    if section.section_type != "transfer" {
-                        continue;
-                    }
-                    let from_sp = section.from.stop_point.as_ref();
-                    let to_sp = section.to.stop_point.as_ref();
-                    let from_c = from_sp.map(|sp| (sp.coord.lon, sp.coord.lat));
-                    let to_c = to_sp.map(|sp| (sp.coord.lon, sp.coord.lat));
-                    if let Some((from, to)) = from_c.zip(to_c) {
-                        // Check if outdoor: resolve parent_station from stops
-                        let from_id = &section.from.id;
-                        let to_id = &section.to.id;
-                        let from_parent = raptor_data
-                            .stop_index
-                            .get(from_id.as_str())
-                            .map(|&idx| &raptor_data.stops[idx].parent_station);
-                        let to_parent = raptor_data
-                            .stop_index
-                            .get(to_id.as_str())
-                            .map(|&idx| &raptor_data.stops[idx].parent_station);
-                        let is_outdoor = match (from_parent, to_parent) {
-                            (Some(fp), Some(tp)) => fp.is_empty() || tp.is_empty() || fp != tp,
-                            _ => true,
-                        };
-                        transfer_requests.push((j_idx, s_idx, from, to, is_outdoor));
-                    }
-                }
-            }
-
-            // Only call Valhalla for outdoor transfers, or all when maneuvers requested
-            let requests_to_call: Vec<_> = transfer_requests
-                .iter()
-                .filter(|(_, _, _, _, is_outdoor)| *is_outdoor || include_maneuvers)
-                .collect();
-
-            let futs: Vec<_> = requests_to_call
-                .iter()
-                .map(|(_, _, from, to, _)| {
-                    valhalla::pedestrian_route(&valhalla_base, *from, *to, walking_speed)
-                })
-                .collect();
-            let results = futures::future::join_all(futs).await;
-
-            for (req, walk) in requests_to_call.iter().zip(results) {
-                let (j_idx, s_idx, _, _, is_outdoor) = **req;
-                if let Some(walk) = walk {
-                    if is_outdoor {
-                        // Outdoor transfer: always show shape + distance
-                        let section = &mut journeys[j_idx].sections[s_idx];
-                        section.shape = Some(walk.shape);
-                        section.distance = Some(walk.distance);
-                        if include_maneuvers {
-                            section.maneuvers = Some(walk.maneuvers);
-                        }
-                    } else {
-                        // Indoor transfer: only keep if indoor maneuvers found
-                        let has_indoor = walk
-                            .maneuvers
-                            .iter()
-                            .any(|m| INDOOR_TYPES.contains(&m.maneuver_type));
-                        if has_indoor {
-                            let section = &mut journeys[j_idx].sections[s_idx];
-                            section.shape = Some(walk.shape);
-                            section.distance = Some(walk.distance);
-                            if include_maneuvers {
-                                section.maneuvers = Some(walk.maneuvers);
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // Transfer enrichment: always, regardless of coordinate vs stop_id input
+        enrich_transfers(
+            &mut journeys,
+            &raptor_data,
+            &valhalla_base,
+            walking_speed,
+            include_maneuvers,
+        )
+        .await;
     }
 
     tag_journeys(&mut journeys);
 
     HttpResponse::Ok().json(JourneysResponse { journeys })
+}
+
+/// Compute and prepend/append first-mile and last-mile walking sections.
+///
+/// For each journey, identifies the first and last public transport stops,
+/// then calls Valhalla to compute a pedestrian route from the origin
+/// coordinate to the first PT stop (first-mile) and from the last PT stop
+/// to the destination coordinate (last-mile). Results are cached by stop
+/// index to avoid redundant Valhalla calls across journeys.
+///
+/// Leading/trailing transfer sections are removed when a walking leg
+/// replaces them (the user walks directly from origin to the PT stop).
+#[allow(clippy::too_many_arguments)]
+async fn enrich_first_last_mile(
+    journeys: &mut [Journey],
+    raptor_data: &RaptorData,
+    valhalla_base: &str,
+    from_coord: Option<(f64, f64)>,
+    to_coord: Option<(f64, f64)>,
+    walking_speed: Option<f64>,
+    include_maneuvers: bool,
+    date: &str,
+) {
+    let mut first_mile_cache: rustc_hash::FxHashMap<usize, Option<Arc<valhalla::WalkLeg>>> =
+        rustc_hash::FxHashMap::default();
+    let mut last_mile_cache: rustc_hash::FxHashMap<usize, Option<Arc<valhalla::WalkLeg>>> =
+        rustc_hash::FxHashMap::default();
+
+    for journey in journeys.iter_mut() {
+        let first_stop_idx = journey
+            .sections
+            .iter()
+            .find(|s| s.section_type == "public_transport")
+            .and_then(|s| s.from.stop_point.as_ref())
+            .and_then(|sp| raptor_data.stop_index.get(&sp.id))
+            .copied();
+        let last_stop_idx = journey
+            .sections
+            .iter()
+            .rev()
+            .find(|s| s.section_type == "public_transport")
+            .and_then(|s| s.to.stop_point.as_ref())
+            .and_then(|sp| raptor_data.stop_index.get(&sp.id))
+            .copied();
+
+        // Compute first-mile and last-mile in parallel
+        let first_mile_fut = async {
+            if let (Some(from_c), Some(stop_idx)) = (from_coord, first_stop_idx) {
+                let stop = &raptor_data.stops[stop_idx];
+                if (from_c.0 - stop.stop_lon).abs() < 1e-6
+                    && (from_c.1 - stop.stop_lat).abs() < 1e-6
+                {
+                    return (stop_idx, None);
+                }
+                if let Some(cached) = first_mile_cache.get(&stop_idx) {
+                    return (stop_idx, cached.clone());
+                }
+                let result = valhalla::pedestrian_route(
+                    valhalla_base,
+                    from_c,
+                    (stop.stop_lon, stop.stop_lat),
+                    walking_speed,
+                    false, // first mile: penalize stairs
+                )
+                .await
+                .map(Arc::new);
+                (stop_idx, result)
+            } else {
+                (0, None)
+            }
+        };
+
+        let last_mile_fut = async {
+            if let (Some(to_c), Some(stop_idx)) = (to_coord, last_stop_idx) {
+                let stop = &raptor_data.stops[stop_idx];
+                if (to_c.0 - stop.stop_lon).abs() < 1e-6
+                    && (to_c.1 - stop.stop_lat).abs() < 1e-6
+                {
+                    return (stop_idx, None);
+                }
+                if let Some(cached) = last_mile_cache.get(&stop_idx) {
+                    return (stop_idx, cached.clone());
+                }
+                let result = valhalla::pedestrian_route(
+                    valhalla_base,
+                    (stop.stop_lon, stop.stop_lat),
+                    to_c,
+                    walking_speed,
+                    false, // last mile: penalize stairs
+                )
+                .await
+                .map(Arc::new);
+                (stop_idx, result)
+            } else {
+                (0, None)
+            }
+        };
+
+        let ((fm_idx, first_mile), (lm_idx, last_mile)) =
+            futures::future::join(first_mile_fut, last_mile_fut).await;
+
+        if from_coord.is_some() && first_stop_idx.is_some() {
+            first_mile_cache.insert(fm_idx, first_mile.clone());
+        }
+        if to_coord.is_some() && last_stop_idx.is_some() {
+            last_mile_cache.insert(lm_idx, last_mile.clone());
+        }
+
+        // Prepend first-mile walking section
+        if let (Some(walk), Some(stop_idx)) = (&first_mile, first_stop_idx) {
+            while journey
+                .sections
+                .first()
+                .is_some_and(|s| s.section_type == "transfer")
+            {
+                let removed = journey.sections.remove(0);
+                journey.duration = journey.duration.saturating_sub(removed.duration);
+            }
+
+            let first_dep = journey
+                .sections
+                .first()
+                .map(|s| s.departure_date_time.clone())
+                .unwrap_or_default();
+            let walk_dep_secs = journey
+                .sections
+                .first()
+                .and_then(|s| {
+                    raptor::parse_datetime(&s.departure_date_time)
+                        .map(|(_, t)| t.saturating_sub(walk.duration))
+                })
+                .unwrap_or(0);
+            let walk_dep = raptor::format_datetime(date, walk_dep_secs);
+            let (flon, flat) = from_coord.unwrap();
+            let stop = &raptor_data.stops[stop_idx];
+            let section = Section {
+                section_type: "street_network".to_string(),
+                from: Place {
+                    id: format!("{flon};{flat}"),
+                    name: "".to_string(),
+                    stop_point: None,
+                },
+                to: make_place(stop),
+                departure_date_time: walk_dep,
+                arrival_date_time: first_dep,
+                duration: walk.duration,
+                display_informations: None,
+                stop_date_times: None,
+                shape: Some(walk.shape.clone()),
+                distance: Some(walk.distance),
+                maneuvers: if include_maneuvers {
+                    Some(walk.maneuvers.clone())
+                } else {
+                    None
+                },
+                transfer_type: None,
+            };
+            journey.sections.insert(0, section);
+            journey.duration += walk.duration;
+            journey.departure_date_time = journey
+                .sections
+                .first()
+                .unwrap()
+                .departure_date_time
+                .clone();
+        }
+
+        // Append last-mile walking section
+        if let (Some(walk), Some(stop_idx)) = (&last_mile, last_stop_idx) {
+            while journey
+                .sections
+                .last()
+                .is_some_and(|s| s.section_type == "transfer")
+            {
+                let removed = journey.sections.pop().unwrap();
+                journey.duration = journey.duration.saturating_sub(removed.duration);
+            }
+
+            let last_arr = journey
+                .sections
+                .last()
+                .map(|s| s.arrival_date_time.clone())
+                .unwrap_or_default();
+            let walk_arr_secs = journey
+                .sections
+                .last()
+                .and_then(|s| {
+                    raptor::parse_datetime(&s.arrival_date_time).map(|(_, t)| t + walk.duration)
+                })
+                .unwrap_or(0);
+            let walk_arr = raptor::format_datetime(date, walk_arr_secs);
+            let (tlon, tlat) = to_coord.unwrap();
+            let stop = &raptor_data.stops[stop_idx];
+            let section = Section {
+                section_type: "street_network".to_string(),
+                from: make_place(stop),
+                to: Place {
+                    id: format!("{tlon};{tlat}"),
+                    name: "".to_string(),
+                    stop_point: None,
+                },
+                departure_date_time: last_arr,
+                arrival_date_time: walk_arr,
+                duration: walk.duration,
+                display_informations: None,
+                stop_date_times: None,
+                shape: Some(walk.shape.clone()),
+                distance: Some(walk.distance),
+                maneuvers: if include_maneuvers {
+                    Some(walk.maneuvers.clone())
+                } else {
+                    None
+                },
+                transfer_type: None,
+            };
+            journey.sections.push(section);
+            journey.duration += walk.duration;
+            journey.arrival_date_time =
+                journey.sections.last().unwrap().arrival_date_time.clone();
+        }
+    }
+}
+
+/// Enrich transfer sections with Valhalla pedestrian walking routes.
+///
+/// For each transfer section in the journey list, determines whether it is
+/// outdoor (different parent stations) or indoor (same station). Outdoor
+/// transfers always get a Valhalla walking shape and distance. Indoor
+/// transfers only keep Valhalla data when it contains indoor-specific
+/// maneuver types (elevator=39, stairs=40, escalator=41, building enter/exit=42-43),
+/// since outdoor routes would be incorrect for in-station walks.
+async fn enrich_transfers(
+    journeys: &mut [Journey],
+    raptor_data: &RaptorData,
+    valhalla_base: &str,
+    walking_speed: Option<f64>,
+    include_maneuvers: bool,
+) {
+    type TransferReq = (usize, usize, (f64, f64), (f64, f64), bool);
+    let mut transfer_requests: Vec<TransferReq> = Vec::new();
+
+    for (j_idx, journey) in journeys.iter().enumerate() {
+        for (s_idx, section) in journey.sections.iter().enumerate() {
+            if section.section_type != "transfer" {
+                continue;
+            }
+            let from_c = section
+                .from
+                .stop_point
+                .as_ref()
+                .map(|sp| (sp.coord.lon, sp.coord.lat));
+            let to_c = section
+                .to
+                .stop_point
+                .as_ref()
+                .map(|sp| (sp.coord.lon, sp.coord.lat));
+            if let Some((from, to)) = from_c.zip(to_c) {
+                let from_parent = raptor_data
+                    .stop_index
+                    .get(section.from.id.as_str())
+                    .map(|&idx| &raptor_data.stops[idx].parent_station);
+                let to_parent = raptor_data
+                    .stop_index
+                    .get(section.to.id.as_str())
+                    .map(|&idx| &raptor_data.stops[idx].parent_station);
+                let is_outdoor = match (from_parent, to_parent) {
+                    (Some(fp), Some(tp)) => fp.is_empty() || tp.is_empty() || fp != tp,
+                    _ => true,
+                };
+                transfer_requests.push((j_idx, s_idx, from, to, is_outdoor));
+            }
+        }
+    }
+
+    // Always call Valhalla for all transfers (outdoor and indoor) to get
+    // shape/distance. Indoor transfers will be filtered post-hoc based on
+    // whether Valhalla returns indoor-specific maneuver types.
+    let requests_to_call: Vec<_> = transfer_requests.iter().collect();
+
+    let futs: Vec<_> = requests_to_call
+        .iter()
+        .map(|(_, _, from, to, is_outdoor)| {
+            let indoor_friendly = !is_outdoor;
+            valhalla::pedestrian_route(valhalla_base, *from, *to, walking_speed, indoor_friendly)
+        })
+        .collect();
+    let results = futures::future::join_all(futs).await;
+
+    for (req, walk) in requests_to_call.iter().zip(results) {
+        let (j_idx, s_idx, _, _, is_outdoor) = **req;
+        let section = &mut journeys[j_idx].sections[s_idx];
+
+        if is_outdoor {
+            section.transfer_type = Some("outdoor".to_string());
+            if let Some(walk) = walk {
+                section.shape = Some(walk.shape);
+                section.distance = Some(walk.distance);
+                if include_maneuvers {
+                    section.maneuvers = Some(walk.maneuvers);
+                }
+            }
+        } else {
+            // Indoor transfer: always keep Valhalla shape/distance when available.
+            // Mark as "indoor" if Valhalla confirms indoor maneuvers, otherwise
+            // still mark indoor but the trace may follow outdoor sidewalks.
+            section.transfer_type = Some("indoor".to_string());
+            if let Some(walk) = walk {
+                section.shape = Some(walk.shape);
+                section.distance = Some(walk.distance);
+                if include_maneuvers {
+                    section.maneuvers = Some(walk.maneuvers);
+                }
+            }
+        }
+    }
 }
 
 /// Two journeys are considered duplicates when their public-transport
@@ -674,10 +702,169 @@ fn journey_sections_equal(a: &Journey, b: &Journey) -> bool {
     journey_section_key(a) == journey_section_key(b)
 }
 
-/// Parse a `"lon;lat"` string into `(lon, lat)`.
-fn parse_coord(s: &str) -> Option<(f64, f64)> {
-    let (lon_str, lat_str) = s.split_once(';')?;
-    Some((lon_str.parse().ok()?, lat_str.parse().ok()?))
+use crate::util::parse_coord;
+
+// ---------------------------------------------------------------------------
+// Stop resolution & mode exclusion
+// ---------------------------------------------------------------------------
+
+/// Resolve a stop reference (ID or "lon;lat" coordinates) to a list of
+/// `(stop_idx, walk_duration_secs)` pairs. For coordinates, returns all
+/// nearby stops within `max_dist` meters; for a stop ID, returns a single
+/// stop with zero walk time.
+fn resolve_stops(
+    data: &RaptorData,
+    input: &str,
+    coord: Option<(f64, f64)>,
+    max_dist: u32,
+    walking_speed: f64,
+) -> Vec<(usize, u32)> {
+    if let Some((lon, lat)) = coord {
+        data.find_nearby_stops(lon, lat, max_dist, walking_speed)
+    } else if let Some(idx) = data.resolve_stop(input, max_dist) {
+        // Stop ID resolution: no parent_station expansion needed here because
+        // RAPTOR's transfer graph already connects sibling stops via intra-station
+        // transfers (built in build_transfers). We only need to handle the case
+        // where the selected stop is a station node (no patterns) — then resolve
+        // to its child stops.
+        if !data.stop_patterns[idx].is_empty() {
+            // Case 1: the stop itself is served by trips → use it directly
+            vec![(idx, 0)]
+        } else {
+            // Case 2: station node without patterns → find child stops that
+            // reference this stop as their parent_station
+            let stop_id = &data.stops[idx].stop_id;
+            let children: Vec<(usize, u32)> = data
+                .stops
+                .iter()
+                .enumerate()
+                .filter(|(child_idx, child)| {
+                    child.parent_station == *stop_id
+                        && !data.stop_patterns[*child_idx].is_empty()
+                })
+                .map(|(child_idx, _)| (child_idx, 0))
+                .collect();
+            if children.is_empty() {
+                // Case 3: try as a sibling — find siblings via parent_station
+                let parent = &data.stops[idx].parent_station;
+                if !parent.is_empty() {
+                    data.stops
+                        .iter()
+                        .enumerate()
+                        .filter(|(sib_idx, sib)| {
+                            *sib_idx != idx
+                                && sib.parent_station == *parent
+                                && !data.stop_patterns[*sib_idx].is_empty()
+                        })
+                        .map(|(sib_idx, _)| (sib_idx, 0))
+                        .collect()
+                } else {
+                    vec![]
+                }
+            } else {
+                children
+            }
+        }
+    } else {
+        vec![]
+    }
+}
+
+/// GTFS route_type code to commercial mode name.
+fn route_type_to_mode(route_type: u16) -> &'static str {
+    match route_type {
+        0 => "tramway",
+        1 => "metro",
+        2 => "rail",
+        3 => "bus",
+        7 => "funicular",
+        _ => "other",
+    }
+}
+
+/// Build display info (line label, color, mode) from a GTFS route.
+fn make_display_info(route: &crate::gtfs::Route, headsign: &str) -> DisplayInfo {
+    DisplayInfo {
+        network: String::new(),
+        direction: headsign.to_string(),
+        commercial_mode: route_type_to_mode(route.route_type).to_string(),
+        label: route.route_short_name.clone(),
+        color: route.route_color.clone(),
+        text_color: route.route_text_color.clone(),
+    }
+}
+
+/// Compute the set of pattern indices to exclude based on forbidden transport
+/// mode names (comma-separated: "metro,bus,rail").
+fn compute_mode_exclusions(
+    data: &RaptorData,
+    forbidden_modes_str: &str,
+) -> rustc_hash::FxHashSet<usize> {
+    if forbidden_modes_str.is_empty() {
+        return rustc_hash::FxHashSet::default();
+    }
+    let forbidden_types: rustc_hash::FxHashSet<u16> = forbidden_modes_str
+        .split(',')
+        .filter_map(|m| match m.trim() {
+            "tramway" => Some(0),
+            "metro" => Some(1),
+            "rail" => Some(2),
+            "bus" => Some(3),
+            "funicular" => Some(7),
+            _ => None,
+        })
+        .collect();
+    data.patterns
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| {
+            data.routes
+                .get(&p.route_id)
+                .is_some_and(|r| forbidden_types.contains(&r.route_type))
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Check if the current PT section should merge with a previous one.
+///
+/// GTFS feeds sometimes split a continuous line into multiple trip_ids at
+/// intermediate stops. When two consecutive PT sections share the same route
+/// label and connect at the same stop, they represent the same physical ride
+/// and should be merged into a single section. A transfer section between
+/// them is also absorbed.
+///
+/// Returns `(merge_target_index, should_merge)`.
+fn find_merge_target(
+    api_sections: &[Section],
+    from_stop: &crate::gtfs::Stop,
+    display_info: &Option<DisplayInfo>,
+) -> (usize, bool) {
+    let len = api_sections.len();
+    let from_id = &from_stop.stop_id;
+    let new_label = display_info.as_ref().map(|d| d.label.as_str());
+
+    // Helper: check if a section can be merged with the new one
+    let can_merge = |s: &Section| -> bool {
+        s.section_type == "public_transport"
+            && s.to.id == *from_id
+            && s.display_informations.is_some()
+            && new_label.is_some()
+            && s.display_informations.as_ref().unwrap().label == new_label.unwrap()
+    };
+
+    // Case 1: previous is a transfer, the one before that is a mergeable PT section
+    if len >= 2
+        && api_sections[len - 1].section_type == "transfer"
+        && can_merge(&api_sections[len - 2])
+    {
+        return (len - 2, true);
+    }
+    // Case 2: previous section is directly a mergeable PT section
+    if len >= 1 && can_merge(&api_sections[len - 1]) {
+        return (len - 1, true);
+    }
+    (0, false)
 }
 
 // ---------------------------------------------------------------------------
@@ -685,6 +872,9 @@ fn parse_coord(s: &str) -> Option<(f64, f64)> {
 // ---------------------------------------------------------------------------
 
 /// Convert raw RAPTOR journey sections into the API response format.
+///
+/// Walks through each section, building display info for PT legs, merging
+/// consecutive sections on the same line (trip splits), and counting transfers.
 fn build_journey(data: &RaptorData, sections: &[raptor::JourneySection], date: &str) -> Journey {
     let mut api_sections: Vec<Section> = Vec::new();
     let mut nb_transfers: u32 = 0;
@@ -717,22 +907,7 @@ fn build_journey(data: &RaptorData, sections: &[raptor::JourneySection], date: &
                     let trip = &pattern.trips[trip_idx];
 
                     if let Some(route) = data.routes.get(&pattern.route_id) {
-                        let mode = match route.route_type {
-                            0 => "tramway",
-                            1 => "metro",
-                            2 => "rail",
-                            3 => "bus",
-                            7 => "funicular",
-                            _ => "other",
-                        };
-                        display_info = Some(DisplayInfo {
-                            network: String::new(),
-                            direction: trip.headsign.clone(),
-                            commercial_mode: mode.to_string(),
-                            label: route.route_short_name.clone(),
-                            color: route.route_color.clone(),
-                            text_color: route.route_text_color.clone(),
-                        });
+                        display_info = Some(make_display_info(route, &trip.headsign));
                     }
 
                     let mut sdt: Vec<StopDateTime> = Vec::new();
@@ -753,42 +928,10 @@ fn build_journey(data: &RaptorData, sections: &[raptor::JourneySection], date: &
                     stop_date_times = Some(sdt);
                 }
 
-                // Merge with previous PT section if same route and connecting stop
-                // (handles GTFS trip splits where the same physical line changes trip_id)
-                // The previous section may be a transfer at the connecting stop — look past it.
-                let (merge_target_idx, should_merge) = {
-                    let len = api_sections.len();
-                    if len >= 2
-                        && api_sections[len - 1].section_type == "transfer"
-                        && api_sections[len - 2].section_type == "public_transport"
-                        && api_sections[len - 2].to.id == make_place(from_stop).id
-                        && api_sections[len - 2].display_informations.is_some()
-                        && display_info.is_some()
-                        && api_sections[len - 2]
-                            .display_informations
-                            .as_ref()
-                            .unwrap()
-                            .label
-                            == display_info.as_ref().unwrap().label
-                    {
-                        (len - 2, true)
-                    } else if len >= 1
-                        && api_sections[len - 1].section_type == "public_transport"
-                        && api_sections[len - 1].to.id == make_place(from_stop).id
-                        && api_sections[len - 1].display_informations.is_some()
-                        && display_info.is_some()
-                        && api_sections[len - 1]
-                            .display_informations
-                            .as_ref()
-                            .unwrap()
-                            .label
-                            == display_info.as_ref().unwrap().label
-                    {
-                        (len - 1, true)
-                    } else {
-                        (0, false)
-                    }
-                };
+                // Merge with previous PT section if same route line and connecting stop.
+                // Handles GTFS trip splits where the same physical line changes trip_id.
+                let (merge_target_idx, should_merge) =
+                    find_merge_target(&api_sections, from_stop, &display_info);
 
                 if should_merge {
                     // Remove intermediate transfer section if present
@@ -823,6 +966,7 @@ fn build_journey(data: &RaptorData, sections: &[raptor::JourneySection], date: &
                         shape: None,
                         distance: None,
                         maneuvers: None,
+                        transfer_type: None,
                     });
                 }
             }
@@ -839,6 +983,7 @@ fn build_journey(data: &RaptorData, sections: &[raptor::JourneySection], date: &
                     shape: None,
                     distance: None,
                     maneuvers: None,
+                    transfer_type: None,
                 });
             }
         }
@@ -1068,6 +1213,7 @@ mod tests {
                     shape: None,
                     distance: None,
                     maneuvers: None,
+                    transfer_type: None,
                 }],
             },
             Journey {

@@ -3,20 +3,23 @@
 //! Split by domain:
 //! - [`journeys`] — Journey planning by mode (`public_transport`, `walk`, `bike`)
 //! - [`places`]   — `GET /api/places` (stop name autocomplete)
-//! - [`status`]   — `GET /api/status` + `POST /api/reload` (engine health & hot-reload)
+//! - [`status`]   — `GET /api/status` (engine health)
+//! - [`gtfs`]     — `GET /api/gtfs/validate` + `POST /api/gtfs/reload` (GTFS management)
 
+pub mod gtfs;
 pub mod journeys;
 pub mod metrics;
 pub mod places;
 pub mod status;
 
+pub use gtfs::{__path_get_validate, __path_post_reload, get_validate, post_reload};
 pub use journeys::{__path_get_bike, get_bike};
 pub use journeys::{__path_get_car, get_car};
 pub use journeys::{__path_get_journeys, get_journeys};
 pub use journeys::{__path_get_walk, get_walk};
 pub use metrics::{__path_get_metrics, get_metrics};
 pub use places::{__path_get_places, get_places};
-pub use status::{__path_get_status, __path_post_reload, get_status, post_reload};
+pub use status::{__path_get_status, get_status};
 
 use serde::Serialize;
 use utoipa::ToSchema;
@@ -72,6 +75,9 @@ pub struct Section {
     /// Turn-by-turn maneuvers (for street_network sections via Valhalla).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub maneuvers: Option<Vec<journeys::valhalla::WalkManeuver>>,
+    /// Transfer type: "indoor" (same station) or "outdoor" (different stations).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transfer_type: Option<String>,
 }
 
 /// A stop visit within a public transport section.

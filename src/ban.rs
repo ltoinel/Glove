@@ -6,7 +6,6 @@
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tracing::info;
 
 use crate::text::normalize;
@@ -133,11 +132,16 @@ impl BanData {
 
         let mut streets: HashMap<(String, String), StreetAcc> = HashMap::new();
 
-        let mut files: Vec<_> = std::fs::read_dir(ban_dir)
-            .unwrap_or_else(|e| {
-                info!("Cannot read BAN directory: {e}");
-                std::fs::read_dir(ban_dir).unwrap()
-            })
+        let read_dir = match std::fs::read_dir(ban_dir) {
+            Ok(rd) => rd,
+            Err(e) => {
+                info!("Cannot read BAN directory {}: {e}", ban_dir.display());
+                return BanData {
+                    entries: Vec::new(),
+                };
+            }
+        };
+        let mut files: Vec<_> = read_dir
             .filter_map(|e| e.ok())
             .filter(|e| {
                 e.file_name()
@@ -245,25 +249,7 @@ impl BanData {
 
     /// Compute a SHA-256 fingerprint of the BAN directory based on file sizes.
     pub fn fingerprint(ban_dir: &Path) -> String {
-        let mut hasher = Sha256::new();
-        if let Ok(entries) = std::fs::read_dir(ban_dir) {
-            let mut files: Vec<_> = entries
-                .filter_map(|e| e.ok())
-                .filter(|e| {
-                    e.file_name()
-                        .to_str()
-                        .is_some_and(|n| n.starts_with("adresses-") && n.ends_with(".csv"))
-                })
-                .collect();
-            files.sort_by_key(|e| e.file_name());
-            for f in &files {
-                if let Ok(meta) = f.metadata() {
-                    hasher.update(f.file_name().to_string_lossy().as_bytes());
-                    hasher.update(meta.len().to_le_bytes());
-                }
-            }
-        }
-        format!("{:x}", hasher.finalize())
+        crate::util::dir_fingerprint_glob(ban_dir, "adresses-", ".csv")
     }
 
     /// Save the BAN index to a binary cache file.

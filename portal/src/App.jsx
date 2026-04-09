@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import {
   Typography, Paper, TextField, Button, Slider, Checkbox, FormControlLabel, Switch,
-  Box, Card, CardContent, CardActionArea, Chip, Collapse, Alert,
+  Box, Card, CardContent, CardActionArea, Chip, Collapse, Alert, LinearProgress,
   CircularProgress, Divider, Stack, IconButton, Tooltip, Autocomplete, alpha,
 } from '@mui/material'
 import {
@@ -12,7 +12,8 @@ import {
   DirectionsBike, DirectionsCar, MonitorHeart, Memory, Speed, Dns, Http,
   Stairs, Elevator, MeetingRoom, TurnLeft, TurnRight, Straight, UTurnLeft,
   RoundaboutLeft, Flag, MyLocation, ForkLeft, ForkRight, MergeType,
-  Commute, Tune,
+  Commute, Tune, CheckCircle, Error as ErrorIcon, Warning as WarningIcon,
+  Info as InfoIcon, ArrowBack, PlayArrow, FilterList, FactCheck,
 } from '@mui/icons-material'
 import SwaggerUI from 'swagger-ui-react'
 import 'swagger-ui-react/swagger-ui.css'
@@ -26,6 +27,7 @@ import { TimePicker } from '@mui/x-date-pickers/TimePicker'
 import dayjs from 'dayjs'
 import 'dayjs/locale/fr'
 import { useI18n } from './i18n.jsx'
+import { formatTime, formatDuration, toApiDatetime, decodePolyline, modeColor } from './utils.js'
 
 // Origin marker — pulsing radar dot
 const originIcon = L.divIcon({
@@ -89,52 +91,12 @@ function smoothLine(coords, numPoints = 6) {
   return result
 }
 
-// --- Decode Valhalla encoded polyline (precision 6) ---
-
-function decodePolyline(encoded, precision = 6) {
-  const factor = Math.pow(10, precision)
-  const result = []
-  let index = 0, lat = 0, lng = 0
-  while (index < encoded.length) {
-    let shift = 0, byte, val = 0
-    do { byte = encoded.charCodeAt(index++) - 63; val |= (byte & 0x1f) << shift; shift += 5 } while (byte >= 0x20)
-    lat += (val & 1) ? ~(val >> 1) : (val >> 1)
-    shift = 0; val = 0
-    do { byte = encoded.charCodeAt(index++) - 63; val |= (byte & 0x1f) << shift; shift += 5 } while (byte >= 0x20)
-    lng += (val & 1) ? ~(val >> 1) : (val >> 1)
-    result.push([lat / factor, lng / factor])
-  }
-  return result
-}
-
 // --- Utilities ---
-
-function formatTime(dt) {
-  if (!dt || dt.length < 15) return '--:--'
-  return dt.slice(9, 11) + ':' + dt.slice(11, 13)
-}
-
-function formatDuration(seconds) {
-  const h = Math.floor(seconds / 3600)
-  const m = Math.floor((seconds % 3600) / 60)
-  if (h > 0) return `${h}h${m.toString().padStart(2, '0')}`
-  return `${m} min`
-}
 
 function defaultDatetime() {
   const now = new Date()
   const pad = (n) => n.toString().padStart(2, '0')
   return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}`
-}
-
-function toApiDatetime(val) {
-  const clean = val.replace(/[-:]/g, '')
-  const tIdx = clean.indexOf('T')
-  if (tIdx === 8) {
-    const time = clean.slice(9).padEnd(6, '0')
-    return clean.slice(0, 9) + time
-  }
-  return clean.slice(0, 8) + 'T' + clean.slice(8).padEnd(6, '0')
 }
 
 // RER lines: A-E, everything else for route_type=2 is Transilien or TER
@@ -188,17 +150,6 @@ function elevationSegments(coords, heights) {
     }
   }
   return merged
-}
-
-function modeColor(mode, color) {
-  if (color) return `#${color}`
-  switch (mode) {
-    case 'metro': return '#4fc3f7'
-    case 'rail': return '#e0e0e0'
-    case 'tramway': return '#66bb6a'
-    case 'bus': return '#aed581'
-    default: return '#90a4ae'
-  }
 }
 
 // --- Recent places history ---
@@ -359,24 +310,26 @@ function extractMapData(journey) {
   const ptSections = sections.filter(s => s.type === 'public_transport')
 
   for (const section of sections) {
-    // Walking legs (first/last mile via Valhalla)
+    // Walking legs (first/last mile via Valhalla) — solid line
     if (section.type === 'street_network' && section.shape) {
       const coords = decodePolyline(section.shape)
-      if (coords.length >= 2) lines.push({ coords, color: '#90a4ae', dashed: true })
+      if (coords.length >= 2) lines.push({ coords, color: '#90a4ae', dashed: false })
       continue
     }
-    // Transfer walking legs (Valhalla route if available, else straight line)
+    // Transfer walking legs — all green, indoor dashed, outdoor solid
     if (section.type === 'transfer') {
+      const isIndoor = section.transfer_type === 'indoor'
+      const transferColor = '#4caf50'
       if (section.shape) {
         const coords = decodePolyline(section.shape)
-        if (coords.length >= 2) lines.push({ coords, color: '#90a4ae', dashed: true })
+        if (coords.length >= 2) lines.push({ coords, color: transferColor, dashed: isIndoor })
       } else {
         const fromCoord = section.from?.stop_point?.coord
         const toCoord = section.to?.stop_point?.coord
         if (fromCoord && toCoord) {
           lines.push({
             coords: [[fromCoord.lat, fromCoord.lon], [toCoord.lat, toCoord.lon]],
-            color: '#90a4ae', dashed: true,
+            color: '#1a1a2e', dashed: true,
           })
         }
       }
@@ -484,14 +437,15 @@ function JourneyCard({ journey, selected, onSelect, animDelay }) {
                   }
                   if ((s.type === 'street_network' || s.type === 'transfer') && s.duration > 0) {
                     const isTransfer = s.type === 'transfer'
+                    const sectionColor = isTransfer ? '#4caf50' : '#90a4ae'
                     const mins = Math.floor(s.duration / 60)
                     return (
                       <Box key={i} sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.3 }}>
                         {chevron}
                         {isTransfer
-                          ? <TransferWithinAStation sx={{ fontSize: 14, color: '#ffb800' }} />
-                          : <DirectionsWalk sx={{ fontSize: 14, color: 'text.disabled' }} />}
-                        <Typography variant="caption" sx={{ fontSize: 10, color: isTransfer ? '#ffb800' : 'text.disabled', fontWeight: 600 }}>
+                          ? <TransferWithinAStation sx={{ fontSize: 14, color: sectionColor }} />
+                          : <DirectionsWalk sx={{ fontSize: 14, color: sectionColor }} />}
+                        <Typography variant="caption" sx={{ fontSize: 10, color: sectionColor, fontWeight: 600 }}>
                           {mins}'
                         </Typography>
                       </Box>
@@ -538,8 +492,14 @@ function JourneyCard({ journey, selected, onSelect, animDelay }) {
         <Box sx={{ px: 2.5, py: 1.5 }}>
           {journey.sections.map((s, i) => {
             const isPt = s.type === 'public_transport'
+            const isTransfer = s.type === 'transfer'
+            const isWalk = s.type === 'street_network'
+            const isIndoor = isTransfer && s.transfer_type === 'indoor'
             const di = s.display_informations
-            const lineColor = isPt ? modeColor(di?.commercial_mode, di?.color) : 'rgba(255,255,255,0.08)'
+            // Bar color matches map trace colors
+            const lineColor = isPt
+              ? modeColor(di?.commercial_mode, di?.color)
+              : isTransfer ? '#4caf50' : '#90a4ae'
             return (
               <Box key={i} sx={{
                 display: 'flex', gap: 1.5, py: 1,
@@ -553,16 +513,17 @@ function JourneyCard({ journey, selected, onSelect, animDelay }) {
                 <Box sx={{
                   width: 3, borderRadius: 2, bgcolor: lineColor, flexShrink: 0,
                   boxShadow: isPt ? `0 0 6px ${alpha(lineColor, 0.4)}` : 'none',
+                  ...(isTransfer && isIndoor ? { backgroundImage: `repeating-linear-gradient(180deg, ${lineColor} 0px, ${lineColor} 4px, transparent 4px, transparent 8px)`, bgcolor: 'transparent' } : {}),
                 }} />
                 <Box sx={{ flex: 1, minWidth: 0 }}>
                   <Typography variant="caption" fontWeight={600} color="text.primary">
-                    {isPt ? <>{translateMode(di?.commercial_mode, di?.label, t)} <strong>{di?.label}</strong></> : s.type === 'street_network' ? (
+                    {isPt ? <>{translateMode(di?.commercial_mode, di?.label, t)} <strong>{di?.label}</strong></> : isWalk ? (
                       <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
                         <DirectionsWalk sx={{ fontSize: 14, color: '#90a4ae' }} /> {t('walkToStation')}
                       </Box>
                     ) : (
                       <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
-                        <TransferWithinAStation sx={{ fontSize: 14, color: '#ffb800' }} /> {t('transfer')}
+                        <TransferWithinAStation sx={{ fontSize: 14, color: '#4caf50' }} /> {t('transfer')} {s.transfer_type === 'indoor' ? `(${t('transferIndoor')})` : s.transfer_type === 'outdoor' ? `(${t('transferOutdoor')})` : ''}
                       </Box>
                     )}
                   </Typography>
@@ -575,8 +536,8 @@ function JourneyCard({ journey, selected, onSelect, animDelay }) {
                       {t('direction')} {di.direction}
                     </Typography>
                   )}
-                  {(s.type === 'street_network' || s.type === 'transfer') && s.maneuvers && (
-                    <ManeuverList maneuvers={s.maneuvers} color={s.type === 'transfer' ? '#ffb800' : '#90a4ae'} />
+                  {(isWalk || isTransfer) && s.maneuvers && (
+                    <ManeuverList maneuvers={s.maneuvers} color={isTransfer ? '#4caf50' : '#90a4ae'} />
                   )}
                 </Box>
                 <Typography variant="caption" color="text.secondary" sx={{ flexShrink: 0, pt: 0.2, opacity: 0.7 }}>
@@ -636,6 +597,7 @@ function maneuverIcon(type) {
 }
 
 function ManeuverList({ maneuvers, color = 'text.secondary' }) {
+  const { t } = useI18n()
   const [expanded, setExpanded] = useState(false)
   if (!maneuvers || maneuvers.length === 0) return null
   return (
@@ -646,7 +608,7 @@ function ManeuverList({ maneuvers, color = 'text.secondary' }) {
       >
         <Route sx={{ fontSize: 14, color }} />
         <Typography variant="caption" sx={{ fontSize: 10, color, fontWeight: 600 }}>
-          {maneuvers.length} instructions
+          {maneuvers.length} {t('maneuversLabel')}
         </Typography>
         {expanded ? <ExpandLess sx={{ fontSize: 14, color }} /> : <ExpandMore sx={{ fontSize: 14, color }} />}
       </Box>
@@ -846,7 +808,7 @@ function SettingsPanel({ status, onReload }) {
   const handleReload = async () => {
     setReloading(true); setReloadMsg(null)
     try {
-      const res = await fetch('/api/reload', { method: 'POST' })
+      const res = await fetch('/api/gtfs/reload', { method: 'POST' })
       const data = await res.json()
       if (data.error) {
         setReloadMsg({ severity: 'error', text: data.error.message })
@@ -975,6 +937,279 @@ function SettingsPanel({ status, onReload }) {
   )
 }
 
+// --- GTFS Validation panel (full-screen) ---
+
+const SEVERITY_CONFIG = {
+  error: { color: '#f44336', icon: <ErrorIcon fontSize="small" />, bg: 'rgba(244, 67, 54, 0.08)', border: 'rgba(244, 67, 54, 0.25)' },
+  warning: { color: '#ffb800', icon: <WarningIcon fontSize="small" />, bg: 'rgba(255, 184, 0, 0.08)', border: 'rgba(255, 184, 0, 0.25)' },
+  info: { color: '#29b6f6', icon: <InfoIcon fontSize="small" />, bg: 'rgba(41, 182, 246, 0.08)', border: 'rgba(41, 182, 246, 0.25)' },
+}
+
+const CATEGORY_KEYS = {
+  referential_integrity: 'catReferentialIntegrity',
+  calendar: 'catCalendar',
+  coordinates: 'catCoordinates',
+  transfers: 'catTransfers',
+  pathways: 'catPathways',
+  display: 'catDisplay',
+}
+
+function GtfsValidationPanel() {
+  const { t } = useI18n()
+  const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState(null)
+  const [severityFilter, setSeverityFilter] = useState('all')
+  const [categoryFilter, setCategoryFilter] = useState('all')
+  const [expanded, setExpanded] = useState({})
+  const [elapsed, setElapsed] = useState(0)
+  const timerRef = useRef(null)
+
+  const lastDuration = useRef(
+    parseFloat(localStorage.getItem('glove_gtfs_validate_duration')) || 0
+  )
+
+  const runValidation = async () => {
+    setLoading(true); setError(null); setElapsed(0)
+    const t0 = performance.now()
+    timerRef.current = setInterval(() => {
+      setElapsed(Math.round((performance.now() - t0) / 1000))
+    }, 500)
+    try {
+      const res = await fetch('/api/gtfs/validate')
+      const json = await res.json()
+      const duration = (performance.now() - t0) / 1000
+      localStorage.setItem('glove_gtfs_validate_duration', duration.toFixed(1))
+      lastDuration.current = duration
+      if (json.error) { setError(json.error.message); return }
+      setData(json)
+      setExpanded({})
+    } catch (err) { setError(err.message) }
+    finally {
+      clearInterval(timerRef.current)
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => () => clearInterval(timerRef.current), [])
+
+  const filteredIssues = data?.issues?.filter(i =>
+    (severityFilter === 'all' || i.severity === severityFilter) &&
+    (categoryFilter === 'all' || i.category === categoryFilter)
+  ) || []
+
+  const categories = [...new Set(data?.issues?.map(i => i.category) || [])]
+
+  const toggleExpand = (idx) => setExpanded(prev => ({ ...prev, [idx]: !prev[idx] }))
+
+  return (
+    <Box sx={{ overflow: 'auto', flex: 1, display: 'flex', flexDirection: 'column' }}>
+      {/* Action bar */}
+      <Box sx={{
+        px: 2.5, py: 1.5,
+        display: 'flex', alignItems: 'center', gap: 1.5,
+        flexShrink: 0,
+      }}>
+        <Box sx={{ flex: 1 }}>
+          <Typography variant="overline" color="primary.main" fontWeight={700} letterSpacing={2} fontSize={10}>
+            {t('gtfsValidation')}
+          </Typography>
+        </Box>
+        {(data || loading) && (
+          <Button size="small" variant="outlined" onClick={runValidation} disabled={loading}
+            startIcon={loading ? <CircularProgress size={14} color="inherit" /> : <PlayArrow />}
+            sx={{
+              color: '#00e5ff', borderColor: 'rgba(0, 229, 255, 0.3)',
+              '&:hover': { borderColor: '#00e5ff', bgcolor: 'rgba(0, 229, 255, 0.08)' },
+            }}>
+            {loading ? t('validating') : t('rerunValidation')}
+          </Button>
+        )}
+      </Box>
+
+      {/* Progress bar */}
+      {loading && (
+        <Box sx={{ px: 2.5, pt: 1.5, pb: 1, flexShrink: 0 }}>
+          <LinearProgress
+            variant={lastDuration.current > 0 ? 'determinate' : 'indeterminate'}
+            value={lastDuration.current > 0 ? Math.min(100, (elapsed / lastDuration.current) * 100) : undefined}
+            sx={{
+              height: 6, borderRadius: 3,
+              bgcolor: 'rgba(0, 229, 255, 0.08)',
+              '& .MuiLinearProgress-bar': {
+                bgcolor: '#00e5ff',
+                borderRadius: 3,
+              },
+            }}
+          />
+          <Stack direction="row" justifyContent="space-between" sx={{ mt: 0.5 }}>
+            <Typography variant="caption" color="text.secondary">
+              {t('elapsed')}: {elapsed}s
+            </Typography>
+            {lastDuration.current > 0 && (
+              <Typography variant="caption" color="text.secondary">
+                {t('estimated')}: ~{Math.ceil(lastDuration.current)}s
+              </Typography>
+            )}
+          </Stack>
+        </Box>
+      )}
+
+      {/* Error */}
+      {error && (
+        <Alert severity="error" sx={{ mx: 2.5, mt: 1.5, borderRadius: 2 }}>{error}</Alert>
+      )}
+
+      {/* Welcome state — before first run */}
+      {!data && !loading && !error && (
+        <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 1.5, px: 2.5 }}>
+          <FactCheck sx={{ fontSize: 48, color: 'rgba(0, 229, 255, 0.15)' }} />
+          <Typography variant="body2" color="text.disabled" sx={{ textAlign: 'center', maxWidth: 320 }}>
+            {t('gtfsValidationHint')}
+          </Typography>
+          <Button variant="contained" onClick={runValidation} startIcon={<PlayArrow />} fullWidth
+            sx={{
+              mt: 1, py: 1.2,
+              bgcolor: 'rgba(0, 229, 255, 0.1)', color: '#00e5ff',
+              border: '1px solid rgba(0, 229, 255, 0.25)',
+              boxShadow: 'none',
+              '&:hover': { bgcolor: 'rgba(0, 229, 255, 0.18)', boxShadow: '0 0 20px rgba(0, 229, 255, 0.15)' },
+            }}>
+            {t('runValidation')}
+          </Button>
+        </Box>
+      )}
+
+      {/* Summary cards */}
+      {data && (
+        <Box sx={{ display: 'flex', gap: 1, px: 2.5, py: 1.5, flexShrink: 0, flexWrap: 'wrap' }}>
+          {[
+            { key: 'totalChecks', value: data.summary.total_checks, color: '#00e5ff', icon: <CheckCircle fontSize="small" /> },
+            { key: 'errors', value: data.summary.errors, color: '#f44336', icon: <ErrorIcon fontSize="small" /> },
+            { key: 'warnings', value: data.summary.warnings, color: '#ffb800', icon: <WarningIcon fontSize="small" /> },
+            { key: 'infos', value: data.summary.infos, color: '#29b6f6', icon: <InfoIcon fontSize="small" /> },
+          ].map(item => (
+            <Paper key={item.key} sx={{
+              flex: '1 1 calc(50% - 4px)', minWidth: 0, px: 1.5, py: 1, borderRadius: 2,
+              bgcolor: 'rgba(255,255,255,0.02)', border: `1px solid rgba(255,255,255,0.06)`,
+              display: 'flex', alignItems: 'center', gap: 1,
+            }}>
+              <Box sx={{ color: item.color, display: 'flex', flexShrink: 0 }}>{item.icon}</Box>
+              <Box sx={{ minWidth: 0 }}>
+                <Typography variant="h6" sx={{
+                  fontFamily: '"Syne", sans-serif', fontWeight: 800, color: item.color, lineHeight: 1, fontSize: '1rem',
+                }}>
+                  {item.value}
+                </Typography>
+                <Typography variant="caption" color="text.secondary" noWrap>{t(item.key)}</Typography>
+              </Box>
+            </Paper>
+          ))}
+        </Box>
+      )}
+
+      {/* Filters */}
+      {data && data.issues.length > 0 && (
+        <Box sx={{ px: 2.5, pb: 1, display: 'flex', gap: 0.5, alignItems: 'center', flexShrink: 0, flexWrap: 'wrap' }}>
+          <FilterList fontSize="small" sx={{ color: 'text.secondary' }} />
+          {['all', 'error', 'warning', 'info'].map(sev => (
+            <Chip key={sev} label={sev === 'all' ? t('allSeverities') : t(sev + 's')} size="small"
+              variant={severityFilter === sev ? 'filled' : 'outlined'}
+              onClick={() => setSeverityFilter(sev)}
+              sx={{
+                fontWeight: 600, fontSize: 11,
+                color: sev === 'all' ? '#e8e6f0' : SEVERITY_CONFIG[sev]?.color,
+                borderColor: sev === 'all' ? 'rgba(255,255,255,0.2)' : SEVERITY_CONFIG[sev]?.border,
+                bgcolor: severityFilter === sev ? (sev === 'all' ? 'rgba(255,255,255,0.08)' : SEVERITY_CONFIG[sev]?.bg) : 'transparent',
+                '&:hover': { bgcolor: sev === 'all' ? 'rgba(255,255,255,0.06)' : SEVERITY_CONFIG[sev]?.bg },
+              }} />
+          ))}
+          <Divider orientation="vertical" flexItem sx={{ mx: 0.5, borderColor: 'rgba(255,255,255,0.06)' }} />
+          {['all', ...categories].map(cat => (
+            <Chip key={cat} label={cat === 'all' ? t('allSeverities') : t(CATEGORY_KEYS[cat] || cat)} size="small"
+              variant={categoryFilter === cat ? 'filled' : 'outlined'}
+              onClick={() => setCategoryFilter(cat)}
+              sx={{
+                fontWeight: 600, fontSize: 11, color: '#e8e6f0',
+                borderColor: 'rgba(255,255,255,0.15)',
+                bgcolor: categoryFilter === cat ? 'rgba(255,255,255,0.08)' : 'transparent',
+                '&:hover': { bgcolor: 'rgba(255,255,255,0.06)' },
+              }} />
+          ))}
+        </Box>
+      )}
+
+      {/* Issues list */}
+      <Box sx={{ flex: 1, overflow: 'auto', px: 2.5, pb: 2.5 }}>
+        {data && filteredIssues.length === 0 && !loading && (
+          <Box sx={{ textAlign: 'center', pt: 8 }}>
+            <CheckCircle sx={{ fontSize: 48, color: '#00e676', mb: 1 }} />
+            <Typography color="text.secondary">{t('noIssues')}</Typography>
+          </Box>
+        )}
+        <Stack spacing={1}>
+          {filteredIssues.map((issue, idx) => {
+            const sev = SEVERITY_CONFIG[issue.severity] || SEVERITY_CONFIG.info
+            const isExpanded = expanded[idx]
+            return (
+              <Paper key={idx} sx={{
+                borderRadius: 2, overflow: 'hidden',
+                bgcolor: sev.bg, border: `1px solid ${sev.border}`,
+                transition: 'all 0.2s',
+                '&:hover': { bgcolor: `${sev.bg.replace('0.08', '0.12')}` },
+              }}>
+                <CardActionArea onClick={() => issue.samples?.length > 0 && toggleExpand(idx)}
+                  sx={{ px: 2.5, py: 1.5, display: 'flex', alignItems: 'flex-start', gap: 1.5 }}>
+                  <Box sx={{ color: sev.color, display: 'flex', mt: 0.3 }}>{sev.icon}</Box>
+                  <Box sx={{ flex: 1, minWidth: 0 }}>
+                    <Typography variant="body2" sx={{ fontWeight: 600, color: '#e8e6f0' }}>
+                      {issue.message}
+                    </Typography>
+                    <Stack direction="row" spacing={1} sx={{ mt: 0.5 }}>
+                      <Chip label={t(CATEGORY_KEYS[issue.category] || issue.category)} size="small"
+                        sx={{ fontSize: 10, height: 20, color: 'text.secondary', borderColor: 'rgba(255,255,255,0.1)' }}
+                        variant="outlined" />
+                      <Typography variant="caption" color="text.secondary">
+                        {t('affectedCount', { count: issue.count })}
+                      </Typography>
+                    </Stack>
+                  </Box>
+                  {issue.samples?.length > 0 && (
+                    <Box sx={{ color: 'text.secondary', display: 'flex', mt: 0.3 }}>
+                      {isExpanded ? <ExpandLess fontSize="small" /> : <ExpandMore fontSize="small" />}
+                    </Box>
+                  )}
+                </CardActionArea>
+                {issue.samples?.length > 0 && (
+                  <Collapse in={isExpanded}>
+                    <Box sx={{
+                      px: 2.5, pb: 1.5, pt: 0.5,
+                      borderTop: `1px solid ${sev.border}`,
+                    }}>
+                      <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>
+                        {t('samples')}
+                      </Typography>
+                      {issue.samples.map((s, si) => (
+                        <Typography key={si} variant="caption" component="div"
+                          sx={{
+                            fontFamily: 'monospace', fontSize: 11, py: 0.3,
+                            color: 'rgba(232, 230, 240, 0.7)', wordBreak: 'break-all',
+                          }}>
+                          {s}
+                        </Typography>
+                      ))}
+                    </Box>
+                  </Collapse>
+                )}
+              </Paper>
+            )
+          })}
+        </Stack>
+      </Box>
+    </Box>
+  )
+}
+
 // --- Swagger panel ---
 
 function SwaggerPanel() {
@@ -1051,7 +1286,7 @@ function MetricsPanel() {
   const [metrics, setMetrics] = useState(null)
 
   useEffect(() => {
-    const load = () => fetch('/api/metrics').then(r => r.text()).then(t => setMetrics(parsePrometheus(t))).catch(() => {})
+    const load = () => fetch('/api/metrics').then(r => r.text()).then(text => setMetrics(parsePrometheus(text))).catch(err => console.warn('Metrics fetch failed:', err.message))
     load()
     const interval = setInterval(load, 5000)
     return () => clearInterval(interval)
@@ -1154,8 +1389,10 @@ export default function App() {
 
   const defaultModes = { metro: true, rail: true, bus: true, tramway: true, walk: true, bike: true, car: true }
   const [modes, setModes] = useState(() => {
-    const saved = localStorage.getItem('glove_modes')
-    return saved ? { ...defaultModes, ...JSON.parse(saved) } : defaultModes
+    try {
+      const saved = localStorage.getItem('glove_modes')
+      return saved ? { ...defaultModes, ...JSON.parse(saved) } : defaultModes
+    } catch { return defaultModes }
   })
   const toggleMode = (mode) => {
     setModes(prev => {
@@ -1165,15 +1402,15 @@ export default function App() {
     })
   }
 
-  const refreshStatus = () => {
-    fetch('/api/status').then(r => r.json()).then(setStatus).catch(() => {})
-  }
-  useEffect(() => { refreshStatus() }, [])
+  const refreshStatus = useCallback(() => {
+    fetch('/api/status').then(r => r.json()).then(setStatus).catch(err => console.warn('Status fetch failed:', err.message))
+  }, [])
+  useEffect(() => { refreshStatus() }, [refreshStatus])
 
-  const clearResults = () => { setJourneys(null); setWalkJourney(null); setBikeJourneys(null); setCarJourney(null); setSelectedJourney(0); setResultTab('pt'); setError(null); setPtTime(null); setWalkTime(null); setBikeTime(null); setCarTime(null) }
-  const handleFromChange = (v) => { setFrom(v); clearResults() }
-  const handleToChange = (v) => { setTo(v); clearResults() }
-  const swap = () => { setFrom(to); setTo(from); clearResults() }
+  const clearResults = useCallback(() => { setJourneys(null); setWalkJourney(null); setBikeJourneys(null); setCarJourney(null); setSelectedJourney(0); setResultTab('pt'); setError(null); setPtTime(null); setWalkTime(null); setBikeTime(null); setCarTime(null) }, [])
+  const handleFromChange = useCallback((v) => { setFrom(v); clearResults() }, [clearResults])
+  const handleToChange = useCallback((v) => { setTo(v); clearResults() }, [clearResults])
+  const swap = useCallback(() => { const tmp = from; setFrom(to); setTo(tmp); clearResults() }, [from, to, clearResults])
 
   const search = async (e) => {
     e.preventDefault()
@@ -1190,10 +1427,14 @@ export default function App() {
       } else {
         effectiveDatetime = defaultDatetime()
       }
+      // For stops: send stop_id so RAPTOR routes directly to platforms (no last-mile walk)
+      // For addresses: send lon;lat coordinates (triggers first/last-mile walking)
+      const fromIsStop = from.type === 'stop'
+      const toIsStop = to.type === 'stop'
       const fromCoord = from.stop_point?.coord || from.coord
       const toCoord = to.stop_point?.coord || to.coord
-      const ptFrom = fromCoord ? `${fromCoord.lon};${fromCoord.lat}` : from.id
-      const ptTo = toCoord ? `${toCoord.lon};${toCoord.lat}` : to.id
+      const ptFrom = fromIsStop ? from.id : (fromCoord ? `${fromCoord.lon};${fromCoord.lat}` : from.id)
+      const ptTo = toIsStop ? to.id : (toCoord ? `${toCoord.lon};${toCoord.lat}` : to.id)
       const ptParams = new URLSearchParams({ from: ptFrom, to: ptTo, datetime: toApiDatetime(effectiveDatetime) })
       if (walkingSpeed !== 5) ptParams.set('walking_speed', String(walkingSpeed))
       if (showManeuvers) ptParams.set('maneuvers', 'true')
@@ -1221,7 +1462,7 @@ export default function App() {
           walkFetch = fetch(`/api/journeys/walk?${walkParams}`)
             .then(r => r.ok ? r.json() : null)
             .then(data => { setWalkTime(Math.round(performance.now() - walkT0)); return data })
-            .catch(() => null)
+            .catch(err => { console.warn('Walk fetch failed:', err.message); return null })
         }
         if (modes.bike) {
           const bikeT0 = performance.now()
@@ -1230,7 +1471,7 @@ export default function App() {
           bikeFetch = fetch(`/api/journeys/bike?${bikeParams}`)
             .then(r => r.ok ? r.json() : null)
             .then(data => { setBikeTime(Math.round(performance.now() - bikeT0)); return data })
-            .catch(() => null)
+            .catch(err => { console.warn('Bike fetch failed:', err.message); return null })
         }
         if (modes.car) {
           const carT0 = performance.now()
@@ -1239,7 +1480,7 @@ export default function App() {
           carFetch = fetch(`/api/journeys/car?${carParams}`)
             .then(r => r.ok ? r.json() : null)
             .then(data => { setCarTime(Math.round(performance.now() - carT0)); return data })
-            .catch(() => null)
+            .catch(err => { console.warn('Car fetch failed:', err.message); return null })
         }
       }
 
@@ -1285,9 +1526,95 @@ export default function App() {
   return (
     <LocalizationProvider dateAdapter={AdapterDayjs} adapterLocale={lang}>
     <Box sx={{ display: 'flex', height: '100vh', overflow: 'hidden', bgcolor: '#0a0a12' }}>
-      {/* Left panel — floating glass sidebar */}
+      {/* Vertical navigation rail */}
       <Box sx={{
-        width: 460, minWidth: 460,
+        width: 56, minWidth: 56,
+        display: 'flex', flexDirection: 'column', alignItems: 'center',
+        py: 1.5, gap: 0.5,
+        bgcolor: 'rgba(6, 6, 14, 0.95)',
+        borderRight: '1px solid rgba(255, 255, 255, 0.04)',
+        zIndex: 1300,
+      }}>
+        {/* Logo */}
+        <Tooltip title="Glove" placement="right">
+          <IconButton onClick={() => setView('search')} size="small" aria-label="Glove"
+            sx={{
+              width: 38, height: 38, borderRadius: '10px', mb: 1,
+              background: view === 'search' ? 'linear-gradient(135deg, #00e5ff 0%, #00b8d4 100%)' : 'rgba(255,255,255,0.04)',
+              boxShadow: view === 'search' ? '0 0 16px rgba(0, 229, 255, 0.25)' : 'none',
+              '&:hover': { background: 'linear-gradient(135deg, #00e5ff 0%, #00b8d4 100%)', boxShadow: '0 0 12px rgba(0, 229, 255, 0.2)' },
+              transition: 'all 0.2s',
+            }}>
+            <NearMe sx={{ fontSize: 18, color: view === 'search' ? '#0a0a12' : '#8b89a0' }} />
+          </IconButton>
+        </Tooltip>
+
+        <Divider sx={{ width: 24, borderColor: 'rgba(255,255,255,0.06)', mb: 0.5 }} />
+
+        {/* Main nav buttons */}
+        {[
+          { key: 'gtfs', icon: <FactCheck fontSize="small" />, label: t('gtfsValidation') },
+          { key: 'settings', icon: <Storage fontSize="small" />, label: t('dataset') },
+        ].map(item => (
+          <Tooltip key={item.key} title={item.label} placement="right">
+            <IconButton
+              onClick={() => setView(view === item.key ? 'search' : item.key)}
+              size="small" aria-label={item.label}
+              sx={{
+                width: 38, height: 38, borderRadius: '10px',
+                color: view === item.key ? '#00e5ff' : '#6b6980',
+                bgcolor: view === item.key ? 'rgba(0, 229, 255, 0.1)' : 'transparent',
+                '&:hover': { color: '#00e5ff', bgcolor: 'rgba(0, 229, 255, 0.08)' },
+                transition: 'all 0.2s',
+              }}>
+              {item.icon}
+            </IconButton>
+          </Tooltip>
+        ))}
+
+        <Box sx={{ flex: 1 }} />
+
+        {/* Utility buttons at bottom */}
+        {[
+          { key: 'swagger', icon: <Api fontSize="small" />, label: 'API' },
+          { key: 'metrics', icon: <MonitorHeart fontSize="small" />, label: t('metrics') },
+        ].map(item => (
+          <Tooltip key={item.key} title={item.label} placement="right">
+            <IconButton
+              onClick={() => setView(view === item.key ? 'search' : item.key)}
+              size="small" aria-label={item.label}
+              sx={{
+                width: 38, height: 38, borderRadius: '10px',
+                color: view === item.key ? '#00e5ff' : '#6b6980',
+                bgcolor: view === item.key ? 'rgba(0, 229, 255, 0.1)' : 'transparent',
+                '&:hover': { color: '#00e5ff', bgcolor: 'rgba(0, 229, 255, 0.08)' },
+                transition: 'all 0.2s',
+              }}>
+              {item.icon}
+            </IconButton>
+          </Tooltip>
+        ))}
+
+        <Divider sx={{ width: 24, borderColor: 'rgba(255,255,255,0.06)', my: 0.5 }} />
+
+        {/* Language toggle */}
+        <Tooltip title={lang === 'fr' ? 'English' : 'Français'} placement="right">
+          <IconButton onClick={toggleLang} size="small"
+            aria-label={lang === 'fr' ? 'Switch to English' : 'Passer en français'}
+            sx={{
+              width: 38, height: 38, borderRadius: '10px',
+              color: '#6b6980',
+              '&:hover': { color: '#00e5ff', bgcolor: 'rgba(0, 229, 255, 0.08)' },
+              transition: 'all 0.2s',
+            }}>
+            <Language fontSize="small" />
+          </IconButton>
+        </Tooltip>
+      </Box>
+
+      {/* Main sidebar panel */}
+      <Box sx={{
+        width: 450, minWidth: 450,
         display: 'flex', flexDirection: 'column',
         zIndex: 1200, overflow: 'hidden',
         position: 'relative',
@@ -1297,98 +1624,39 @@ export default function App() {
       }}>
         {/* Header */}
         <Box sx={{
-          px: 3, py: 2,
-          background: 'linear-gradient(135deg, rgba(0, 229, 255, 0.08) 0%, rgba(255, 184, 0, 0.05) 100%)',
+          px: 2.5, py: 1.5,
+          background: 'linear-gradient(135deg, rgba(0, 229, 255, 0.06) 0%, rgba(255, 184, 0, 0.03) 100%)',
           borderBottom: '1px solid rgba(255, 255, 255, 0.06)',
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          display: 'flex', alignItems: 'center',
           flexShrink: 0,
           position: 'relative',
           overflow: 'hidden',
         }}>
-          {/* Subtle gradient accent line */}
           <Box sx={{
             position: 'absolute', bottom: 0, left: 0, right: 0, height: '1px',
             background: 'linear-gradient(90deg, #00e5ff 0%, transparent 40%, transparent 60%, #ffb800 100%)',
-            opacity: 0.5,
+            opacity: 0.4,
           }} />
-
-          <Stack direction="row" alignItems="center" spacing={1.5} sx={{ cursor: 'pointer' }}
-            onClick={() => setView('search')}>
-            <Box sx={{
-              width: 32, height: 32, borderRadius: '8px', display: 'flex', alignItems: 'center', justifyContent: 'center',
-              background: 'linear-gradient(135deg, #00e5ff 0%, #00b8d4 100%)',
-              boxShadow: '0 0 16px rgba(0, 229, 255, 0.25)',
-            }}>
-              <NearMe sx={{ fontSize: 18, color: '#0a0a12' }} />
-            </Box>
-            <Typography variant="h6" sx={{
-              fontFamily: '"Syne", sans-serif',
-              fontWeight: 800,
-              fontSize: '1.25rem',
-              letterSpacing: '-0.03em',
-              background: 'linear-gradient(135deg, #e8e6f0 0%, #8b89a0 100%)',
-              backgroundClip: 'text',
-              WebkitBackgroundClip: 'text',
-              WebkitTextFillColor: 'transparent',
-            }}>
-              Glove
-            </Typography>
-          </Stack>
-
-          <Stack direction="row" spacing={0.5}>
-            <Tooltip title={lang === 'fr' ? 'English' : 'Français'}>
-              <IconButton onClick={toggleLang} size="small"
-                sx={{
-                  color: 'text.secondary',
-                  '&:hover': { color: '#00e5ff', bgcolor: 'rgba(0, 229, 255, 0.08)' },
-                  transition: 'all 0.2s',
-                }}>
-                <Language fontSize="small" />
-              </IconButton>
-            </Tooltip>
-            <Tooltip title="API">
-              <IconButton
-                onClick={() => setView(view === 'swagger' ? 'search' : 'swagger')}
-                size="small"
-                sx={{
-                  color: view === 'swagger' ? '#00e5ff' : 'text.secondary',
-                  '&:hover': { color: '#00e5ff', bgcolor: 'rgba(0, 229, 255, 0.08)' },
-                  transition: 'all 0.2s',
-                }}>
-                {view === 'swagger' ? <Close fontSize="small" /> : <Api fontSize="small" />}
-              </IconButton>
-            </Tooltip>
-            <Tooltip title={view === 'metrics' ? t('search') : t('metrics')}>
-              <IconButton
-                onClick={() => setView(view === 'metrics' ? 'search' : 'metrics')}
-                size="small"
-                sx={{
-                  color: view === 'metrics' ? '#00e5ff' : 'text.secondary',
-                  '&:hover': { color: '#00e5ff', bgcolor: 'rgba(0, 229, 255, 0.08)' },
-                  transition: 'all 0.2s',
-                }}>
-                {view === 'metrics' ? <Close fontSize="small" /> : <MonitorHeart fontSize="small" />}
-              </IconButton>
-            </Tooltip>
-            <Tooltip title={view === 'settings' ? t('search') : t('settings')}>
-              <IconButton
-                onClick={() => setView(view === 'settings' ? 'search' : 'settings')}
-                size="small"
-                sx={{
-                  color: view === 'settings' ? '#00e5ff' : 'text.secondary',
-                  '&:hover': { color: '#00e5ff', bgcolor: 'rgba(0, 229, 255, 0.08)' },
-                  transition: 'all 0.2s',
-                }}>
-                {view === 'settings' ? <Close fontSize="small" /> : <Settings fontSize="small" />}
-              </IconButton>
-            </Tooltip>
-          </Stack>
+          <Typography variant="h6" sx={{
+            fontFamily: '"Syne", sans-serif',
+            fontWeight: 800,
+            fontSize: '1.15rem',
+            letterSpacing: '-0.03em',
+            background: 'linear-gradient(135deg, #e8e6f0 0%, #8b89a0 100%)',
+            backgroundClip: 'text',
+            WebkitBackgroundClip: 'text',
+            WebkitTextFillColor: 'transparent',
+          }}>
+            Glove
+          </Typography>
         </Box>
 
         {view === 'swagger' ? (
           <SwaggerPanel />
         ) : view === 'metrics' ? (
           <MetricsPanel />
+        ) : view === 'gtfs' ? (
+          <GtfsValidationPanel />
         ) : view === 'settings' ? (
           <SettingsPanel status={status} onReload={refreshStatus} />
         ) : (
@@ -1434,7 +1702,7 @@ export default function App() {
                         }} />} />
                     </Box>
                     <Tooltip title={t('swap')}>
-                      <IconButton onClick={swap} size="small"
+                      <IconButton onClick={swap} size="small" aria-label={t('swap')}
                         sx={{
                           border: '1px solid rgba(255, 255, 255, 0.08)',
                           borderRadius: 2, p: 0.8,

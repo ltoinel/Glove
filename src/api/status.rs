@@ -1,9 +1,8 @@
 //! Engine status and GTFS hot-reload endpoints.
 
-use actix_web::{HttpResponse, get, post, web};
+use actix_web::{HttpResponse, get, web};
 use arc_swap::ArcSwap;
 use serde::Serialize;
-use std::sync::Arc;
 use utoipa::ToSchema;
 
 use crate::config::AppConfig;
@@ -57,15 +56,6 @@ pub struct StatusResponse {
     pub raptor: RaptorStats,
 }
 
-/// Response for `POST /api/reload`.
-#[derive(Debug, Serialize, ToSchema)]
-pub struct ReloadResponse {
-    pub status: String,
-    pub loaded_at: String,
-    pub gtfs: GtfsStats,
-    pub raptor: RaptorStats,
-}
-
 /// Return engine status: GTFS data statistics and last load timestamp.
 #[utoipa::path(
     get,
@@ -112,109 +102,12 @@ pub async fn get_status(
     }))
 }
 
-/// Hot-reload GTFS data without downtime.
-///
-/// Spawns the reload on a blocking thread pool via [`web::block`].
-/// The old data continues serving requests until the new RAPTOR index
-/// is atomically swapped in via [`ArcSwap::store`].
-#[utoipa::path(
-    post,
-    path = "/api/reload",
-    responses(
-        (status = 200, description = "GTFS data reloaded successfully", body = ReloadResponse),
-        (status = 401, description = "Invalid or missing API key"),
-        (status = 403, description = "Reload endpoint disabled (no api_key configured)"),
-        (status = 500, description = "Reload failed"),
-    ),
-    security(("api_key" = [])),
-    tag = "Status"
-)]
-#[post("/api/reload")]
-pub async fn post_reload(
-    req: actix_web::HttpRequest,
-    shared: web::Data<ArcSwap<RaptorData>>,
-    config: web::Data<AppConfig>,
-) -> HttpResponse {
-    // --- API key authentication ---
-    let expected_key = &config.server.api_key;
-    if expected_key.is_empty() {
-        return HttpResponse::Forbidden().json(serde_json::json!({
-            "error": { "id": "disabled", "message": "Reload endpoint is disabled (no api_key configured)" }
-        }));
-    }
-    let provided_key = req
-        .headers()
-        .get("X-Api-Key")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    if provided_key != expected_key {
-        return HttpResponse::Unauthorized().json(serde_json::json!({
-            "error": { "id": "unauthorized", "message": "Invalid or missing X-Api-Key header" }
-        }));
-    }
-
-    let data_dir = config.data.gtfs_dir();
-    let raptor_dir = config.data.raptor_dir();
-    let transfer_time = config.routing.default_transfer_time;
-
-    let result = web::block(move || {
-        let data_path = std::path::Path::new(&data_dir);
-        let cache_path = std::path::Path::new(&raptor_dir);
-        let gtfs = crate::gtfs::GtfsData::load(data_path).map_err(|e| e.to_string())?;
-        let fingerprint = crate::gtfs::gtfs_fingerprint(data_path);
-        let new_data = crate::raptor::RaptorData::build(gtfs, transfer_time);
-        if let Err(e) = new_data.save(cache_path, &fingerprint) {
-            tracing::warn!("Failed to save RAPTOR cache: {e}");
-        }
-        Ok::<_, String>(Arc::new(new_data))
-    })
-    .await;
-
-    match result {
-        Ok(Ok(new_data)) => {
-            let s = &new_data.stats;
-            let resp = serde_json::json!({
-                "status": "reloaded",
-                "loaded_at": s.loaded_at.to_rfc3339(),
-                "gtfs": {
-                    "agencies": s.agencies,
-                    "routes": s.routes,
-                    "stops": s.stops,
-                    "trips": s.trips,
-                    "stop_times": s.stop_times,
-                    "calendars": s.calendars,
-                    "calendar_dates": s.calendar_dates,
-                    "transfers": s.transfers,
-                },
-                "raptor": {
-                    "patterns": s.patterns,
-                    "services": s.services,
-                }
-            });
-            shared.store(new_data);
-            tracing::info!("GTFS data reloaded");
-            HttpResponse::Ok().json(resp)
-        }
-        Ok(Err(e)) => {
-            tracing::error!("Reload failed: {e}");
-            HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": { "id": "reload_failed", "message": e }
-            }))
-        }
-        Err(e) => {
-            tracing::error!("Reload task panicked: {e}");
-            HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": { "id": "reload_panic", "message": "Internal error during reload" }
-            }))
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{config::AppConfig, gtfs, raptor};
     use rustc_hash::FxHashMap;
+    use std::sync::Arc;
 
     fn make_test_raptor() -> Arc<RaptorData> {
         let mut stops = FxHashMap::default();

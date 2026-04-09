@@ -6,7 +6,6 @@
 
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::path::Path;
 use tracing::{info, warn};
 
@@ -260,26 +259,20 @@ pub fn parse_time(time_str: &str) -> Option<u32> {
 /// This is a fast way to detect changes without reading file contents.
 /// Returns a hex-encoded hash string.
 pub fn gtfs_fingerprint(data_dir: &Path) -> String {
-    let files = [
-        "agency.txt",
-        "routes.txt",
-        "stops.txt",
-        "trips.txt",
-        "stop_times.txt",
-        "calendar.txt",
-        "calendar_dates.txt",
-        "transfers.txt",
-        "pathways.txt",
-    ];
-    let mut hasher = Sha256::new();
-    for name in &files {
-        let path = data_dir.join(name);
-        if let Ok(meta) = std::fs::metadata(&path) {
-            hasher.update(name.as_bytes());
-            hasher.update(meta.len().to_le_bytes());
-        }
-    }
-    format!("{:x}", hasher.finalize())
+    crate::util::dir_fingerprint(
+        data_dir,
+        &[
+            "agency.txt",
+            "routes.txt",
+            "stops.txt",
+            "trips.txt",
+            "stop_times.txt",
+            "calendar.txt",
+            "calendar_dates.txt",
+            "transfers.txt",
+            "pathways.txt",
+        ],
+    )
 }
 
 #[cfg(test)]

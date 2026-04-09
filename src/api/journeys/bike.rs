@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
 use crate::config::AppConfig;
+use crate::util::parse_from_to;
+use super::valhalla::{DirectionsOptions, Location, RawManeuver, RouteRequest, RouteResponse};
 
 // ---------------------------------------------------------------------------
 // Query parameters
@@ -28,68 +30,12 @@ pub struct BikeQuery {
 }
 
 // ---------------------------------------------------------------------------
-// Valhalla request / response types
-// ---------------------------------------------------------------------------
-
-#[derive(Clone, Serialize)]
-struct ValhallaLocation {
-    lat: f64,
-    lon: f64,
-}
-
-#[derive(Serialize)]
-struct ValhallaRequest {
-    locations: Vec<ValhallaLocation>,
-    costing: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    costing_options: Option<serde_json::Value>,
-    directions_options: ValhallaDirectionsOptions,
-}
-
-#[derive(Serialize)]
-struct ValhallaDirectionsOptions {
-    units: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct ValhallaResponse {
-    trip: ValhallaTrip,
-}
-
-#[derive(Debug, Deserialize)]
-struct ValhallaTrip {
-    legs: Vec<ValhallaLeg>,
-    summary: ValhallaSummary,
-}
-
-#[derive(Debug, Deserialize)]
-struct ValhallaLeg {
-    shape: String,
-    maneuvers: Vec<ValhallaManeuver>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ValhallaManeuver {
-    instruction: String,
-    length: f64,
-    time: f64,
-    #[serde(rename = "type")]
-    maneuver_type: u32,
-}
-
-#[derive(Debug, Deserialize)]
-struct ValhallaSummary {
-    length: f64,
-    time: f64,
-}
-
-// ---------------------------------------------------------------------------
 // Elevation via Valhalla /height API
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize)]
 struct HeightRequest {
-    shape: Vec<ValhallaLocation>,
+    shape: Vec<Location>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -148,18 +94,6 @@ pub struct Maneuver {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Parse a `"lon;lat"` string into `(lon, lat)`.
-fn parse_coord(s: &str) -> Option<(f64, f64)> {
-    let parts: Vec<&str> = s.split(';').collect();
-    if parts.len() == 2 {
-        let lon = parts[0].parse::<f64>().ok()?;
-        let lat = parts[1].parse::<f64>().ok()?;
-        Some((lon, lat))
-    } else {
-        None
-    }
-}
-
 /// Decode a Valhalla encoded polyline (precision 6) into a list of (lat, lon).
 fn decode_polyline(encoded: &str) -> Vec<(f64, f64)> {
     let mut coords = Vec::new();
@@ -169,7 +103,6 @@ fn decode_polyline(encoded: &str) -> Vec<(f64, f64)> {
     let bytes = encoded.as_bytes();
 
     while i < bytes.len() {
-        // Decode latitude
         let mut shift = 0;
         let mut result: i64 = 0;
         loop {
@@ -177,17 +110,10 @@ fn decode_polyline(encoded: &str) -> Vec<(f64, f64)> {
             i += 1;
             result |= (b & 0x1f) << shift;
             shift += 5;
-            if b < 0x20 {
-                break;
-            }
+            if b < 0x20 { break; }
         }
-        lat += if result & 1 != 0 {
-            !(result >> 1)
-        } else {
-            result >> 1
-        };
+        lat += if result & 1 != 0 { !(result >> 1) } else { result >> 1 };
 
-        // Decode longitude
         shift = 0;
         result = 0;
         loop {
@@ -195,15 +121,9 @@ fn decode_polyline(encoded: &str) -> Vec<(f64, f64)> {
             i += 1;
             result |= (b & 0x1f) << shift;
             shift += 5;
-            if b < 0x20 {
-                break;
-            }
+            if b < 0x20 { break; }
         }
-        lon += if result & 1 != 0 {
-            !(result >> 1)
-        } else {
-            result >> 1
-        };
+        lon += if result & 1 != 0 { !(result >> 1) } else { result >> 1 };
 
         coords.push((lat as f64 / 1e6, lon as f64 / 1e6));
     }
@@ -217,18 +137,11 @@ fn compute_elevation(heights: &[f64]) -> (u32, u32) {
     let mut loss: f64 = 0.0;
     for pair in heights.windows(2) {
         let diff = pair[1] - pair[0];
-        if diff > 0.0 {
-            gain += diff;
-        } else {
-            loss -= diff;
-        }
+        if diff > 0.0 { gain += diff; } else { loss -= diff; }
     }
     (gain.round() as u32, loss.round() as u32)
 }
 
-/// E-bike speed factor relative to standard bicycle.
-/// Valhalla's bicycle costing assumes ~18 km/h average.
-/// E-bikes average ~25 km/h, so duration is scaled by 18/25.
 /// Build Valhalla bicycle costing_options from a bike profile.
 fn bike_costing_options(profile: &crate::config::BikeProfile) -> serde_json::Value {
     serde_json::json!({
@@ -241,8 +154,11 @@ fn bike_costing_options(profile: &crate::config::BikeProfile) -> serde_json::Val
     })
 }
 
-/// Bike profile definitions: (config field accessor, response type name).
+/// Bike profile definitions.
 const BIKE_PROFILES: &[&str] = &["city", "ebike", "road"];
+
+/// Maximum number of sampled points sent to Valhalla's /height endpoint.
+const ELEVATION_SAMPLE_LIMIT: usize = 200;
 
 /// Fetch elevation data from Valhalla's /height endpoint.
 async fn fetch_elevation(
@@ -250,19 +166,11 @@ async fn fetch_elevation(
     valhalla_base: &str,
     coords: &[(f64, f64)],
 ) -> Vec<f64> {
-    // Sample at most 200 points to avoid oversized requests
-    let step = if coords.len() > 200 {
-        coords.len() / 200
-    } else {
-        1
-    };
-    let sampled: Vec<ValhallaLocation> = coords
+    let step = if coords.len() > ELEVATION_SAMPLE_LIMIT { coords.len() / ELEVATION_SAMPLE_LIMIT } else { 1 };
+    let sampled: Vec<Location> = coords
         .iter()
         .step_by(step)
-        .map(|(lat, lon)| ValhallaLocation {
-            lat: *lat,
-            lon: *lon,
-        })
+        .map(|(lat, lon)| Location { lat: *lat, lon: *lon })
         .collect();
 
     let height_url = format!("{}/height", valhalla_base);
@@ -274,8 +182,27 @@ async fn fetch_elevation(
             .await
             .map(|h| h.height)
             .unwrap_or_default(),
-        _ => Vec::new(),
+        Ok(resp) => {
+            tracing::debug!("Valhalla /height returned {}", resp.status());
+            Vec::new()
+        }
+        Err(e) => {
+            tracing::debug!("Valhalla /height unreachable: {e}");
+            Vec::new()
+        }
     }
+}
+
+/// Convert raw Valhalla maneuvers to bike maneuvers.
+fn convert_maneuvers(raw: &[RawManeuver]) -> Vec<Maneuver> {
+    raw.iter()
+        .map(|m| Maneuver {
+            instruction: m.instruction.clone(),
+            maneuver_type: m.maneuver_type,
+            distance: (m.length * 1000.0) as u32,
+            duration: m.time as u32,
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -299,39 +226,21 @@ async fn fetch_elevation(
 )]
 #[get("/api/journeys/bike")]
 pub async fn get_bike(query: web::Query<BikeQuery>, config: web::Data<AppConfig>) -> HttpResponse {
-    let (from_lon, from_lat) = match parse_coord(&query.from) {
-        Some(c) => c,
-        None => {
-            return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": { "id": "bad_request", "message": "'from' must be in 'lon;lat' format" }
-            }));
-        }
-    };
-
-    let (to_lon, to_lat) = match parse_coord(&query.to) {
-        Some(c) => c,
-        None => {
-            return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": { "id": "bad_request", "message": "'to' must be in 'lon;lat' format" }
-            }));
-        }
+    let (from_lon, from_lat, to_lon, to_lat) = match parse_from_to(&query.from, &query.to) {
+        Ok(c) => c,
+        Err(e) => return e,
     };
 
     let valhalla_base = format!("http://{}:{}", config.valhalla.host, config.valhalla.port);
     let valhalla_url = format!("{}/route", valhalla_base);
 
     let locations = vec![
-        ValhallaLocation {
-            lat: from_lat,
-            lon: from_lon,
-        },
-        ValhallaLocation {
-            lat: to_lat,
-            lon: to_lon,
-        },
+        Location { lat: from_lat, lon: from_lon },
+        Location { lat: to_lat, lon: to_lon },
     ];
 
     let client = reqwest::Client::new();
+    let include_maneuvers = query.maneuvers.unwrap_or(false);
 
     let profiles = [
         (&config.bike.city, BIKE_PROFILES[0]),
@@ -342,20 +251,15 @@ pub async fn get_bike(query: web::Query<BikeQuery>, config: web::Data<AppConfig>
     let mut journeys = Vec::with_capacity(profiles.len());
 
     for (profile, type_name) in &profiles {
-        let req = ValhallaRequest {
+        let req = RouteRequest {
             locations: locations.clone(),
             costing: "bicycle".to_string(),
             costing_options: Some(bike_costing_options(profile)),
-            directions_options: ValhallaDirectionsOptions {
-                units: "kilometers".to_string(),
-            },
+            directions_options: DirectionsOptions { units: "kilometers".to_string() },
         };
 
-        let include_maneuvers = query.maneuvers.unwrap_or(false);
         let resp = client.post(&valhalla_url).json(&req).send().await;
-        match process_valhalla_response(resp, type_name, &client, &valhalla_base, include_maneuvers)
-            .await
-        {
+        match process_response(resp, type_name, &client, &valhalla_base, include_maneuvers).await {
             Ok(j) => journeys.push(j),
             Err(e) => return e,
         }
@@ -365,7 +269,7 @@ pub async fn get_bike(query: web::Query<BikeQuery>, config: web::Data<AppConfig>
 }
 
 /// Process a Valhalla route response into a BikeJourney, or return an HTTP error.
-async fn process_valhalla_response(
+async fn process_response(
     resp: Result<reqwest::Response, reqwest::Error>,
     bike_type: &str,
     client: &reqwest::Client,
@@ -386,7 +290,7 @@ async fn process_valhalla_response(
         })));
     }
 
-    let valhalla_resp: ValhallaResponse = resp.json().await.map_err(|e| {
+    let valhalla_resp: RouteResponse = resp.json().await.map_err(|e| {
         HttpResponse::BadGateway().json(serde_json::json!({
             "error": { "id": "valhalla_error", "message": format!("Invalid Valhalla response: {e}") }
         }))
@@ -404,17 +308,7 @@ async fn process_valhalla_response(
     let (elevation_gain, elevation_loss) = compute_elevation(&heights);
 
     let maneuvers = if include_maneuvers {
-        Some(
-            leg.maneuvers
-                .iter()
-                .map(|m| Maneuver {
-                    instruction: m.instruction.clone(),
-                    maneuver_type: m.maneuver_type,
-                    distance: (m.length * 1000.0) as u32,
-                    duration: m.time as u32,
-                })
-                .collect(),
-        )
+        Some(convert_maneuvers(&leg.maneuvers))
     } else {
         None
     };

@@ -85,6 +85,11 @@ else
     "$ROOT/target/release/glove" &
     BACKEND_PID=$!
 
+    # Start frontend static server
+    log "Starting frontend..."
+    npx serve "$ROOT/target/portal" -l 3000 -s &
+    FRONTEND_PID=$!
+
     # Wait for backend to be ready
     for i in $(seq 1 60); do
         sleep 1
@@ -100,7 +105,8 @@ else
     echo ""
     ok "==========================="
     ok "  Glove is running"
-    ok "  API: http://localhost:8080"
+    ok "  Frontend: http://localhost:3000"
+    ok "  API:      http://localhost:8080"
     ok "==========================="
     echo ""
     log "Press Ctrl+C to stop."

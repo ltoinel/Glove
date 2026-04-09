@@ -4,7 +4,7 @@
 //! the GTFS data and RAPTOR index, then starts the HTTP server.
 //!
 //! The RAPTOR data is wrapped in an [`ArcSwap`] to allow hot-reloading
-//! GTFS files via `POST /api/reload` without restarting the server.
+//! GTFS files via `POST /api/gtfs/reload` without restarting the server.
 
 mod api;
 mod ban;
@@ -12,6 +12,7 @@ mod config;
 mod gtfs;
 mod raptor;
 mod text;
+mod util;
 
 use actix_cors::Cors;
 use actix_governor::{Governor, GovernorConfigBuilder};
@@ -97,7 +98,7 @@ async fn main() -> std::io::Result<()> {
 
     // Warn if no API key is set — admin endpoints will be disabled
     if config.server.api_key.is_empty() {
-        warn!("No server.api_key configured — POST /api/reload is DISABLED");
+        warn!("No server.api_key configured — POST /api/gtfs/reload is DISABLED");
     }
 
     let bind = config.server.bind.clone();
@@ -123,6 +124,7 @@ async fn main() -> std::io::Result<()> {
             api::get_places,
             api::get_status,
             api::get_metrics,
+            api::get_validate,
             api::post_reload,
         ),
         components(schemas(
@@ -143,9 +145,14 @@ async fn main() -> std::io::Result<()> {
             api::places::PlacesResponse,
             api::places::PlaceResult,
             api::status::StatusResponse,
-            api::status::ReloadResponse,
             api::status::GtfsStats,
             api::status::RaptorStats,
+            api::gtfs::ValidateResponse,
+            api::gtfs::ValidationSummary,
+            api::gtfs::ValidationIssue,
+            api::gtfs::Severity,
+            api::gtfs::Category,
+            api::gtfs::ReloadResponse,
             api::Section,
             api::Place,
             api::StopPointRef,
@@ -155,7 +162,8 @@ async fn main() -> std::io::Result<()> {
         tags(
             (name = "Journeys", description = "Journey planning"),
             (name = "Places", description = "Stop autocomplete search"),
-            (name = "Status", description = "Engine status and data reload"),
+            (name = "Status", description = "Engine status"),
+            (name = "GTFS", description = "GTFS data validation and management"),
         )
     )]
     struct ApiDoc;
@@ -209,6 +217,7 @@ async fn main() -> std::io::Result<()> {
             .service(api::get_car)
             .service(api::get_journeys)
             .service(api::get_metrics)
+            .service(api::get_validate)
             .service(api::post_reload)
             .route(
                 "/api-docs/openapi.json",

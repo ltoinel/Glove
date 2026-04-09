@@ -10,57 +10,69 @@ use utoipa::ToSchema;
 // Valhalla request / response types
 // ---------------------------------------------------------------------------
 
-#[derive(Serialize)]
+/// A geographic location for Valhalla requests.
+#[derive(Clone, Serialize)]
 pub struct Location {
     pub lat: f64,
     pub lon: f64,
 }
 
+/// Valhalla route request body.
 #[derive(Serialize)]
-struct RouteRequest {
-    locations: Vec<Location>,
-    costing: String,
+pub struct RouteRequest {
+    pub locations: Vec<Location>,
+    pub costing: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    costing_options: Option<serde_json::Value>,
-    directions_options: DirectionsOptions,
+    pub costing_options: Option<serde_json::Value>,
+    pub directions_options: DirectionsOptions,
 }
 
+/// Directions options within a Valhalla request.
 #[derive(Serialize)]
-struct DirectionsOptions {
-    units: String,
+pub struct DirectionsOptions {
+    pub units: String,
 }
 
+/// Valhalla route response.
 #[derive(Deserialize)]
-struct RouteResponse {
-    trip: Trip,
+pub struct RouteResponse {
+    pub trip: Trip,
 }
 
+/// Trip within a Valhalla route response.
 #[derive(Deserialize)]
-struct Trip {
-    legs: Vec<Leg>,
-    summary: Summary,
+pub struct Trip {
+    pub legs: Vec<Leg>,
+    pub summary: Summary,
 }
 
+/// A leg of a Valhalla route.
 #[derive(Deserialize)]
-struct Leg {
-    shape: String,
+pub struct Leg {
+    pub shape: String,
     #[serde(default)]
-    maneuvers: Vec<ValhallaManeuver>,
+    pub maneuvers: Vec<RawManeuver>,
 }
 
+/// A raw maneuver from Valhalla (before unit conversion).
 #[derive(Deserialize)]
-struct ValhallaManeuver {
-    instruction: String,
-    length: f64,
-    time: f64,
+pub struct RawManeuver {
+    pub instruction: String,
+    /// Distance in kilometers (Valhalla unit).
+    pub length: f64,
+    /// Duration in seconds.
+    pub time: f64,
     #[serde(rename = "type")]
-    maneuver_type: u32,
+    pub maneuver_type: u32,
 }
 
+/// Summary statistics for a Valhalla route.
 #[derive(Deserialize)]
-struct Summary {
-    length: f64,
-    time: f64,
+pub struct Summary {
+    /// Total distance in kilometers.
+    pub length: f64,
+    /// Total duration in seconds.
+    pub time: f64,
 }
 
 // ---------------------------------------------------------------------------
@@ -98,20 +110,38 @@ pub struct WalkLeg {
 
 /// Compute a pedestrian route between two coordinates via Valhalla.
 ///
+/// When `indoor_friendly` is true, step and elevator penalties are removed
+/// to favor underground passages in stations. This is used for transfer
+/// sections where stairs/escalators/elevators are the normal path.
+///
 /// Returns `None` if Valhalla is unreachable or returns an error.
 pub async fn pedestrian_route(
     valhalla_base: &str,
     from: (f64, f64), // (lon, lat)
     to: (f64, f64),   // (lon, lat)
     walking_speed: Option<f64>,
+    indoor_friendly: bool,
 ) -> Option<WalkLeg> {
     let costing_options = {
-        let mut opts = serde_json::json!({
-            "pedestrian": {
-                "step_penalty": 30,
-                "elevator_penalty": 60
-            }
-        });
+        let mut opts = if indoor_friendly {
+            // For station transfers: no penalty for stairs/elevators/escalators
+            // since they are the expected path through underground passages
+            serde_json::json!({
+                "pedestrian": {
+                    "step_penalty": 0,
+                    "elevator_penalty": 0,
+                    "use_tunnels": 1.0
+                }
+            })
+        } else {
+            // For first/last mile: penalize stairs (user may have luggage)
+            serde_json::json!({
+                "pedestrian": {
+                    "step_penalty": 30,
+                    "elevator_penalty": 60
+                }
+            })
+        };
         if let Some(speed) = walking_speed {
             opts["pedestrian"]["walking_speed"] = serde_json::json!(speed.clamp(0.5, 25.5));
         }

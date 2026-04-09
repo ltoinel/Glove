@@ -122,6 +122,306 @@ pub struct RaptorData {
 }
 
 // ---------------------------------------------------------------------------
+// Index build — sub-functions
+// ---------------------------------------------------------------------------
+
+/// Assign numeric indices to all stops.
+fn build_stop_index(gtfs: &GtfsData) -> (FxHashMap<String, usize>, Vec<gtfs::Stop>) {
+    let mut stop_index: FxHashMap<String, usize> = FxHashMap::default();
+    let mut stops: Vec<gtfs::Stop> = Vec::with_capacity(gtfs.stops.len());
+    for (id, stop) in &gtfs.stops {
+        let idx = stops.len();
+        stop_index.insert(id.clone(), idx);
+        stops.push(stop.clone());
+    }
+    info!("{} stops indexed", stops.len());
+    (stop_index, stops)
+}
+
+/// Intern service IDs from calendars, calendar_dates, and trips for O(1) lookups.
+fn intern_services(gtfs: &GtfsData) -> (FxHashMap<String, usize>, Vec<String>) {
+    let mut index: FxHashMap<String, usize> = FxHashMap::default();
+    let mut ids: Vec<String> = Vec::new();
+
+    let mut insert = |service_id: &str| {
+        if !index.contains_key(service_id) {
+            let idx = ids.len();
+            index.insert(service_id.to_string(), idx);
+            ids.push(service_id.to_string());
+        }
+    };
+
+    for service_id in gtfs.calendars.keys() {
+        insert(service_id);
+    }
+    for cd in &gtfs.calendar_dates {
+        insert(&cd.service_id);
+    }
+    for trip in gtfs.trips.values() {
+        insert(&trip.service_id);
+    }
+    info!("{} services interned", ids.len());
+    (index, ids)
+}
+
+/// Group stop_times into route patterns (trips with identical stop sequences).
+fn build_patterns(
+    gtfs: &GtfsData,
+    stop_index: &FxHashMap<String, usize>,
+    service_index: &FxHashMap<String, usize>,
+) -> Vec<Pattern> {
+    info!("Grouping stop_times by trip...");
+    let mut trip_stop_times: FxHashMap<&str, Vec<(u32, u32, u32, &str)>> = FxHashMap::default();
+    let mut skipped_times = 0u64;
+    for st in &gtfs.stop_times {
+        let arr = match gtfs::parse_time(&st.arrival_time) {
+            Some(t) => t,
+            None => {
+                skipped_times += 1;
+                continue;
+            }
+        };
+        let dep = match gtfs::parse_time(&st.departure_time) {
+            Some(t) => t,
+            None => {
+                skipped_times += 1;
+                continue;
+            }
+        };
+        trip_stop_times
+            .entry(&st.trip_id)
+            .or_default()
+            .push((st.stop_sequence, arr, dep, &st.stop_id));
+    }
+    if skipped_times > 0 {
+        tracing::warn!("{skipped_times} stop_times skipped (unparseable arrival/departure time)");
+    }
+    for times in trip_stop_times.values_mut() {
+        times.sort_by_key(|t| t.0);
+    }
+    info!("{} trips with stop_times", trip_stop_times.len());
+
+    info!("Building route patterns...");
+    let mut pattern_map: FxHashMap<Vec<usize>, usize> = FxHashMap::default();
+    let mut patterns: Vec<Pattern> = Vec::new();
+
+    for (trip_id, times) in &trip_stop_times {
+        let trip = match gtfs.trips.get(*trip_id) {
+            Some(t) => t,
+            None => continue,
+        };
+
+        let stop_seq: Vec<usize> = times
+            .iter()
+            .filter_map(|(_, _, _, sid)| stop_index.get(*sid).copied())
+            .collect();
+
+        if stop_seq.len() < 2 {
+            continue;
+        }
+
+        let stop_times_parsed: Vec<(u32, u32)> =
+            times.iter().map(|(_, arr, dep, _)| (*arr, *dep)).collect();
+
+        if stop_seq.len() != stop_times_parsed.len() {
+            continue;
+        }
+
+        let svc_idx = match service_index.get(&trip.service_id).copied() {
+            Some(idx) => idx,
+            None => {
+                tracing::warn!("trip {} references unknown service_id {}", trip_id, trip.service_id);
+                continue;
+            }
+        };
+
+        let pattern_trip = PatternTrip {
+            service_idx: svc_idx,
+            stop_times: stop_times_parsed,
+            trip_id: trip_id.to_string(),
+            headsign: trip.trip_headsign.clone(),
+        };
+
+        if let Some(&pat_idx) = pattern_map.get(&stop_seq) {
+            patterns[pat_idx].trips.push(pattern_trip);
+        } else {
+            let pat_idx = patterns.len();
+            pattern_map.insert(stop_seq.clone(), pat_idx);
+            patterns.push(Pattern {
+                route_id: trip.route_id.clone(),
+                stops: stop_seq,
+                trips: vec![pattern_trip],
+            });
+        }
+    }
+
+    patterns
+}
+
+/// Build the reverse index: stop_idx → Vec<(pattern_idx, position_in_pattern)>.
+fn build_stop_patterns(patterns: &[Pattern], num_stops: usize) -> Vec<Vec<(usize, usize)>> {
+    let mut stop_patterns: Vec<Vec<(usize, usize)>> = vec![Vec::new(); num_stops];
+    for (pat_idx, pat) in patterns.iter().enumerate() {
+        for (pos, &stop_idx) in pat.stops.iter().enumerate() {
+            stop_patterns[stop_idx].push((pat_idx, pos));
+        }
+    }
+    stop_patterns
+}
+
+/// Build the transfer graph: GTFS explicit transfers + parent station implicit transfers.
+fn build_transfers(
+    gtfs: &GtfsData,
+    stop_index: &FxHashMap<String, usize>,
+    stops: &[gtfs::Stop],
+    default_transfer_time: u32,
+    num_stops: usize,
+) -> Vec<Vec<(usize, u32)>> {
+    info!("Building transfers index...");
+    let mut stop_transfers: Vec<Vec<(usize, u32)>> = vec![Vec::new(); num_stops];
+
+    for t in &gtfs.transfers {
+        if let (Some(&from), Some(&to)) = (
+            stop_index.get(&t.from_stop_id),
+            stop_index.get(&t.to_stop_id),
+        ) {
+            let duration = t.min_transfer_time.unwrap_or(default_transfer_time);
+            stop_transfers[from].push((to, duration));
+        }
+    }
+
+    // Pathway graph for realistic in-station walking times
+    info!("Building pathway graph ({} pathways)...", gtfs.pathways.len());
+    let mut pathway_graph: FxHashMap<&str, Vec<(&str, u32)>> = FxHashMap::default();
+    for p in &gtfs.pathways {
+        if let Some(time) = p.traversal_time {
+            pathway_graph
+                .entry(&p.from_stop_id)
+                .or_default()
+                .push((&p.to_stop_id, time));
+            if p.is_bidirectional == 1 {
+                pathway_graph
+                    .entry(&p.to_stop_id)
+                    .or_default()
+                    .push((&p.from_stop_id, time));
+            }
+        }
+    }
+
+    // Implicit transfers between stops sharing the same parent station
+    info!("Building parent station transfers...");
+    let mut parent_stops: FxHashMap<&str, Vec<usize>> = FxHashMap::default();
+    for (idx, stop) in stops.iter().enumerate() {
+        if !stop.parent_station.is_empty() {
+            parent_stops
+                .entry(&stop.parent_station)
+                .or_default()
+                .push(idx);
+        }
+    }
+
+    let mut parent_transfer_count = 0u64;
+    let mut pathway_transfer_count = 0u64;
+    for siblings in parent_stops.values() {
+        if siblings.len() < 2 {
+            continue;
+        }
+        for &a in siblings {
+            let existing: FxHashSet<usize> =
+                stop_transfers[a].iter().map(|&(t, _)| t).collect();
+            for &b in siblings {
+                if a != b && !existing.contains(&b) {
+                    let duration =
+                        pathway_dijkstra(&pathway_graph, &stops[a].stop_id, &stops[b].stop_id)
+                            .unwrap_or(default_transfer_time);
+                    if duration != default_transfer_time {
+                        pathway_transfer_count += 1;
+                    }
+                    stop_transfers[a].push((b, duration));
+                    parent_transfer_count += 1;
+                }
+            }
+        }
+    }
+    info!(
+        "{} parent station transfers added ({} with pathway times)",
+        parent_transfer_count, pathway_transfer_count
+    );
+
+    stop_transfers
+}
+
+/// Mini-Dijkstra on the pathway graph to find shortest traversal time between two stops.
+fn pathway_dijkstra<'a>(
+    graph: &FxHashMap<&'a str, Vec<(&'a str, u32)>>,
+    from_id: &str,
+    to_id: &str,
+) -> Option<u32> {
+    if graph.is_empty() {
+        return None;
+    }
+    let mut dist: FxHashMap<&str, u32> = FxHashMap::default();
+    let mut queue: std::collections::BinaryHeap<std::cmp::Reverse<(u32, &str)>> =
+        std::collections::BinaryHeap::new();
+    dist.insert(from_id, 0);
+    queue.push(std::cmp::Reverse((0, from_id)));
+    while let Some(std::cmp::Reverse((cost, node))) = queue.pop() {
+        if node == to_id {
+            return Some(cost);
+        }
+        if cost > dist.get(node).copied().unwrap_or(u32::MAX) {
+            continue;
+        }
+        if let Some(neighbors) = graph.get(node) {
+            for &(next, time) in neighbors {
+                let new_cost = cost + time;
+                if new_cost < dist.get(next).copied().unwrap_or(u32::MAX) {
+                    dist.insert(next, new_cost);
+                    queue.push(std::cmp::Reverse((new_cost, next)));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Build calendar_exceptions: service_id → { date → exception_type }.
+fn build_calendar_exceptions(
+    gtfs: &GtfsData,
+) -> FxHashMap<String, FxHashMap<String, u8>> {
+    let mut exceptions: FxHashMap<String, FxHashMap<String, u8>> = FxHashMap::default();
+    for cd in &gtfs.calendar_dates {
+        exceptions
+            .entry(cd.service_id.clone())
+            .or_default()
+            .insert(cd.date.clone(), cd.exception_type);
+    }
+    exceptions
+}
+
+/// Build the autocomplete search index from served stops with names.
+fn build_search_index(
+    stops: &[gtfs::Stop],
+    stop_patterns: &[Vec<(usize, usize)>],
+) -> Vec<SearchEntry> {
+    info!("Building search index...");
+    let mut search_index: Vec<SearchEntry> = Vec::new();
+    for (idx, stop) in stops.iter().enumerate() {
+        if stop.stop_name.is_empty() || stop_patterns[idx].is_empty() {
+            continue;
+        }
+        search_index.push(SearchEntry {
+            stop_idx: idx,
+            name_lower: normalize(&stop.stop_name),
+        });
+    }
+    search_index.sort_by(|a, b| a.name_lower.cmp(&b.name_lower));
+    search_index.dedup_by(|a, b| a.name_lower == b.name_lower);
+    info!("{} searchable stops", search_index.len());
+    search_index
+}
+
+// ---------------------------------------------------------------------------
 // Index build
 // ---------------------------------------------------------------------------
 
@@ -146,261 +446,35 @@ impl RaptorData {
         let raw_calendar_dates = gtfs.calendar_dates.len();
         let raw_transfers = gtfs.transfers.len();
 
-        // Step 1: Assign numeric indices to stops
-        let mut stop_index: FxHashMap<String, usize> = FxHashMap::default();
-        let mut stops: Vec<gtfs::Stop> = Vec::with_capacity(gtfs.stops.len());
-
-        for (id, stop) in &gtfs.stops {
-            let idx = stops.len();
-            stop_index.insert(id.clone(), idx);
-            stops.push(stop.clone());
-        }
-
+        let (stop_index, stops) = build_stop_index(&gtfs);
         let num_stops = stops.len();
-        info!("{} stops indexed", num_stops);
 
-        // Step 2: Intern service_ids for O(1) active-service checks
-        let mut service_index: FxHashMap<String, usize> = FxHashMap::default();
-        let mut service_ids: Vec<String> = Vec::new();
+        let (service_index, service_ids) = intern_services(&gtfs);
 
-        for service_id in gtfs.calendars.keys() {
-            let idx = service_ids.len();
-            service_index.insert(service_id.clone(), idx);
-            service_ids.push(service_id.clone());
-        }
-        for cd in &gtfs.calendar_dates {
-            if !service_index.contains_key(&cd.service_id) {
-                let idx = service_ids.len();
-                service_index.insert(cd.service_id.clone(), idx);
-                service_ids.push(cd.service_id.clone());
-            }
-        }
-        for trip in gtfs.trips.values() {
-            if !service_index.contains_key(&trip.service_id) {
-                let idx = service_ids.len();
-                service_index.insert(trip.service_id.clone(), idx);
-                service_ids.push(trip.service_id.clone());
-            }
-        }
-        info!("{} services interned", service_ids.len());
-
-        // Step 3: Group stop_times by trip_id and sort by sequence
-        info!("Grouping stop_times by trip...");
-        let mut trip_stop_times: FxHashMap<&str, Vec<(u32, u32, u32, &str)>> = FxHashMap::default();
-        for st in &gtfs.stop_times {
-            let arr = gtfs::parse_time(&st.arrival_time).unwrap_or(0);
-            let dep = gtfs::parse_time(&st.departure_time).unwrap_or(0);
-            trip_stop_times.entry(&st.trip_id).or_default().push((
-                st.stop_sequence,
-                arr,
-                dep,
-                &st.stop_id,
-            ));
-        }
-        for times in trip_stop_times.values_mut() {
-            times.sort_by_key(|t| t.0);
-        }
-        info!("{} trips with stop_times", trip_stop_times.len());
-
-        // Step 4: Build route patterns by grouping trips with identical stop sequences
-        info!("Building route patterns...");
-        let mut pattern_map: FxHashMap<Vec<usize>, usize> = FxHashMap::default();
-        let mut patterns: Vec<Pattern> = Vec::new();
-
-        for (trip_id, times) in &trip_stop_times {
-            let trip = match gtfs.trips.get(*trip_id) {
-                Some(t) => t,
-                None => continue,
-            };
-
-            let stop_seq: Vec<usize> = times
-                .iter()
-                .filter_map(|(_, _, _, sid)| stop_index.get(*sid).copied())
-                .collect();
-
-            if stop_seq.len() < 2 {
-                continue;
-            }
-
-            let stop_times_parsed: Vec<(u32, u32)> =
-                times.iter().map(|(_, arr, dep, _)| (*arr, *dep)).collect();
-
-            if stop_seq.len() != stop_times_parsed.len() {
-                continue;
-            }
-
-            let svc_idx = service_index.get(&trip.service_id).copied().unwrap_or(0);
-
-            let pattern_trip = PatternTrip {
-                service_idx: svc_idx,
-                stop_times: stop_times_parsed,
-                trip_id: trip_id.to_string(),
-                headsign: trip.trip_headsign.clone(),
-            };
-
-            if let Some(&pat_idx) = pattern_map.get(&stop_seq) {
-                patterns[pat_idx].trips.push(pattern_trip);
-            } else {
-                let pat_idx = patterns.len();
-                pattern_map.insert(stop_seq.clone(), pat_idx);
-                patterns.push(Pattern {
-                    route_id: trip.route_id.clone(),
-                    stops: stop_seq,
-                    trips: vec![pattern_trip],
-                });
-            }
-        }
-
+        let mut patterns = build_patterns(&gtfs, &stop_index, &service_index);
         // Sort trips within each pattern by departure at first stop
         for pat in &mut patterns {
             pat.trips.sort_by_key(|t| t.stop_times[0].1);
         }
         info!("{} route patterns", patterns.len());
 
-        // Step 5: Build stop → patterns reverse index
-        let mut stop_patterns: Vec<Vec<(usize, usize)>> = vec![Vec::new(); num_stops];
-        for (pat_idx, pat) in patterns.iter().enumerate() {
-            for (pos, &stop_idx) in pat.stops.iter().enumerate() {
-                stop_patterns[stop_idx].push((pat_idx, pos));
-            }
-        }
+        // Build stop → patterns reverse index
+        let stop_patterns = build_stop_patterns(&patterns, num_stops);
 
-        // Step 6: Build transfer graph (GTFS transfers + parent station links)
-        info!("Building transfers index...");
-        let mut stop_transfers: Vec<Vec<(usize, u32)>> = vec![Vec::new(); num_stops];
-        for t in &gtfs.transfers {
-            if let (Some(&from), Some(&to)) = (
-                stop_index.get(&t.from_stop_id),
-                stop_index.get(&t.to_stop_id),
-            ) {
-                let duration = t.min_transfer_time.unwrap_or(default_transfer_time);
-                stop_transfers[from].push((to, duration));
-            }
-        }
-
-        // Build pathway graph: stop_id → Vec<(stop_id, traversal_time)>
-        // Pathways provide realistic walking times within stations
-        info!(
-            "Building pathway graph ({} pathways)...",
-            gtfs.pathways.len()
-        );
-        let mut pathway_graph: FxHashMap<&str, Vec<(&str, u32)>> = FxHashMap::default();
-        for p in &gtfs.pathways {
-            if let Some(time) = p.traversal_time {
-                pathway_graph
-                    .entry(&p.from_stop_id)
-                    .or_default()
-                    .push((&p.to_stop_id, time));
-                if p.is_bidirectional == 1 {
-                    pathway_graph
-                        .entry(&p.to_stop_id)
-                        .or_default()
-                        .push((&p.from_stop_id, time));
-                }
-            }
-        }
-
-        // Add implicit transfers between stops sharing the same parent station
-        // Use pathway traversal times when available, otherwise default_transfer_time
-        info!("Building parent station transfers...");
-        let mut parent_stops: FxHashMap<&str, Vec<usize>> = FxHashMap::default();
-        for (idx, stop) in stops.iter().enumerate() {
-            if !stop.parent_station.is_empty() {
-                parent_stops
-                    .entry(&stop.parent_station)
-                    .or_default()
-                    .push(idx);
-            }
-        }
-
-        // Compute shortest pathway times between stops via BFS on the pathway graph.
-        // For two sibling stops A and B in the same station, finds the shortest
-        // path through intermediate nodes (entrances, platforms) using Dijkstra.
-        let pathway_time = |from_id: &str, to_id: &str| -> Option<u32> {
-            if pathway_graph.is_empty() {
-                return None;
-            }
-            // Mini-Dijkstra on the pathway graph
-            let mut dist: FxHashMap<&str, u32> = FxHashMap::default();
-            let mut queue: std::collections::BinaryHeap<std::cmp::Reverse<(u32, &str)>> =
-                std::collections::BinaryHeap::new();
-            dist.insert(from_id, 0);
-            queue.push(std::cmp::Reverse((0, from_id)));
-            while let Some(std::cmp::Reverse((cost, node))) = queue.pop() {
-                if node == to_id {
-                    return Some(cost);
-                }
-                if cost > dist.get(node).copied().unwrap_or(u32::MAX) {
-                    continue;
-                }
-                if let Some(neighbors) = pathway_graph.get(node) {
-                    for &(next, time) in neighbors {
-                        let new_cost = cost + time;
-                        if new_cost < dist.get(next).copied().unwrap_or(u32::MAX) {
-                            dist.insert(next, new_cost);
-                            queue.push(std::cmp::Reverse((new_cost, next)));
-                        }
-                    }
-                }
-            }
-            None
-        };
-
-        let mut parent_transfer_count = 0u64;
-        let mut pathway_transfer_count = 0u64;
-        for siblings in parent_stops.values() {
-            if siblings.len() < 2 {
-                continue;
-            }
-            for &a in siblings {
-                let existing: FxHashSet<usize> =
-                    stop_transfers[a].iter().map(|&(t, _)| t).collect();
-                for &b in siblings {
-                    if a != b && !existing.contains(&b) {
-                        let duration = pathway_time(&stops[a].stop_id, &stops[b].stop_id)
-                            .unwrap_or(default_transfer_time);
-                        if duration != default_transfer_time {
-                            pathway_transfer_count += 1;
-                        }
-                        stop_transfers[a].push((b, duration));
-                        parent_transfer_count += 1;
-                    }
-                }
-            }
-        }
-        info!(
-            "{} parent station transfers added ({} with pathway times)",
-            parent_transfer_count, pathway_transfer_count
+        // Build transfer graph
+        let stop_transfers = build_transfers(
+            &gtfs,
+            &stop_index,
+            &stops,
+            default_transfer_time,
+            num_stops,
         );
 
-        // Calendar exceptions index: service_id → { date → exception_type } for O(1) lookup
-        let mut calendar_exceptions: FxHashMap<String, FxHashMap<String, u8>> =
-            FxHashMap::default();
-        for cd in &gtfs.calendar_dates {
-            calendar_exceptions
-                .entry(cd.service_id.clone())
-                .or_default()
-                .insert(cd.date.clone(), cd.exception_type);
-        }
-
+        // Calendar exceptions index
+        let calendar_exceptions = build_calendar_exceptions(&gtfs);
         info!("RAPTOR index built");
 
-        // Step 7: Build autocomplete search index
-        // Only index stops that have a name and are served by at least one pattern
-        info!("Building search index...");
-        let mut search_index: Vec<SearchEntry> = Vec::new();
-        for (idx, stop) in stops.iter().enumerate() {
-            if stop.stop_name.is_empty() || stop_patterns[idx].is_empty() {
-                continue;
-            }
-            search_index.push(SearchEntry {
-                stop_idx: idx,
-                name_lower: normalize(&stop.stop_name),
-            });
-        }
-        search_index.sort_by(|a, b| a.name_lower.cmp(&b.name_lower));
-        search_index.dedup_by(|a, b| a.name_lower == b.name_lower);
-        info!("{} searchable stops", search_index.len());
+        let search_index = build_search_index(&stops, &stop_patterns);
 
         let stats = GtfsStats {
             agencies: raw_agencies,
@@ -627,6 +701,13 @@ impl RaptorData {
     /// coordinates. Returns `(stop_idx, walking_time_secs)` pairs, where
     /// walking time is computed from the straight-line distance at the given
     /// `walking_speed` (km/h, defaults to 5).
+    /// Find all served stops within `max_distance_m` meters of the given
+    /// coordinates, plus all sibling stops sharing the same parent station.
+    ///
+    /// This ensures that selecting a station (e.g. "Gare Montparnasse") as
+    /// origin/destination includes all platforms (metro, RER, TGV) in the
+    /// same station complex, even if some platforms are geographically further
+    /// than `max_distance_m` from the search point.
     pub fn find_nearby_stops(
         &self,
         lon: f64,
@@ -637,7 +718,8 @@ impl RaptorData {
         let max_deg = max_distance_m as f64 / 111_000.0 * 1.5;
         let speed_ms = walking_speed_kmh / 3.6; // m/s
 
-        self.stops
+        let mut result: Vec<(usize, u32)> = self
+            .stops
             .iter()
             .enumerate()
             .filter(|(idx, s)| {
@@ -655,7 +737,40 @@ impl RaptorData {
                     None
                 }
             })
-            .collect()
+            .collect();
+
+        // Expand: for each found stop with a parent_station, include all
+        // sibling stops (same parent) that are served by patterns.
+        let found_indices: FxHashSet<usize> = result.iter().map(|&(idx, _)| idx).collect();
+        let parent_stations: FxHashSet<&str> = result
+            .iter()
+            .filter_map(|&(idx, _)| {
+                let parent = &self.stops[idx].parent_station;
+                if parent.is_empty() {
+                    None
+                } else {
+                    Some(parent.as_str())
+                }
+            })
+            .collect();
+
+        if !parent_stations.is_empty() {
+            for (idx, stop) in self.stops.iter().enumerate() {
+                if found_indices.contains(&idx) || self.stop_patterns[idx].is_empty() {
+                    continue;
+                }
+                if !stop.parent_station.is_empty()
+                    && parent_stations.contains(stop.parent_station.as_str())
+                {
+                    // Use the walking time from the coordinate to this sibling stop
+                    let dist = haversine_meters(lat, lon, stop.stop_lat, stop.stop_lon);
+                    let walk_secs = (dist / speed_ms).ceil() as u32;
+                    result.push((idx, walk_secs));
+                }
+            }
+        }
+
+        result
     }
 }
 

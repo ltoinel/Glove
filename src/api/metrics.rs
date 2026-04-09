@@ -102,7 +102,14 @@ fn proc_threads() -> u64 {
 }
 
 fn parse_kb(s: &str) -> u64 {
-    s.trim().trim_end_matches("kB").trim().parse().unwrap_or(0)
+    s.trim()
+        .trim_end_matches("kB")
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| {
+            tracing::debug!("Failed to parse /proc memory value: {:?}", s.trim());
+            0
+        })
 }
 
 // ---------------------------------------------------------------------------

@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
 use crate::config::AppConfig;
+use crate::util::parse_from_to;
+use super::valhalla::{DirectionsOptions, Location, RawManeuver, RouteRequest, RouteResponse};
 
 // ---------------------------------------------------------------------------
 // Query parameters
@@ -24,60 +26,6 @@ pub struct CarQuery {
     pub to: String,
     /// Include turn-by-turn maneuvers in the response (default: false).
     pub maneuvers: Option<bool>,
-}
-
-// ---------------------------------------------------------------------------
-// Valhalla request / response types
-// ---------------------------------------------------------------------------
-
-#[derive(Serialize)]
-struct ValhallaLocation {
-    lat: f64,
-    lon: f64,
-}
-
-#[derive(Serialize)]
-struct ValhallaRequest {
-    locations: Vec<ValhallaLocation>,
-    costing: String,
-    directions_options: ValhallaDirectionsOptions,
-}
-
-#[derive(Serialize)]
-struct ValhallaDirectionsOptions {
-    units: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct ValhallaResponse {
-    trip: ValhallaTrip,
-}
-
-#[derive(Debug, Deserialize)]
-struct ValhallaTrip {
-    legs: Vec<ValhallaLeg>,
-    summary: ValhallaSummary,
-}
-
-#[derive(Debug, Deserialize)]
-struct ValhallaLeg {
-    shape: String,
-    maneuvers: Vec<ValhallaManeuver>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ValhallaManeuver {
-    instruction: String,
-    length: f64,
-    time: f64,
-    #[serde(rename = "type")]
-    maneuver_type: u32,
-}
-
-#[derive(Debug, Deserialize)]
-struct ValhallaSummary {
-    length: f64,
-    time: f64,
 }
 
 // ---------------------------------------------------------------------------
@@ -117,20 +65,16 @@ pub struct Maneuver {
     pub duration: u32,
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Parse a `"lon;lat"` string into `(lon, lat)`.
-fn parse_coord(s: &str) -> Option<(f64, f64)> {
-    let parts: Vec<&str> = s.split(';').collect();
-    if parts.len() == 2 {
-        let lon = parts[0].parse::<f64>().ok()?;
-        let lat = parts[1].parse::<f64>().ok()?;
-        Some((lon, lat))
-    } else {
-        None
-    }
+/// Convert raw Valhalla maneuvers to car maneuvers.
+fn convert_maneuvers(raw: &[RawManeuver]) -> Vec<Maneuver> {
+    raw.iter()
+        .map(|m| Maneuver {
+            instruction: m.instruction.clone(),
+            maneuver_type: m.maneuver_type,
+            distance: (m.length * 1000.0) as u32,
+            duration: m.time as u32,
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -151,22 +95,9 @@ fn parse_coord(s: &str) -> Option<(f64, f64)> {
 )]
 #[get("/api/journeys/car")]
 pub async fn get_car(query: web::Query<CarQuery>, config: web::Data<AppConfig>) -> HttpResponse {
-    let (from_lon, from_lat) = match parse_coord(&query.from) {
-        Some(c) => c,
-        None => {
-            return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": { "id": "bad_request", "message": "'from' must be in 'lon;lat' format" }
-            }));
-        }
-    };
-
-    let (to_lon, to_lat) = match parse_coord(&query.to) {
-        Some(c) => c,
-        None => {
-            return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": { "id": "bad_request", "message": "'to' must be in 'lon;lat' format" }
-            }));
-        }
+    let (from_lon, from_lat, to_lon, to_lat) = match parse_from_to(&query.from, &query.to) {
+        Ok(c) => c,
+        Err(e) => return e,
     };
 
     let valhalla_url = format!(
@@ -174,21 +105,14 @@ pub async fn get_car(query: web::Query<CarQuery>, config: web::Data<AppConfig>) 
         config.valhalla.host, config.valhalla.port
     );
 
-    let valhalla_req = ValhallaRequest {
+    let valhalla_req = RouteRequest {
         locations: vec![
-            ValhallaLocation {
-                lat: from_lat,
-                lon: from_lon,
-            },
-            ValhallaLocation {
-                lat: to_lat,
-                lon: to_lon,
-            },
+            Location { lat: from_lat, lon: from_lon },
+            Location { lat: to_lat, lon: to_lon },
         ],
         costing: "auto".to_string(),
-        directions_options: ValhallaDirectionsOptions {
-            units: "kilometers".to_string(),
-        },
+        costing_options: None,
+        directions_options: DirectionsOptions { units: "kilometers".to_string() },
     };
 
     let client = reqwest::Client::new();
@@ -209,7 +133,7 @@ pub async fn get_car(query: web::Query<CarQuery>, config: web::Data<AppConfig>) 
         }));
     }
 
-    let valhalla_resp: ValhallaResponse = match resp.json().await {
+    let valhalla_resp: RouteResponse = match resp.json().await {
         Ok(r) => r,
         Err(e) => {
             return HttpResponse::BadGateway().json(serde_json::json!({
@@ -230,17 +154,7 @@ pub async fn get_car(query: web::Query<CarQuery>, config: web::Data<AppConfig>) 
 
     let include_maneuvers = query.maneuvers.unwrap_or(false);
     let maneuvers = if include_maneuvers {
-        Some(
-            leg.maneuvers
-                .iter()
-                .map(|m| Maneuver {
-                    instruction: m.instruction.clone(),
-                    maneuver_type: m.maneuver_type,
-                    distance: (m.length * 1000.0) as u32,
-                    duration: m.time as u32,
-                })
-                .collect(),
-        )
+        Some(convert_maneuvers(&leg.maneuvers))
     } else {
         None
     };
