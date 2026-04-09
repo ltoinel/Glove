@@ -153,6 +153,9 @@ impl DataConfig {
     pub fn ban_dir(&self) -> String {
         format!("{}/ban", self.dir)
     }
+    pub fn tiles_dir(&self) -> String {
+        format!("{}/tiles", self.dir)
+    }
 }
 
 impl Default for DataConfig {
@@ -291,6 +294,11 @@ pub struct MapConfig {
     /// North-east corner longitude of the map bounds.
     #[serde(default = "default_bounds_ne_lon")]
     pub bounds_ne_lon: f64,
+
+    /// Upstream tile server URL template for tile caching proxy.
+    /// Placeholders: `{s}` (subdomain), `{z}`, `{x}`, `{y}`, `{r}` (retina).
+    #[serde(default = "default_tile_url")]
+    pub tile_url: String,
 }
 
 impl Default for MapConfig {
@@ -303,6 +311,7 @@ impl Default for MapConfig {
             bounds_sw_lon: default_bounds_sw_lon(),
             bounds_ne_lat: default_bounds_ne_lat(),
             bounds_ne_lon: default_bounds_ne_lon(),
+            tile_url: default_tile_url(),
         }
     }
 }
@@ -328,6 +337,9 @@ fn default_bounds_ne_lat() -> f64 {
 }
 fn default_bounds_ne_lon() -> f64 {
     3.6
+}
+fn default_tile_url() -> String {
+    "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png".to_string()
 }
 
 // ---------------------------------------------------------------------------

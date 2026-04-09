@@ -204,21 +204,27 @@ async fn main() -> std::io::Result<()> {
 
         App::new()
             .wrap(cors)
-            .wrap(Governor::new(&governor_conf))
             .wrap(middleware::from_fn(metrics_middleware))
             .app_data(shared_data.clone())
             .app_data(shared_ban.clone())
             .app_data(config.clone())
             .app_data(openapi_json.clone())
-            .service(api::get_places)
-            .service(api::get_status)
-            .service(api::get_walk)
-            .service(api::get_bike)
-            .service(api::get_car)
-            .service(api::get_journeys)
-            .service(api::get_metrics)
-            .service(api::get_validate)
-            .service(api::post_reload)
+            // Tile proxy: no rate limiting (high request volume from map panning)
+            .service(api::get_tile)
+            // All other API endpoints: rate-limited
+            .service(
+                web::scope("")
+                    .wrap(Governor::new(&governor_conf))
+                    .service(api::get_places)
+                    .service(api::get_status)
+                    .service(api::get_walk)
+                    .service(api::get_bike)
+                    .service(api::get_car)
+                    .service(api::get_journeys)
+                    .service(api::get_metrics)
+                    .service(api::get_validate)
+                    .service(api::post_reload),
+            )
             .route(
                 "/api-docs/openapi.json",
                 web::get().to(|spec: web::Data<String>| async move {

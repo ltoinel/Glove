@@ -2043,7 +2043,7 @@ export default function App() {
           style={{ height: '100%', width: '100%' }} zoomControl={false}>
           <TileLayer
             attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; <a href="https://carto.com/">CARTO</a>'
-            url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png"
+            url="/api/tiles/{z}/{x}/{y}.png"
           />
 
           {fitBounds && <FitBounds bounds={fitBounds} />}

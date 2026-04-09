@@ -11,6 +11,7 @@ pub mod journeys;
 pub mod metrics;
 pub mod places;
 pub mod status;
+pub mod tiles;
 
 pub use gtfs::{__path_get_validate, __path_post_reload, get_validate, post_reload};
 pub use journeys::{__path_get_bike, get_bike};
@@ -20,6 +21,7 @@ pub use journeys::{__path_get_walk, get_walk};
 pub use metrics::{__path_get_metrics, get_metrics};
 pub use places::{__path_get_places, get_places};
 pub use status::{__path_get_status, get_status};
+pub use tiles::get_tile;
 
 use serde::Serialize;
 use utoipa::ToSchema;

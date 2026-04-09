@@ -58,9 +58,10 @@ Core of the application. Round-based public transit routing with:
 - `GET /api/status` — GTFS stats and last load timestamp
 - `GET /api/gtfs/validate` — GTFS data quality validation (19 checks)
 - `POST /api/gtfs/reload` — Hot-reload GTFS data without downtime (atomic swap via ArcSwap)
+- `GET /api/tiles/{z}/{x}/{y}.png` — Map tile proxy with local disk cache
 
 ### Frontend (`portal/`)
-Single-page app: left sidebar (search/results/settings) + full-height Leaflet map. Dark theme with CARTO basemap. i18n for FR/EN in `i18n.jsx`. Queries all endpoints in parallel (PT, walk, bike, car). Views: search (default), swagger, metrics, settings, GTFS validation (full-screen).
+Single-page app: vertical nav rail (56px) + sidebar (450px) + Leaflet map. Dark theme with cached CARTO tiles. i18n for FR/EN in `i18n.jsx`. Queries all endpoints in parallel (PT, walk, bike, car). Views: search (default), GTFS validation, dataset, swagger, metrics. Pure utility functions in `utils.js`, tested with vitest.
 
 ### Key Design Decisions
 - **All in-memory**: no database, GTFS loaded from CSV at startup
@@ -68,10 +69,14 @@ Single-page app: left sidebar (search/results/settings) + full-height Leaflet ma
 - **Pattern grouping**: trips with identical stop sequences share a pattern (memory + speed)
 - **Iterative diverse search**: runs RAPTOR multiple times with pattern exclusion for varied alternatives
 - **Navitia API compatibility**: mirrors Navitia query parameters for drop-in replacement
+- **Tile caching proxy**: map tiles fetched from upstream once, cached to `data/tiles/` on disk
+- **Indoor-aware transfers**: Valhalla pedestrian routing with zero step/elevator penalties for intra-station walks
+- **After-midnight routing**: queries before 4h use previous day's GTFS services with +86400s offset
+- **Station-aware stop resolution**: stop IDs resolve to the stop itself + child stops sharing the same parent_station
 
 ## Configuration
 
-`config.yaml` at repo root. Key settings: `data_dir` (GTFS path), `valhalla_host`/`valhalla_port` (walking router), `max_journeys`, `max_transfers`, `default_transfer_time` (seconds), `max_duration` (seconds), `workers` (0 = auto).
+`config.yaml` at repo root. Key settings: `data_dir` (GTFS path), `valhalla_host`/`valhalla_port` (walking router), `max_journeys`, `max_transfers`, `default_transfer_time` (seconds), `max_duration` (seconds), `workers` (0 = auto), `map.tile_url` (upstream tile server URL template with `{s}`, `{z}`, `{x}`, `{y}`, `{r}` placeholders).
 
 ## Clean Code Principles
 
