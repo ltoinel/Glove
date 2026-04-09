@@ -7,9 +7,9 @@ use actix_web::{HttpResponse, get, web};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
+use super::valhalla::{DirectionsOptions, Location, RawManeuver, RouteRequest, RouteResponse};
 use crate::config::AppConfig;
 use crate::util::parse_from_to;
-use super::valhalla::{DirectionsOptions, Location, RawManeuver, RouteRequest, RouteResponse};
 
 // ---------------------------------------------------------------------------
 // Query parameters
@@ -107,12 +107,20 @@ pub async fn get_car(query: web::Query<CarQuery>, config: web::Data<AppConfig>) 
 
     let valhalla_req = RouteRequest {
         locations: vec![
-            Location { lat: from_lat, lon: from_lon },
-            Location { lat: to_lat, lon: to_lon },
+            Location {
+                lat: from_lat,
+                lon: from_lon,
+            },
+            Location {
+                lat: to_lat,
+                lon: to_lon,
+            },
         ],
         costing: "auto".to_string(),
         costing_options: None,
-        directions_options: DirectionsOptions { units: "kilometers".to_string() },
+        directions_options: DirectionsOptions {
+            units: "kilometers".to_string(),
+        },
     };
 
     let client = reqwest::Client::new();

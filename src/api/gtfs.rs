@@ -102,53 +102,99 @@ fn issue_from_samples(
 }
 
 fn check_stop_times_trips(gtfs: &GtfsData) -> Vec<ValidationIssue> {
-    let orphans: Vec<String> = gtfs.stop_times.iter()
+    let orphans: Vec<String> = gtfs
+        .stop_times
+        .iter()
         .filter(|st| !gtfs.trips.contains_key(&st.trip_id))
         .map(|st| st.trip_id.clone())
-        .collect::<std::collections::HashSet<_>>().into_iter().collect();
-    issue_from_samples(orphans, Severity::Error, Category::ReferentialIntegrity,
-        "stop_times reference non-existent trip_id")
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    issue_from_samples(
+        orphans,
+        Severity::Error,
+        Category::ReferentialIntegrity,
+        "stop_times reference non-existent trip_id",
+    )
 }
 
 fn check_stop_times_stops(gtfs: &GtfsData) -> Vec<ValidationIssue> {
-    let orphans: Vec<String> = gtfs.stop_times.iter()
+    let orphans: Vec<String> = gtfs
+        .stop_times
+        .iter()
         .filter(|st| !gtfs.stops.contains_key(&st.stop_id))
         .map(|st| st.stop_id.clone())
-        .collect::<std::collections::HashSet<_>>().into_iter().collect();
-    issue_from_samples(orphans, Severity::Error, Category::ReferentialIntegrity,
-        "stop_times reference non-existent stop_id")
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    issue_from_samples(
+        orphans,
+        Severity::Error,
+        Category::ReferentialIntegrity,
+        "stop_times reference non-existent stop_id",
+    )
 }
 
 fn check_trips_routes(gtfs: &GtfsData) -> Vec<ValidationIssue> {
-    let orphans: Vec<String> = gtfs.trips.values()
+    let orphans: Vec<String> = gtfs
+        .trips
+        .values()
         .filter(|t| !gtfs.routes.contains_key(&t.route_id))
         .map(|t| format!("trip={} route={}", t.trip_id, t.route_id))
         .collect();
-    issue_from_samples(orphans, Severity::Error, Category::ReferentialIntegrity,
-        "trips reference non-existent route_id")
+    issue_from_samples(
+        orphans,
+        Severity::Error,
+        Category::ReferentialIntegrity,
+        "trips reference non-existent route_id",
+    )
 }
 
 fn check_trips_calendars(gtfs: &GtfsData) -> Vec<ValidationIssue> {
-    let cal_date_services: std::collections::HashSet<&str> = gtfs.calendar_dates.iter()
-        .map(|cd| cd.service_id.as_str()).collect();
-    let orphans: Vec<String> = gtfs.trips.values()
-        .filter(|t| !gtfs.calendars.contains_key(&t.service_id) && !cal_date_services.contains(t.service_id.as_str()))
+    let cal_date_services: std::collections::HashSet<&str> = gtfs
+        .calendar_dates
+        .iter()
+        .map(|cd| cd.service_id.as_str())
+        .collect();
+    let orphans: Vec<String> = gtfs
+        .trips
+        .values()
+        .filter(|t| {
+            !gtfs.calendars.contains_key(&t.service_id)
+                && !cal_date_services.contains(t.service_id.as_str())
+        })
         .map(|t| format!("trip={} service={}", t.trip_id, t.service_id))
-        .collect::<std::collections::HashSet<_>>().into_iter().collect();
-    issue_from_samples(orphans, Severity::Error, Category::ReferentialIntegrity,
-        "trips reference service_id not in calendar or calendar_dates")
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    issue_from_samples(
+        orphans,
+        Severity::Error,
+        Category::ReferentialIntegrity,
+        "trips reference service_id not in calendar or calendar_dates",
+    )
 }
 
 fn check_calendar_coverage(gtfs: &GtfsData) -> Vec<ValidationIssue> {
     let today = chrono::Utc::now().format("%Y%m%d").to_string();
-    let active = gtfs.calendars.values().filter(|c| c.start_date <= today && c.end_date >= today).count();
+    let active = gtfs
+        .calendars
+        .values()
+        .filter(|c| c.start_date <= today && c.end_date >= today)
+        .count();
     if active == 0 && !gtfs.calendars.is_empty() {
-        let samples = gtfs.calendars.values().take(3)
-            .map(|c| format!("{}: {} → {}", c.service_id, c.start_date, c.end_date)).collect();
+        let samples = gtfs
+            .calendars
+            .values()
+            .take(3)
+            .map(|c| format!("{}: {} → {}", c.service_id, c.start_date, c.end_date))
+            .collect();
         return vec![ValidationIssue {
-            severity: Severity::Error, category: Category::Calendar,
+            severity: Severity::Error,
+            category: Category::Calendar,
             message: "No calendar covers today's date — no trips will be active".into(),
-            count: gtfs.calendars.len(), samples,
+            count: gtfs.calendars.len(),
+            samples,
         }];
     }
     if active > 0 {
@@ -156,9 +202,11 @@ fn check_calendar_coverage(gtfs: &GtfsData) -> Vec<ValidationIssue> {
         let inactive = total - active;
         if inactive > 0 {
             return vec![ValidationIssue {
-                severity: Severity::Info, category: Category::Calendar,
+                severity: Severity::Info,
+                category: Category::Calendar,
                 message: format!("{active}/{total} calendars active today"),
-                count: inactive, samples: vec![],
+                count: inactive,
+                samples: vec![],
             }];
         }
     }
@@ -166,59 +214,144 @@ fn check_calendar_coverage(gtfs: &GtfsData) -> Vec<ValidationIssue> {
 }
 
 fn check_calendar_dates(gtfs: &GtfsData) -> Vec<ValidationIssue> {
-    let inverted: Vec<String> = gtfs.calendars.values()
+    let inverted: Vec<String> = gtfs
+        .calendars
+        .values()
         .filter(|c| c.start_date > c.end_date)
-        .map(|c| format!("{}: {} > {}", c.service_id, c.start_date, c.end_date)).collect();
-    issue_from_samples(inverted, Severity::Error, Category::Calendar, "Calendar start_date is after end_date")
+        .map(|c| format!("{}: {} > {}", c.service_id, c.start_date, c.end_date))
+        .collect();
+    issue_from_samples(
+        inverted,
+        Severity::Error,
+        Category::Calendar,
+        "Calendar start_date is after end_date",
+    )
 }
 
 fn check_coordinates(gtfs: &GtfsData) -> Vec<ValidationIssue> {
-    let bad: Vec<String> = gtfs.stops.values()
-        .filter(|s| s.stop_lat == 0.0 || s.stop_lon == 0.0 || s.stop_lat < -90.0 || s.stop_lat > 90.0 || s.stop_lon < -180.0 || s.stop_lon > 180.0)
-        .map(|s| format!("{} ({})", s.stop_id, s.stop_name)).collect();
-    issue_from_samples(bad, Severity::Warning, Category::Coordinates, "Stops with zero or out-of-range coordinates")
+    let bad: Vec<String> = gtfs
+        .stops
+        .values()
+        .filter(|s| {
+            s.stop_lat == 0.0
+                || s.stop_lon == 0.0
+                || s.stop_lat < -90.0
+                || s.stop_lat > 90.0
+                || s.stop_lon < -180.0
+                || s.stop_lon > 180.0
+        })
+        .map(|s| format!("{} ({})", s.stop_id, s.stop_name))
+        .collect();
+    issue_from_samples(
+        bad,
+        Severity::Warning,
+        Category::Coordinates,
+        "Stops with zero or out-of-range coordinates",
+    )
 }
 
 fn check_stop_names(gtfs: &GtfsData) -> Vec<ValidationIssue> {
-    let unnamed: Vec<String> = gtfs.stops.values()
+    let unnamed: Vec<String> = gtfs
+        .stops
+        .values()
         .filter(|s| s.stop_name.trim().is_empty())
-        .map(|s| s.stop_id.clone()).collect();
-    issue_from_samples(unnamed, Severity::Warning, Category::Display, "Stops with empty stop_name")
+        .map(|s| s.stop_id.clone())
+        .collect();
+    issue_from_samples(
+        unnamed,
+        Severity::Warning,
+        Category::Display,
+        "Stops with empty stop_name",
+    )
 }
 
 fn check_parent_stations(gtfs: &GtfsData) -> Vec<ValidationIssue> {
-    let bad: Vec<String> = gtfs.stops.values()
+    let bad: Vec<String> = gtfs
+        .stops
+        .values()
         .filter(|s| !s.parent_station.is_empty() && !gtfs.stops.contains_key(&s.parent_station))
-        .map(|s| format!("{} → parent={}", s.stop_id, s.parent_station)).collect();
-    issue_from_samples(bad, Severity::Error, Category::ReferentialIntegrity, "Stops reference non-existent parent_station")
+        .map(|s| format!("{} → parent={}", s.stop_id, s.parent_station))
+        .collect();
+    issue_from_samples(
+        bad,
+        Severity::Error,
+        Category::ReferentialIntegrity,
+        "Stops reference non-existent parent_station",
+    )
 }
 
 fn check_transfer_stops(gtfs: &GtfsData) -> Vec<ValidationIssue> {
-    let bad: Vec<String> = gtfs.transfers.iter()
-        .filter(|t| !gtfs.stops.contains_key(&t.from_stop_id) || !gtfs.stops.contains_key(&t.to_stop_id))
-        .map(|t| format!("{} → {}", t.from_stop_id, t.to_stop_id)).collect();
-    issue_from_samples(bad, Severity::Error, Category::Transfers, "Transfers reference non-existent stops")
+    let bad: Vec<String> = gtfs
+        .transfers
+        .iter()
+        .filter(|t| {
+            !gtfs.stops.contains_key(&t.from_stop_id) || !gtfs.stops.contains_key(&t.to_stop_id)
+        })
+        .map(|t| format!("{} → {}", t.from_stop_id, t.to_stop_id))
+        .collect();
+    issue_from_samples(
+        bad,
+        Severity::Error,
+        Category::Transfers,
+        "Transfers reference non-existent stops",
+    )
 }
 
 fn check_transfer_times(gtfs: &GtfsData) -> Vec<ValidationIssue> {
-    let suspect: Vec<String> = gtfs.transfers.iter()
-        .filter(|t| t.min_transfer_time.is_some_and(|time| time == 0 || time > 1800))
-        .map(|t| format!("{} → {} ({}s)", t.from_stop_id, t.to_stop_id, t.min_transfer_time.unwrap_or(0))).collect();
-    issue_from_samples(suspect, Severity::Warning, Category::Transfers, "Transfers with suspect min_transfer_time (0s or >30min)")
+    let suspect: Vec<String> = gtfs
+        .transfers
+        .iter()
+        .filter(|t| {
+            t.min_transfer_time
+                .is_some_and(|time| time == 0 || time > 1800)
+        })
+        .map(|t| {
+            format!(
+                "{} → {} ({}s)",
+                t.from_stop_id,
+                t.to_stop_id,
+                t.min_transfer_time.unwrap_or(0)
+            )
+        })
+        .collect();
+    issue_from_samples(
+        suspect,
+        Severity::Warning,
+        Category::Transfers,
+        "Transfers with suspect min_transfer_time (0s or >30min)",
+    )
 }
 
 fn check_pathway_stops(gtfs: &GtfsData) -> Vec<ValidationIssue> {
-    let bad: Vec<String> = gtfs.pathways.iter()
-        .filter(|p| !gtfs.stops.contains_key(&p.from_stop_id) || !gtfs.stops.contains_key(&p.to_stop_id))
-        .map(|p| format!("{} → {}", p.from_stop_id, p.to_stop_id)).collect();
-    issue_from_samples(bad, Severity::Error, Category::Pathways, "Pathways reference non-existent stops")
+    let bad: Vec<String> = gtfs
+        .pathways
+        .iter()
+        .filter(|p| {
+            !gtfs.stops.contains_key(&p.from_stop_id) || !gtfs.stops.contains_key(&p.to_stop_id)
+        })
+        .map(|p| format!("{} → {}", p.from_stop_id, p.to_stop_id))
+        .collect();
+    issue_from_samples(
+        bad,
+        Severity::Error,
+        Category::Pathways,
+        "Pathways reference non-existent stops",
+    )
 }
 
 fn check_pathway_times(gtfs: &GtfsData) -> Vec<ValidationIssue> {
-    let bad: Vec<String> = gtfs.pathways.iter()
+    let bad: Vec<String> = gtfs
+        .pathways
+        .iter()
         .filter(|p| p.traversal_time.is_none() || p.traversal_time == Some(0))
-        .map(|p| format!("{} → {}", p.from_stop_id, p.to_stop_id)).collect();
-    issue_from_samples(bad, Severity::Warning, Category::Pathways, "Pathways with missing or zero traversal_time")
+        .map(|p| format!("{} → {}", p.from_stop_id, p.to_stop_id))
+        .collect();
+    issue_from_samples(
+        bad,
+        Severity::Warning,
+        Category::Pathways,
+        "Pathways with missing or zero traversal_time",
+    )
 }
 
 fn check_isolated_siblings(gtfs: &GtfsData) -> Vec<ValidationIssue> {
@@ -226,20 +359,37 @@ fn check_isolated_siblings(gtfs: &GtfsData) -> Vec<ValidationIssue> {
     let mut by_parent: HashMap<&str, Vec<&str>> = HashMap::new();
     for s in gtfs.stops.values() {
         if !s.parent_station.is_empty() {
-            by_parent.entry(&s.parent_station).or_default().push(&s.stop_id);
+            by_parent
+                .entry(&s.parent_station)
+                .or_default()
+                .push(&s.stop_id);
         }
     }
     let mut connected: HashSet<&str> = HashSet::new();
-    for t in &gtfs.transfers { connected.insert(&t.from_stop_id); connected.insert(&t.to_stop_id); }
-    for p in &gtfs.pathways { connected.insert(&p.from_stop_id); connected.insert(&p.to_stop_id); }
-    let isolated: Vec<String> = by_parent.iter()
+    for t in &gtfs.transfers {
+        connected.insert(&t.from_stop_id);
+        connected.insert(&t.to_stop_id);
+    }
+    for p in &gtfs.pathways {
+        connected.insert(&p.from_stop_id);
+        connected.insert(&p.to_stop_id);
+    }
+    let isolated: Vec<String> = by_parent
+        .iter()
         .filter(|(_, children)| children.len() > 1)
-        .flat_map(|(parent, children)| children.iter()
-            .filter(|&&child| !connected.contains(child))
-            .map(move |&child| format!("{child} (parent={parent})")))
+        .flat_map(|(parent, children)| {
+            children
+                .iter()
+                .filter(|&&child| !connected.contains(child))
+                .map(move |&child| format!("{child} (parent={parent})"))
+        })
         .collect();
-    issue_from_samples(isolated, Severity::Warning, Category::Transfers,
-        "Stops in multi-stop stations with no transfer or pathway to siblings")
+    issue_from_samples(
+        isolated,
+        Severity::Warning,
+        Category::Transfers,
+        "Stops in multi-stop stations with no transfer or pathway to siblings",
+    )
 }
 
 fn check_ungrouped_stops(gtfs: &GtfsData) -> Vec<ValidationIssue> {
@@ -247,57 +397,113 @@ fn check_ungrouped_stops(gtfs: &GtfsData) -> Vec<ValidationIssue> {
     let mut name_counts: HashMap<&str, Vec<&str>> = HashMap::new();
     for s in gtfs.stops.values() {
         if s.parent_station.is_empty() && !s.stop_name.is_empty() {
-            name_counts.entry(&s.stop_name).or_default().push(&s.stop_id);
+            name_counts
+                .entry(&s.stop_name)
+                .or_default()
+                .push(&s.stop_id);
         }
     }
-    let ungrouped: Vec<String> = name_counts.into_iter()
+    let ungrouped: Vec<String> = name_counts
+        .into_iter()
         .filter(|(_, ids)| ids.len() > 2)
-        .map(|(name, ids)| format!("{name} ({} stops)", ids.len())).collect();
-    issue_from_samples(ungrouped, Severity::Info, Category::Transfers,
-        "Multiple stops share the same name without parent_station grouping")
+        .map(|(name, ids)| format!("{name} ({} stops)", ids.len()))
+        .collect();
+    issue_from_samples(
+        ungrouped,
+        Severity::Info,
+        Category::Transfers,
+        "Multiple stops share the same name without parent_station grouping",
+    )
 }
 
 fn check_duplicate_sequences(gtfs: &GtfsData) -> Vec<ValidationIssue> {
     use std::collections::HashMap;
     let mut seq_by_trip: HashMap<&str, Vec<u32>> = HashMap::new();
     for st in &gtfs.stop_times {
-        seq_by_trip.entry(&st.trip_id).or_default().push(st.stop_sequence);
+        seq_by_trip
+            .entry(&st.trip_id)
+            .or_default()
+            .push(st.stop_sequence);
     }
-    let dups: Vec<String> = seq_by_trip.iter().filter_map(|(trip_id, seqs)| {
-        let mut sorted = seqs.clone();
-        sorted.sort_unstable();
-        let before = sorted.len();
-        sorted.dedup();
-        (sorted.len() < before).then(|| trip_id.to_string())
-    }).collect();
-    issue_from_samples(dups, Severity::Error, Category::ReferentialIntegrity,
-        "Trips with duplicate stop_sequence values")
+    let dups: Vec<String> = seq_by_trip
+        .iter()
+        .filter_map(|(trip_id, seqs)| {
+            let mut sorted = seqs.clone();
+            sorted.sort_unstable();
+            let before = sorted.len();
+            sorted.dedup();
+            (sorted.len() < before).then(|| trip_id.to_string())
+        })
+        .collect();
+    issue_from_samples(
+        dups,
+        Severity::Error,
+        Category::ReferentialIntegrity,
+        "Trips with duplicate stop_sequence values",
+    )
 }
 
 fn check_route_colors(gtfs: &GtfsData) -> Vec<ValidationIssue> {
-    let bad: Vec<String> = gtfs.routes.values()
-        .filter(|r| !r.route_color.is_empty() && (r.route_color.len() != 6 || !r.route_color.chars().all(|c| c.is_ascii_hexdigit())))
-        .map(|r| format!("{} color={}", r.route_id, r.route_color)).collect();
-    issue_from_samples(bad, Severity::Warning, Category::Display, "Routes with invalid hex color")
+    let bad: Vec<String> = gtfs
+        .routes
+        .values()
+        .filter(|r| {
+            !r.route_color.is_empty()
+                && (r.route_color.len() != 6
+                    || !r.route_color.chars().all(|c| c.is_ascii_hexdigit()))
+        })
+        .map(|r| format!("{} color={}", r.route_id, r.route_color))
+        .collect();
+    issue_from_samples(
+        bad,
+        Severity::Warning,
+        Category::Display,
+        "Routes with invalid hex color",
+    )
 }
 
 fn check_empty_headsigns(gtfs: &GtfsData) -> Vec<ValidationIssue> {
-    let count = gtfs.trips.values().filter(|t| t.trip_headsign.trim().is_empty()).count();
+    let count = gtfs
+        .trips
+        .values()
+        .filter(|t| t.trip_headsign.trim().is_empty())
+        .count();
     if count > 0 {
         vec![ValidationIssue {
-            severity: Severity::Info, category: Category::Display,
-            message: "Trips with empty trip_headsign".into(), count, samples: vec![],
+            severity: Severity::Info,
+            category: Category::Display,
+            message: "Trips with empty trip_headsign".into(),
+            count,
+            samples: vec![],
         }]
-    } else { vec![] }
+    } else {
+        vec![]
+    }
 }
 
 fn check_unparseable_times(gtfs: &GtfsData) -> Vec<ValidationIssue> {
-    let bad: Vec<String> = gtfs.stop_times.iter()
-        .filter(|st| crate::gtfs::parse_time(&st.arrival_time).is_none() || crate::gtfs::parse_time(&st.departure_time).is_none())
-        .map(|st| format!("trip={} seq={} arr={} dep={}", st.trip_id, st.stop_sequence, st.arrival_time, st.departure_time))
-        .collect::<std::collections::HashSet<_>>().into_iter().collect();
-    issue_from_samples(bad, Severity::Error, Category::ReferentialIntegrity,
-        "Stop times with unparseable arrival/departure time")
+    let bad: Vec<String> = gtfs
+        .stop_times
+        .iter()
+        .filter(|st| {
+            crate::gtfs::parse_time(&st.arrival_time).is_none()
+                || crate::gtfs::parse_time(&st.departure_time).is_none()
+        })
+        .map(|st| {
+            format!(
+                "trip={} seq={} arr={} dep={}",
+                st.trip_id, st.stop_sequence, st.arrival_time, st.departure_time
+            )
+        })
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    issue_from_samples(
+        bad,
+        Severity::Error,
+        Category::ReferentialIntegrity,
+        "Stop times with unparseable arrival/departure time",
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -330,21 +536,24 @@ fn validate_gtfs(gtfs: &GtfsData) -> ValidateResponse {
     ];
 
     let total_checks = checkers.len();
-    let mut issues: Vec<ValidationIssue> = checkers
-        .iter()
-        .flat_map(|check| check(gtfs))
-        .collect();
+    let mut issues: Vec<ValidationIssue> = checkers.iter().flat_map(|check| check(gtfs)).collect();
 
     // Sort: errors first, then warnings, then infos
     issues.sort_by(|a, b| a.severity.cmp(&b.severity));
 
     let summary = ValidationSummary {
-        errors: issues.iter().filter(|i| i.severity == Severity::Error).count(),
+        errors: issues
+            .iter()
+            .filter(|i| i.severity == Severity::Error)
+            .count(),
         warnings: issues
             .iter()
             .filter(|i| i.severity == Severity::Warning)
             .count(),
-        infos: issues.iter().filter(|i| i.severity == Severity::Info).count(),
+        infos: issues
+            .iter()
+            .filter(|i| i.severity == Severity::Info)
+            .count(),
         total_checks: total_checks as usize,
     };
 
@@ -588,10 +797,12 @@ mod tests {
         });
         let result = validate_gtfs(&gtfs);
         assert!(result.summary.errors > 0);
-        assert!(result
-            .issues
-            .iter()
-            .any(|i| i.message.contains("non-existent trip_id")));
+        assert!(
+            result
+                .issues
+                .iter()
+                .any(|i| i.message.contains("non-existent trip_id"))
+        );
     }
 
     #[test]
@@ -609,9 +820,11 @@ mod tests {
         );
         let result = validate_gtfs(&gtfs);
         assert!(result.summary.warnings > 0);
-        assert!(result
-            .issues
-            .iter()
-            .any(|i| i.message.contains("coordinates")));
+        assert!(
+            result
+                .issues
+                .iter()
+                .any(|i| i.message.contains("coordinates"))
+        );
     }
 }

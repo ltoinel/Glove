@@ -188,10 +188,12 @@ fn build_patterns(
                 continue;
             }
         };
-        trip_stop_times
-            .entry(&st.trip_id)
-            .or_default()
-            .push((st.stop_sequence, arr, dep, &st.stop_id));
+        trip_stop_times.entry(&st.trip_id).or_default().push((
+            st.stop_sequence,
+            arr,
+            dep,
+            &st.stop_id,
+        ));
     }
     if skipped_times > 0 {
         tracing::warn!("{skipped_times} stop_times skipped (unparseable arrival/departure time)");
@@ -230,7 +232,11 @@ fn build_patterns(
         let svc_idx = match service_index.get(&trip.service_id).copied() {
             Some(idx) => idx,
             None => {
-                tracing::warn!("trip {} references unknown service_id {}", trip_id, trip.service_id);
+                tracing::warn!(
+                    "trip {} references unknown service_id {}",
+                    trip_id,
+                    trip.service_id
+                );
                 continue;
             }
         };
@@ -291,7 +297,10 @@ fn build_transfers(
     }
 
     // Pathway graph for realistic in-station walking times
-    info!("Building pathway graph ({} pathways)...", gtfs.pathways.len());
+    info!(
+        "Building pathway graph ({} pathways)...",
+        gtfs.pathways.len()
+    );
     let mut pathway_graph: FxHashMap<&str, Vec<(&str, u32)>> = FxHashMap::default();
     for p in &gtfs.pathways {
         if let Some(time) = p.traversal_time {
@@ -327,8 +336,7 @@ fn build_transfers(
             continue;
         }
         for &a in siblings {
-            let existing: FxHashSet<usize> =
-                stop_transfers[a].iter().map(|&(t, _)| t).collect();
+            let existing: FxHashSet<usize> = stop_transfers[a].iter().map(|&(t, _)| t).collect();
             for &b in siblings {
                 if a != b && !existing.contains(&b) {
                     let duration =
@@ -386,9 +394,7 @@ fn pathway_dijkstra<'a>(
 }
 
 /// Build calendar_exceptions: service_id → { date → exception_type }.
-fn build_calendar_exceptions(
-    gtfs: &GtfsData,
-) -> FxHashMap<String, FxHashMap<String, u8>> {
+fn build_calendar_exceptions(gtfs: &GtfsData) -> FxHashMap<String, FxHashMap<String, u8>> {
     let mut exceptions: FxHashMap<String, FxHashMap<String, u8>> = FxHashMap::default();
     for cd in &gtfs.calendar_dates {
         exceptions
@@ -462,13 +468,8 @@ impl RaptorData {
         let stop_patterns = build_stop_patterns(&patterns, num_stops);
 
         // Build transfer graph
-        let stop_transfers = build_transfers(
-            &gtfs,
-            &stop_index,
-            &stops,
-            default_transfer_time,
-            num_stops,
-        );
+        let stop_transfers =
+            build_transfers(&gtfs, &stop_index, &stops, default_transfer_time, num_stops);
 
         // Calendar exceptions index
         let calendar_exceptions = build_calendar_exceptions(&gtfs);

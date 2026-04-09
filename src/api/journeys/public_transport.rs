@@ -268,10 +268,8 @@ pub async fn get_journeys(
 
     let active = raptor_data.active_services(&effective_date);
 
-    let mode_excluded = compute_mode_exclusions(
-        &raptor_data,
-        query.forbidden_modes.as_deref().unwrap_or(""),
-    );
+    let mode_excluded =
+        compute_mode_exclusions(&raptor_data, query.forbidden_modes.as_deref().unwrap_or(""));
 
     // Iterative search with pattern exclusion for route diversity
     let mut journeys: Vec<Journey> = Vec::new();
@@ -437,9 +435,7 @@ async fn enrich_first_last_mile(
         let last_mile_fut = async {
             if let (Some(to_c), Some(stop_idx)) = (to_coord, last_stop_idx) {
                 let stop = &raptor_data.stops[stop_idx];
-                if (to_c.0 - stop.stop_lon).abs() < 1e-6
-                    && (to_c.1 - stop.stop_lat).abs() < 1e-6
-                {
+                if (to_c.0 - stop.stop_lon).abs() < 1e-6 && (to_c.1 - stop.stop_lat).abs() < 1e-6 {
                     return (stop_idx, None);
                 }
                 if let Some(cached) = last_mile_cache.get(&stop_idx) {
@@ -579,8 +575,7 @@ async fn enrich_first_last_mile(
             };
             journey.sections.push(section);
             journey.duration += walk.duration;
-            journey.arrival_date_time =
-                journey.sections.last().unwrap().arrival_date_time.clone();
+            journey.arrival_date_time = journey.sections.last().unwrap().arrival_date_time.clone();
         }
     }
 }
@@ -739,8 +734,7 @@ fn resolve_stops(
                 .iter()
                 .enumerate()
                 .filter(|(child_idx, child)| {
-                    child.parent_station == *stop_id
-                        && !data.stop_patterns[*child_idx].is_empty()
+                    child.parent_station == *stop_id && !data.stop_patterns[*child_idx].is_empty()
                 })
                 .map(|(child_idx, _)| (child_idx, 0))
                 .collect();

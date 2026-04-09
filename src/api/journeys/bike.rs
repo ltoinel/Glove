@@ -8,9 +8,9 @@ use actix_web::{HttpResponse, get, web};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
+use super::valhalla::{DirectionsOptions, Location, RawManeuver, RouteRequest, RouteResponse};
 use crate::config::AppConfig;
 use crate::util::parse_from_to;
-use super::valhalla::{DirectionsOptions, Location, RawManeuver, RouteRequest, RouteResponse};
 
 // ---------------------------------------------------------------------------
 // Query parameters
@@ -110,9 +110,15 @@ fn decode_polyline(encoded: &str) -> Vec<(f64, f64)> {
             i += 1;
             result |= (b & 0x1f) << shift;
             shift += 5;
-            if b < 0x20 { break; }
+            if b < 0x20 {
+                break;
+            }
         }
-        lat += if result & 1 != 0 { !(result >> 1) } else { result >> 1 };
+        lat += if result & 1 != 0 {
+            !(result >> 1)
+        } else {
+            result >> 1
+        };
 
         shift = 0;
         result = 0;
@@ -121,9 +127,15 @@ fn decode_polyline(encoded: &str) -> Vec<(f64, f64)> {
             i += 1;
             result |= (b & 0x1f) << shift;
             shift += 5;
-            if b < 0x20 { break; }
+            if b < 0x20 {
+                break;
+            }
         }
-        lon += if result & 1 != 0 { !(result >> 1) } else { result >> 1 };
+        lon += if result & 1 != 0 {
+            !(result >> 1)
+        } else {
+            result >> 1
+        };
 
         coords.push((lat as f64 / 1e6, lon as f64 / 1e6));
     }
@@ -137,7 +149,11 @@ fn compute_elevation(heights: &[f64]) -> (u32, u32) {
     let mut loss: f64 = 0.0;
     for pair in heights.windows(2) {
         let diff = pair[1] - pair[0];
-        if diff > 0.0 { gain += diff; } else { loss -= diff; }
+        if diff > 0.0 {
+            gain += diff;
+        } else {
+            loss -= diff;
+        }
     }
     (gain.round() as u32, loss.round() as u32)
 }
@@ -166,11 +182,18 @@ async fn fetch_elevation(
     valhalla_base: &str,
     coords: &[(f64, f64)],
 ) -> Vec<f64> {
-    let step = if coords.len() > ELEVATION_SAMPLE_LIMIT { coords.len() / ELEVATION_SAMPLE_LIMIT } else { 1 };
+    let step = if coords.len() > ELEVATION_SAMPLE_LIMIT {
+        coords.len() / ELEVATION_SAMPLE_LIMIT
+    } else {
+        1
+    };
     let sampled: Vec<Location> = coords
         .iter()
         .step_by(step)
-        .map(|(lat, lon)| Location { lat: *lat, lon: *lon })
+        .map(|(lat, lon)| Location {
+            lat: *lat,
+            lon: *lon,
+        })
         .collect();
 
     let height_url = format!("{}/height", valhalla_base);
@@ -235,8 +258,14 @@ pub async fn get_bike(query: web::Query<BikeQuery>, config: web::Data<AppConfig>
     let valhalla_url = format!("{}/route", valhalla_base);
 
     let locations = vec![
-        Location { lat: from_lat, lon: from_lon },
-        Location { lat: to_lat, lon: to_lon },
+        Location {
+            lat: from_lat,
+            lon: from_lon,
+        },
+        Location {
+            lat: to_lat,
+            lon: to_lon,
+        },
     ];
 
     let client = reqwest::Client::new();
@@ -255,7 +284,9 @@ pub async fn get_bike(query: web::Query<BikeQuery>, config: web::Data<AppConfig>
             locations: locations.clone(),
             costing: "bicycle".to_string(),
             costing_options: Some(bike_costing_options(profile)),
-            directions_options: DirectionsOptions { units: "kilometers".to_string() },
+            directions_options: DirectionsOptions {
+                units: "kilometers".to_string(),
+            },
         };
 
         let resp = client.post(&valhalla_url).json(&req).send().await;
