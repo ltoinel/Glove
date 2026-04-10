@@ -11,6 +11,7 @@ Search for transit stops and addresses with fuzzy matching.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `q` | string | Yes | Search query (e.g. "gare de lyon") |
+| `limit` | integer | No | Maximum number of results (default: 10, max: 50) |
 
 ## Example
 

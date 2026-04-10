@@ -26,6 +26,8 @@ pub struct CarQuery {
     pub to: String,
     /// Include turn-by-turn maneuvers in the response (default: false).
     pub maneuvers: Option<bool>,
+    /// Language for maneuver instructions (e.g. "fr-FR", "en-US").
+    pub language: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -63,6 +65,8 @@ pub struct Maneuver {
     pub distance: u32,
     /// Duration in seconds.
     pub duration: u32,
+    /// Index into the encoded shape where this maneuver begins.
+    pub begin_shape_index: usize,
 }
 
 /// Convert raw Valhalla maneuvers to car maneuvers.
@@ -73,6 +77,7 @@ fn convert_maneuvers(raw: &[RawManeuver]) -> Vec<Maneuver> {
             maneuver_type: m.maneuver_type,
             distance: (m.length * 1000.0) as u32,
             duration: m.time as u32,
+            begin_shape_index: m.begin_shape_index,
         })
         .collect()
 }
@@ -120,6 +125,7 @@ pub async fn get_car(query: web::Query<CarQuery>, config: web::Data<AppConfig>) 
         costing_options: None,
         directions_options: DirectionsOptions {
             units: "kilometers".to_string(),
+            language: query.language.clone(),
         },
     };
 

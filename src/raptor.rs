@@ -54,6 +54,8 @@ pub struct PatternTrip {
     pub trip_id: String,
     /// Destination sign displayed on the vehicle.
     pub headsign: String,
+    /// Wheelchair accessible: 0=no info, 1=accessible, 2=not accessible.
+    pub wheelchair_accessible: u8,
 }
 
 /// A route pattern: an ordered sequence of stops served by multiple trips.
@@ -246,6 +248,7 @@ fn build_patterns(
             stop_times: stop_times_parsed,
             trip_id: trip_id.to_string(),
             headsign: trip.trip_headsign.clone(),
+            wheelchair_accessible: trip.wheelchair_accessible,
         };
 
         if let Some(&pat_idx) = pattern_map.get(&stop_seq) {
@@ -839,6 +842,7 @@ pub fn raptor_query(
     active: &[bool],
     max_transfers: usize,
     excluded_patterns: &FxHashSet<usize>,
+    wheelchair: bool,
 ) -> RaptorResult {
     let n = data.stops.len();
     let rounds = max_transfers.min(MAX_ROUNDS - 1) + 1;
@@ -920,7 +924,7 @@ pub fn raptor_query(
                 // Try to board an earlier trip at this stop
                 if tau[k - 1][stop_idx] != INFINITY {
                     let board_time = tau[k - 1][stop_idx];
-                    let new_trip = find_earliest_trip(pattern, pos, board_time, active);
+                    let new_trip = find_earliest_trip(pattern, pos, board_time, active, wheelchair);
 
                     if let Some(trip_idx) = new_trip {
                         match current_trip {
@@ -943,6 +947,10 @@ pub fn raptor_query(
 
                 // If on a trip, update arrival time at this stop
                 if let Some(trip_idx) = current_trip {
+                    // Skip stops explicitly not wheelchair-accessible
+                    if wheelchair && data.stops[stop_idx].wheelchair_boarding == 2 {
+                        continue;
+                    }
                     let arr = pattern.trips[trip_idx].stop_times[pos].0;
                     if arr < best[stop_idx] {
                         tau[k][stop_idx] = arr;
@@ -1004,6 +1012,7 @@ fn find_earliest_trip(
     pos: usize,
     min_departure: u32,
     active: &[bool],
+    wheelchair: bool,
 ) -> Option<usize> {
     let trips = &pattern.trips;
 
@@ -1018,7 +1027,9 @@ fn find_earliest_trip(
 
     for (idx, trip) in trips.iter().enumerate().skip(start) {
         let dep = trip.stop_times[pos].1;
-        if dep >= min_departure && dep < best_dep && active[trip.service_idx] {
+        if dep >= min_departure && dep < best_dep && active[trip.service_idx]
+            && (!wheelchair || trip.wheelchair_accessible != 2)
+        {
             best_dep = dep;
             best_idx = Some(idx);
             // Once past the pivot, trips are roughly ordered: if we found a match
@@ -1433,6 +1444,7 @@ mod tests {
                 stop_lon: 2.347,
                 stop_lat: 48.858,
                 parent_station: "P1".to_string(),
+                wheelchair_boarding: 0,
             },
         );
         stops.insert(
@@ -1443,6 +1455,7 @@ mod tests {
                 stop_lon: 2.373,
                 stop_lat: 48.844,
                 parent_station: String::new(),
+                wheelchair_boarding: 0,
             },
         );
         stops.insert(
@@ -1453,6 +1466,7 @@ mod tests {
                 stop_lon: 2.395,
                 stop_lat: 48.848,
                 parent_station: String::new(),
+                wheelchair_boarding: 0,
             },
         );
         stops.insert(
@@ -1463,6 +1477,7 @@ mod tests {
                 stop_lon: 2.347,
                 stop_lat: 48.858,
                 parent_station: "P1".to_string(),
+                wheelchair_boarding: 0,
             },
         );
 
@@ -1488,6 +1503,7 @@ mod tests {
                 service_id: "SVC1".to_string(),
                 trip_id: "T1".to_string(),
                 trip_headsign: "Nation".to_string(),
+                wheelchair_accessible: 0,
             },
         );
         trips.insert(
@@ -1497,6 +1513,7 @@ mod tests {
                 service_id: "SVC1".to_string(),
                 trip_id: "T2".to_string(),
                 trip_headsign: "Nation".to_string(),
+                wheelchair_accessible: 0,
             },
         );
 
@@ -1763,7 +1780,7 @@ mod tests {
         let pattern = &data.patterns[0];
         let active = data.active_services("20260406"); // Monday, SVC1 active
         // At position 0, departure 08:01:00 = 28860, look for trip departing >= 28000
-        let result = find_earliest_trip(pattern, 0, 28000, &active);
+        let result = find_earliest_trip(pattern, 0, 28000, &active, false);
         assert!(result.is_some());
     }
 
@@ -1773,7 +1790,7 @@ mod tests {
         let pattern = &data.patterns[0];
         let active = data.active_services("20260406");
         // All trips depart before 40000 at pos 0 → should return the last trip
-        let result = find_earliest_trip(pattern, 0, 99999, &active);
+        let result = find_earliest_trip(pattern, 0, 99999, &active, false);
         assert!(result.is_none());
     }
 
@@ -1782,7 +1799,7 @@ mod tests {
         let data = build_test_data();
         let pattern = &data.patterns[0];
         let active = data.active_services("20260101"); // exception: SVC1 removed
-        let result = find_earliest_trip(pattern, 0, 0, &active);
+        let result = find_earliest_trip(pattern, 0, 0, &active, false);
         assert!(result.is_none());
     }
 
@@ -1803,6 +1820,7 @@ mod tests {
             &active,
             3,
             &FxHashSet::default(),
+            false,
         );
         let journeys = reconstruct_journeys(&data, &result, &[(target, 0)]);
         assert!(!journeys.is_empty());
@@ -1820,6 +1838,7 @@ mod tests {
             &active,
             3,
             &FxHashSet::default(),
+            false,
         );
         // Source is already at target → tau[0][source] == departure_time
         assert_eq!(result.tau[0][source], 28000);
@@ -1838,6 +1857,7 @@ mod tests {
             &active,
             3,
             &FxHashSet::default(),
+            false,
         );
         let journeys = reconstruct_journeys(&data, &result, &[(target, 0)]);
         assert!(journeys.is_empty());
@@ -1851,7 +1871,7 @@ mod tests {
         let active = data.active_services("20260406");
         // Exclude all patterns
         let excluded: FxHashSet<usize> = (0..data.patterns.len()).collect();
-        let result = raptor_query(&data, &[(source, 0)], 28000, &active, 3, &excluded);
+        let result = raptor_query(&data, &[(source, 0)], 28000, &active, 3, &excluded, false);
         let journeys = reconstruct_journeys(&data, &result, &[(target, 0)]);
         assert!(journeys.is_empty());
     }
@@ -2029,6 +2049,7 @@ mod tests {
                 service_id: "SVC_ORPHAN".to_string(),
                 trip_id: "T_ORPHAN".to_string(),
                 trip_headsign: "Nowhere".to_string(),
+                wheelchair_accessible: 0,
             },
         );
         let data = RaptorData::build(gtfs, 120);
@@ -2080,6 +2101,7 @@ mod tests {
             &active,
             3,
             &FxHashSet::default(),
+            false,
         );
         let journeys = reconstruct_journeys(&data, &result, &[(target, 0)]);
         assert!(!journeys.is_empty());
@@ -2104,6 +2126,7 @@ mod tests {
             &active,
             3,
             &FxHashSet::default(),
+            false,
         );
         let journeys = reconstruct_journeys(&data, &result, &[(target, 0)]);
         assert!(journeys.is_empty());

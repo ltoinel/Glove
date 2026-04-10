@@ -39,7 +39,7 @@ pub async fn get_tile(
             Ok(data) => {
                 return HttpResponse::Ok()
                     .content_type("image/png")
-                    .append_header(("Cache-Control", "public, max-age=86400"))
+                    .append_header(("Cache-Control", format!("public, max-age={}", config.map.tile_cache_duration)))
                     .body(data);
             }
             Err(e) => {
@@ -109,6 +109,6 @@ pub async fn get_tile(
 
     HttpResponse::Ok()
         .content_type("image/png")
-        .append_header(("Cache-Control", "public, max-age=86400"))
+        .append_header(("Cache-Control", format!("public, max-age={}", config.map.tile_cache_duration)))
         .body(bytes)
 }

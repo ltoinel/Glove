@@ -38,6 +38,10 @@ pub struct AppConfig {
     /// Bicycle routing profiles.
     #[serde(default)]
     pub bike: BikeConfig,
+
+    /// Wheelchair accessibility routing options.
+    #[serde(default)]
+    pub wheelchair: WheelchairConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -299,6 +303,10 @@ pub struct MapConfig {
     /// Placeholders: `{s}` (subdomain), `{z}`, `{x}`, `{y}`, `{r}` (retina).
     #[serde(default = "default_tile_url")]
     pub tile_url: String,
+
+    /// Browser cache duration for tiles, in seconds.
+    #[serde(default = "default_tile_cache_duration")]
+    pub tile_cache_duration: u32,
 }
 
 impl Default for MapConfig {
@@ -312,6 +320,7 @@ impl Default for MapConfig {
             bounds_ne_lat: default_bounds_ne_lat(),
             bounds_ne_lon: default_bounds_ne_lon(),
             tile_url: default_tile_url(),
+            tile_cache_duration: default_tile_cache_duration(),
         }
     }
 }
@@ -340,6 +349,9 @@ fn default_bounds_ne_lon() -> f64 {
 }
 fn default_tile_url() -> String {
     "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png".to_string()
+}
+fn default_tile_cache_duration() -> u32 {
+    86400
 }
 
 // ---------------------------------------------------------------------------
@@ -424,6 +436,62 @@ fn default_bike_road() -> BikeProfile {
         use_hills: 0.5,
         bicycle_type: "Road".to_string(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Wheelchair accessibility
+// ---------------------------------------------------------------------------
+
+/// Valhalla pedestrian costing overrides for wheelchair-accessible routing.
+#[derive(Debug, Deserialize)]
+pub struct WheelchairConfig {
+    /// Penalty for stairs (very high = effectively avoid them).
+    #[serde(default = "default_wheelchair_step_penalty")]
+    pub step_penalty: f64,
+
+    /// Maximum road grade in percent (6% is the standard wheelchair norm).
+    #[serde(default = "default_wheelchair_max_grade")]
+    pub max_grade: u32,
+
+    /// Hill avoidance factor (0.0 = strongly avoid, 1.0 = no preference).
+    #[serde(default = "default_wheelchair_use_hills")]
+    pub use_hills: f64,
+
+    /// Penalty for elevators (0 = prefer them).
+    #[serde(default = "default_wheelchair_elevator_penalty")]
+    pub elevator_penalty: f64,
+
+    /// Wheelchair walking speed in km/h (typical: 3.5 km/h).
+    #[serde(default = "default_wheelchair_walking_speed")]
+    pub walking_speed: f64,
+}
+
+impl Default for WheelchairConfig {
+    fn default() -> Self {
+        Self {
+            step_penalty: default_wheelchair_step_penalty(),
+            max_grade: default_wheelchair_max_grade(),
+            use_hills: default_wheelchair_use_hills(),
+            elevator_penalty: default_wheelchair_elevator_penalty(),
+            walking_speed: default_wheelchair_walking_speed(),
+        }
+    }
+}
+
+fn default_wheelchair_step_penalty() -> f64 {
+    999999.0
+}
+fn default_wheelchair_max_grade() -> u32 {
+    6
+}
+fn default_wheelchair_use_hills() -> f64 {
+    0.0
+}
+fn default_wheelchair_elevator_penalty() -> f64 {
+    0.0
+}
+fn default_wheelchair_walking_speed() -> f64 {
+    3.5
 }
 
 // ---------------------------------------------------------------------------

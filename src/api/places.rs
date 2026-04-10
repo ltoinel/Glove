@@ -134,6 +134,7 @@ mod tests {
                 stop_lon: 2.347,
                 stop_lat: 48.858,
                 parent_station: String::new(),
+                wheelchair_boarding: 0,
             },
         );
         stops.insert(
@@ -144,6 +145,7 @@ mod tests {
                 stop_lon: 2.395,
                 stop_lat: 48.848,
                 parent_station: String::new(),
+                wheelchair_boarding: 0,
             },
         );
         let mut trips = FxHashMap::default();
@@ -154,6 +156,7 @@ mod tests {
                 service_id: "SVC1".into(),
                 trip_id: "T1".into(),
                 trip_headsign: "Nation".into(),
+                wheelchair_accessible: 0,
             },
         );
         let stop_times = vec![

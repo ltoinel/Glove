@@ -6,6 +6,8 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+use crate::config::WheelchairConfig;
+
 // ---------------------------------------------------------------------------
 // Valhalla request / response types
 // ---------------------------------------------------------------------------
@@ -31,6 +33,9 @@ pub struct RouteRequest {
 #[derive(Serialize)]
 pub struct DirectionsOptions {
     pub units: String,
+    /// Language for maneuver instructions (e.g. "fr-FR", "en-US").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
 }
 
 /// Valhalla route response.
@@ -64,6 +69,9 @@ pub struct RawManeuver {
     pub time: f64,
     #[serde(rename = "type")]
     pub maneuver_type: u32,
+    /// Index into the encoded shape where this maneuver begins.
+    #[serde(default)]
+    pub begin_shape_index: usize,
 }
 
 /// Summary statistics for a Valhalla route.
@@ -89,6 +97,8 @@ pub struct WalkManeuver {
     pub distance: u32,
     /// Duration in seconds.
     pub duration: u32,
+    /// Index into the encoded shape where this maneuver begins.
+    pub begin_shape_index: usize,
 }
 
 /// Result of a pedestrian route computation.
@@ -121,9 +131,21 @@ pub async fn pedestrian_route(
     to: (f64, f64),   // (lon, lat)
     walking_speed: Option<f64>,
     indoor_friendly: bool,
+    language: Option<&str>,
+    wheelchair_config: Option<&WheelchairConfig>,
 ) -> Option<WalkLeg> {
     let costing_options = {
-        let mut opts = if indoor_friendly {
+        let mut opts = if let Some(wc) = wheelchair_config {
+            // Wheelchair mode: avoid stairs, prefer elevators, limit grade
+            serde_json::json!({
+                "pedestrian": {
+                    "step_penalty": wc.step_penalty,
+                    "max_grade": wc.max_grade,
+                    "use_hills": wc.use_hills,
+                    "elevator_penalty": wc.elevator_penalty
+                }
+            })
+        } else if indoor_friendly {
             // For station transfers: no penalty for stairs/elevators/escalators
             // since they are the expected path through underground passages
             serde_json::json!({
@@ -142,7 +164,12 @@ pub async fn pedestrian_route(
                 }
             })
         };
-        if let Some(speed) = walking_speed {
+        let effective_speed = if let Some(wc) = wheelchair_config {
+            Some(wc.walking_speed)
+        } else {
+            walking_speed
+        };
+        if let Some(speed) = effective_speed {
             opts["pedestrian"]["walking_speed"] = serde_json::json!(speed.clamp(0.5, 25.5));
         }
         Some(opts)
@@ -163,6 +190,7 @@ pub async fn pedestrian_route(
         costing_options,
         directions_options: DirectionsOptions {
             units: "kilometers".to_string(),
+            language: language.map(String::from),
         },
     };
 
@@ -188,6 +216,7 @@ pub async fn pedestrian_route(
             maneuver_type: m.maneuver_type,
             distance: (m.length * 1000.0) as u32,
             duration: m.time as u32,
+            begin_shape_index: m.begin_shape_index,
         })
         .collect();
 

@@ -188,4 +188,4 @@ The GTFS dataset is downloaded from:
 https://data.iledefrance-mobilites.fr/explore/dataset/offre-horaires-tc-gtfs-idfm/
 ```
 
-It is updated regularly by IDFM (typically every few weeks when schedules change). Glove can hot-reload the data via `POST /api/reload` without service interruption — the new RAPTOR index is built in a background thread and swapped in atomically.
+It is updated regularly by IDFM (typically every few weeks when schedules change). Glove can hot-reload the data via `POST /api/gtfs/reload` without service interruption — the new RAPTOR index is built in a background thread and swapped in atomically.

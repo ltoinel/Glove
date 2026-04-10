@@ -53,6 +53,9 @@ pub struct Stop {
     /// transferable with a default walking time.
     #[serde(default)]
     pub parent_station: String,
+    /// Wheelchair boarding: 0=no info, 1=accessible, 2=not accessible.
+    #[serde(default)]
+    pub wheelchair_boarding: u8,
 }
 
 /// A single vehicle trip on a route.
@@ -64,6 +67,9 @@ pub struct Trip {
     /// Destination sign displayed on the vehicle.
     #[serde(default)]
     pub trip_headsign: String,
+    /// Wheelchair accessible: 0=no info, 1=accessible, 2=not accessible.
+    #[serde(default)]
+    pub wheelchair_accessible: u8,
 }
 
 /// A scheduled arrival/departure at a stop within a trip.

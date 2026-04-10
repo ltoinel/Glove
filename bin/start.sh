@@ -37,6 +37,14 @@ command -v npm   >/dev/null || fail "npm not found."
 # Check GTFS data
 [ -f "$ROOT/data/gtfs/stop_times.txt" ] || fail "GTFS data not found in data/gtfs/. Run bin/download.sh first."
 
+# Start Valhalla if not already running
+if ! "$ROOT/bin/valhalla.sh" status 2>/dev/null | grep -q "running"; then
+    log "Valhalla is not running, starting it..."
+    "$ROOT/bin/valhalla.sh" start
+else
+    ok "Valhalla is already running."
+fi
+
 if [ "$DEV_MODE" = true ]; then
     # --- DEV MODE (hot-reload) ---
     log "Starting in DEV mode (hot-reload)..."

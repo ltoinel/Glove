@@ -153,7 +153,7 @@ Glove loads the following GTFS files:
 
 The hot reload mechanism allows updating GTFS data without downtime:
 
-1. `POST /api/reload` is called (requires `api_key`)
+1. `POST /api/gtfs/reload` is called (requires `api_key`)
 2. A background thread loads new GTFS data and builds a fresh RAPTOR index
 3. The new index is swapped in atomically via `ArcSwap`
 4. All in-flight requests continue using the old index until they complete

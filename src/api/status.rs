@@ -119,6 +119,7 @@ mod tests {
                 stop_lon: 2.0,
                 stop_lat: 48.0,
                 parent_station: String::new(),
+                wheelchair_boarding: 0,
             },
         );
         let mut routes = FxHashMap::default();
@@ -142,6 +143,7 @@ mod tests {
                 service_id: "SVC1".into(),
                 trip_id: "T1".into(),
                 trip_headsign: "A".into(),
+                wheelchair_accessible: 0,
             },
         );
         let stop_times = vec![gtfs::StopTime {

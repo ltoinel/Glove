@@ -13,7 +13,7 @@ import {
   Stairs, Elevator, MeetingRoom, TurnLeft, TurnRight, Straight, UTurnLeft,
   RoundaboutLeft, Flag, MyLocation, ForkLeft, ForkRight, MergeType,
   Commute, Tune, CheckCircle, Error as ErrorIcon, Warning as WarningIcon,
-  Info as InfoIcon, ArrowBack, PlayArrow, FilterList, FactCheck,
+  Info as InfoIcon, ArrowBack, PlayArrow, FilterList, FactCheck, Accessible,
 } from '@mui/icons-material'
 import SwaggerUI from 'swagger-ui-react'
 import 'swagger-ui-react/swagger-ui.css'
@@ -68,6 +68,25 @@ const destinationIcon = L.divIcon({
   </svg>`,
   iconSize: [32, 44], iconAnchor: [16, 42], className: '',
 })
+
+// Indoor maneuver markers — colored circles with white SVG icons
+const INDOOR_ICON_STYLE = 'width:24px;height:24px;border-radius:50%;border:2px solid #fff;display:flex;align-items:center;justify-content:center;box-shadow:0 1px 5px rgba(0,0,0,.5)'
+const INDOOR_ICONS = {
+  elevator: L.divIcon({
+    html: `<div style="${INDOOR_ICON_STYLE};background:#00838f"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="white"><path d="M7 2l4 4H3zM17 2l4 4h-8zM7 22l4-4H3zM17 22l4-4h-8zM12 6a2 2 0 1 0 0 4 2 2 0 0 0 0-4zm-1.5 5C9.67 11 9 11.67 9 12.5V18h1.5v-3h3v3H15v-5.5c0-.83-.67-1.5-1.5-1.5z"/></svg></div>`,
+    iconSize: [24, 24], iconAnchor: [12, 12], className: '',
+  }),
+  stairs: L.divIcon({
+    html: `<div style="${INDOOR_ICON_STYLE};background:#e65100"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 5h-5v5h-5v5H2v4h5v-5h5v-5h5V5z"/></svg></div>`,
+    iconSize: [24, 24], iconAnchor: [12, 12], className: '',
+  }),
+  escalator: L.divIcon({
+    html: `<div style="${INDOOR_ICON_STYLE};background:#7b1fa2"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 5h-5v5h-5v5H2v4h5v-5h5v-5h5V5z"/><circle cx="6" cy="4" r="2" fill="white"/></svg></div>`,
+    iconSize: [24, 24], iconAnchor: [12, 12], className: '',
+  }),
+}
+function indoorIcon(kind) { return INDOOR_ICONS[kind] || INDOOR_ICONS.stairs }
+
 const DEFAULT_CENTER = [48.8566, 2.3522]
 const DEFAULT_ZOOM = 11
 
@@ -302,10 +321,14 @@ function FlyToPoint({ point }) {
   return null
 }
 
+// Indoor maneuver types: 39=elevator, 40=stairs, 41=escalator
+const INDOOR_MANEUVER_TYPES = { 39: 'elevator', 40: 'stairs', 41: 'escalator' }
+
 function extractMapData(journey) {
   const lines = []
   const stopPoints = []
   const labeledStops = []
+  const indoorMarkers = []
   const sections = journey.sections
   const ptSections = sections.filter(s => s.type === 'public_transport')
 
@@ -314,6 +337,7 @@ function extractMapData(journey) {
     if (section.type === 'street_network' && section.shape) {
       const coords = decodePolyline(section.shape)
       if (coords.length >= 2) lines.push({ coords, color: '#90a4ae', dashed: false })
+      collectIndoorMarkers(section, coords, indoorMarkers)
       continue
     }
     // Transfer walking legs — all green, indoor dashed, outdoor solid
@@ -323,6 +347,7 @@ function extractMapData(journey) {
       if (section.shape) {
         const coords = decodePolyline(section.shape)
         if (coords.length >= 2) lines.push({ coords, color: transferColor, dashed: isIndoor })
+        collectIndoorMarkers(section, coords, indoorMarkers)
       } else {
         const fromCoord = section.from?.stop_point?.coord
         const toCoord = section.to?.stop_point?.coord
@@ -373,7 +398,20 @@ function extractMapData(journey) {
     }
   }
 
-  return { lines, stopPoints, labeledStops }
+  return { lines, stopPoints, labeledStops, indoorMarkers }
+}
+
+/// Extract indoor maneuver positions (stairs, escalators, elevators) from a section's shape.
+function collectIndoorMarkers(section, coords, markers) {
+  if (!section.maneuvers || coords.length === 0) return
+  for (const m of section.maneuvers) {
+    const kind = INDOOR_MANEUVER_TYPES[m.type]
+    if (!kind) continue
+    const idx = m.begin_shape_index
+    if (idx != null && idx < coords.length) {
+      markers.push({ pos: coords[idx], kind, instruction: m.instruction })
+    }
+  }
 }
 
 // --- Journey card ---
@@ -382,6 +420,7 @@ const TAG_COLORS = {
   fastest: '#00e5ff',
   least_transfers: '#ffb800',
   least_walking: '#b388ff',
+  most_accessible: '#4caf50',
 }
 
 function JourneyCard({ journey, selected, onSelect, animDelay }) {
@@ -1387,6 +1426,14 @@ export default function App() {
     localStorage.setItem('glove_maneuvers', String(checked))
   }
 
+  const [wheelchair, setWheelchair] = useState(() => {
+    return localStorage.getItem('glove_wheelchair') === 'true'
+  })
+  const handleWheelchairChange = (checked) => {
+    setWheelchair(checked)
+    localStorage.setItem('glove_wheelchair', String(checked))
+  }
+
   const defaultModes = { metro: true, rail: true, bus: true, tramway: true, walk: true, bike: true, car: true }
   const [modes, setModes] = useState(() => {
     try {
@@ -1437,7 +1484,11 @@ export default function App() {
       const ptTo = toIsStop ? to.id : (toCoord ? `${toCoord.lon};${toCoord.lat}` : to.id)
       const ptParams = new URLSearchParams({ from: ptFrom, to: ptTo, datetime: toApiDatetime(effectiveDatetime) })
       if (walkingSpeed !== 5) ptParams.set('walking_speed', String(walkingSpeed))
-      if (showManeuvers) ptParams.set('maneuvers', 'true')
+      if (showManeuvers) {
+        ptParams.set('maneuvers', 'true')
+        ptParams.set('language', lang === 'fr' ? 'fr-FR' : 'en-US')
+      }
+      if (wheelchair) ptParams.set('wheelchair', 'true')
       const forbidden = ['metro', 'rail', 'bus', 'tramway'].filter(m => !modes[m])
       if (forbidden.length > 0) ptParams.set('forbidden_modes', forbidden.join(','))
       const ptT0 = performance.now()
@@ -1457,17 +1508,18 @@ export default function App() {
         if (modes.walk) {
           const walkParams = new URLSearchParams(coordParams)
           if (walkingSpeed !== 5) walkParams.set('walking_speed', String(walkingSpeed))
-          if (showManeuvers) walkParams.set('maneuvers', 'true')
+          if (showManeuvers) { walkParams.set('maneuvers', 'true'); walkParams.set('language', lang === 'fr' ? 'fr-FR' : 'en-US') }
+          if (wheelchair) walkParams.set('wheelchair', 'true')
           const walkT0 = performance.now()
           walkFetch = fetch(`/api/journeys/walk?${walkParams}`)
             .then(r => r.ok ? r.json() : null)
             .then(data => { setWalkTime(Math.round(performance.now() - walkT0)); return data })
             .catch(err => { console.warn('Walk fetch failed:', err.message); return null })
         }
-        if (modes.bike) {
+        if (modes.bike && !wheelchair) {
           const bikeT0 = performance.now()
           const bikeParams = new URLSearchParams(coordParams)
-          if (showManeuvers) bikeParams.set('maneuvers', 'true')
+          if (showManeuvers) { bikeParams.set('maneuvers', 'true'); bikeParams.set('language', lang === 'fr' ? 'fr-FR' : 'en-US') }
           bikeFetch = fetch(`/api/journeys/bike?${bikeParams}`)
             .then(r => r.ok ? r.json() : null)
             .then(data => { setBikeTime(Math.round(performance.now() - bikeT0)); return data })
@@ -1476,7 +1528,7 @@ export default function App() {
         if (modes.car) {
           const carT0 = performance.now()
           const carParams = new URLSearchParams(coordParams)
-          if (showManeuvers) carParams.set('maneuvers', 'true')
+          if (showManeuvers) { carParams.set('maneuvers', 'true'); carParams.set('language', lang === 'fr' ? 'fr-FR' : 'en-US') }
           carFetch = fetch(`/api/journeys/car?${carParams}`)
             .then(r => r.ok ? r.json() : null)
             .then(data => { setCarTime(Math.round(performance.now() - carT0)); return data })
@@ -1502,7 +1554,7 @@ export default function App() {
   const isCarSelected = resultTab === 'car'
   const selectedBike = isBikeSelected ? bikeJourneys?.[selectedJourney] || bikeJourneys?.[0] : null
   const selectedJ = (isWalkSelected || isBikeSelected || isCarSelected) ? null : journeys?.[selectedJourney]
-  const mapData = selectedJ ? extractMapData(selectedJ) : { lines: [], stopPoints: [], labeledStops: [] }
+  const mapData = selectedJ ? extractMapData(selectedJ) : { lines: [], stopPoints: [], labeledStops: [], indoorMarkers: [] }
   const walkCoords = (isWalkSelected && walkJourney?.shape) ? decodePolyline(walkJourney.shape) : []
   const bikeCoords = (isBikeSelected && selectedBike?.shape) ? decodePolyline(selectedBike.shape) : []
   const bikeElevSegs = (isBikeSelected && bikeCoords.length >= 2 && selectedBike?.heights)
@@ -1804,28 +1856,34 @@ export default function App() {
                     <Collapse in={showOptions}>
                       <Box sx={{ pt: 1.5, pb: 0.5 }}>
                         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                          <DirectionsWalk sx={{ fontSize: 16, color: 'text.secondary' }} />
+                          {wheelchair
+                            ? <Accessible sx={{ fontSize: 16, color: 'text.secondary' }} />
+                            : <DirectionsWalk sx={{ fontSize: 16, color: 'text.secondary' }} />
+                          }
                           <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: 11 }}>
-                            {t('walkingSpeed')}
+                            {wheelchair ? t('wheelchairSpeed') : t('walkingSpeed')}
                           </Typography>
-                          <Typography variant="caption" fontWeight={700} sx={{ ml: 'auto', fontFamily: '"Syne", sans-serif', color: '#00e5ff' }}>
-                            {walkingSpeed} {t('walkingSpeedUnit')}
+                          <Typography variant="caption" fontWeight={700} sx={{ ml: 'auto', fontFamily: '"Syne", sans-serif', color: wheelchair ? 'text.disabled' : '#00e5ff' }}>
+                            {wheelchair ? '3.5' : walkingSpeed} {t('walkingSpeedUnit')}
                           </Typography>
                         </Box>
                         <Slider
-                          value={walkingSpeed}
+                          value={wheelchair ? 3.5 : walkingSpeed}
                           onChange={(_, v) => handleWalkingSpeedChange(v)}
+                          disabled={wheelchair}
                           min={2} max={10} step={0.5}
-                          marks={[{ value: 2, label: '2' }, { value: 5, label: '5' }, { value: 10, label: '10' }]}
+                          marks={[{ value: 2, label: '2' }, { value: 3.5, label: '♿' }, { value: 5, label: '5' }, { value: 10, label: '10' }]}
                           sx={{
-                            color: '#00e5ff', mt: 0.5,
+                            color: wheelchair ? 'text.disabled' : '#00e5ff', mt: 0.5,
                             '& .MuiSlider-markLabel': { fontSize: 9, color: 'text.disabled' },
                             '& .MuiSlider-thumb': { width: 12, height: 12 },
                             '& .MuiSlider-rail': { opacity: 0.2 },
                           }}
                         />
 
-                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mt: 1, mb: 0.5 }}>
+                        <Divider sx={{ my: 1.5, borderColor: 'rgba(255,255,255,0.06)' }} />
+
+                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5 }}>
                           <Commute sx={{ fontSize: 16, color: 'text.secondary' }} />
                           <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: 11 }}>
                             {t('transportModes')}
@@ -1840,28 +1898,35 @@ export default function App() {
                             { key: 'walk', icon: <DirectionsWalk sx={{ fontSize: 16 }} />, label: t('modeWalk') },
                             { key: 'bike', icon: <DirectionsBike sx={{ fontSize: 16 }} />, label: t('modeBike') },
                             { key: 'car', icon: <DirectionsCar sx={{ fontSize: 16 }} />, label: t('modeCar') },
-                          ].map(m => (
-                            <Chip
-                              key={m.key}
-                              icon={m.icon}
-                              label={m.label}
-                              size="small"
-                              onClick={() => toggleMode(m.key)}
-                              variant={modes[m.key] ? 'filled' : 'outlined'}
-                              sx={{
-                                fontSize: 10,
-                                height: 26,
-                                bgcolor: modes[m.key] ? 'rgba(0, 229, 255, 0.15)' : 'transparent',
-                                borderColor: modes[m.key] ? 'rgba(0, 229, 255, 0.4)' : 'rgba(255,255,255,0.12)',
-                                color: modes[m.key] ? '#00e5ff' : 'text.disabled',
-                                '& .MuiChip-icon': { color: modes[m.key] ? '#00e5ff' : 'text.disabled' },
-                                '&:hover': { bgcolor: 'rgba(0, 229, 255, 0.1)' },
-                              }}
-                            />
-                          ))}
+                          ].map(m => {
+                            const disabled = wheelchair && m.key === 'bike'
+                            const active = !disabled && modes[m.key]
+                            return (
+                              <Chip
+                                key={m.key}
+                                icon={m.icon}
+                                label={m.label}
+                                size="small"
+                                disabled={disabled}
+                                onClick={() => !disabled && toggleMode(m.key)}
+                                variant={active ? 'filled' : 'outlined'}
+                                sx={{
+                                  fontSize: 10,
+                                  height: 26,
+                                  bgcolor: active ? 'rgba(0, 229, 255, 0.15)' : 'transparent',
+                                  borderColor: active ? 'rgba(0, 229, 255, 0.4)' : 'rgba(255,255,255,0.12)',
+                                  color: active ? '#00e5ff' : 'text.disabled',
+                                  '& .MuiChip-icon': { color: active ? '#00e5ff' : 'text.disabled' },
+                                  '&:hover': { bgcolor: disabled ? 'transparent' : 'rgba(0, 229, 255, 0.1)' },
+                                }}
+                              />
+                            )
+                          })}
                         </Box>
 
-                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mt: 1.5, mb: 0.5 }}>
+                        <Divider sx={{ my: 1.5, borderColor: 'rgba(255,255,255,0.06)' }} />
+
+                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5 }}>
                           <Tune sx={{ fontSize: 16, color: 'text.secondary' }} />
                           <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: 11 }}>
                             {t('advancedOptions')}
@@ -1882,6 +1947,22 @@ export default function App() {
                           }
                           label={t('showManeuvers')}
                           sx={{ mt: 1, ml: 0, '& .MuiFormControlLabel-label': { fontSize: 11, color: 'text.secondary' } }}
+                        />
+
+                        <FormControlLabel
+                          control={
+                            <Switch
+                              checked={wheelchair}
+                              onChange={(e) => handleWheelchairChange(e.target.checked)}
+                              size="small"
+                              sx={{
+                                '& .MuiSwitch-switchBase.Mui-checked': { color: '#00e5ff' },
+                                '& .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track': { backgroundColor: '#00e5ff' },
+                              }}
+                            />
+                          }
+                          label={<Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}><Accessible sx={{ fontSize: 14 }} />{t('wheelchairAccessible')}</Box>}
+                          sx={{ mt: 0.5, ml: 0, '& .MuiFormControlLabel-label': { fontSize: 11, color: 'text.secondary' } }}
                         />
                       </Box>
                     </Collapse>
@@ -2100,6 +2181,14 @@ export default function App() {
                 </LTooltip>
               </CircleMarker>
             ))}
+
+          {mapData.indoorMarkers.map((im, i) => (
+            <Marker key={`indoor-${i}`} position={im.pos} icon={indoorIcon(im.kind)}>
+              <LTooltip direction="top" offset={[0, -14]}>
+                <span style={{ fontSize: 12 }}>{im.instruction}</span>
+              </LTooltip>
+            </Marker>
+          ))}
 
           {fromPos && (
             <Marker position={fromPos} icon={originIcon}>

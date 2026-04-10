@@ -29,10 +29,53 @@ Returns GTFS data statistics and server information. No authentication required.
 
 This endpoint is used as the Docker healthcheck.
 
+## GTFS Validation
+
+```
+GET /api/gtfs/validate
+```
+
+Runs 19 automated data quality checks on the loaded GTFS data and returns issues grouped by severity.
+
+### Validation Categories
+
+| Category | Checks |
+|----------|--------|
+| **Referential Integrity** | Orphaned stop_times (missing trip/stop), orphaned trips (missing route), orphaned routes (missing agency) |
+| **Calendar** | Active services exist for today, no expired calendars |
+| **Coordinates** | Valid lat/lon ranges, no zeros, within bounds |
+| **Transfers** | Valid transfer types, referenced stops exist |
+| **Pathways** | Valid pathway types, referenced stops exist |
+| **Display** | Missing route colors, missing route names |
+
+### Response
+
+```json
+{
+  "summary": {
+    "errors": 2,
+    "warnings": 5,
+    "infos": 3,
+    "total_checks": 19
+  },
+  "issues": [
+    {
+      "severity": "error",
+      "category": "referential_integrity",
+      "message": "stop_times reference non-existent trip_id",
+      "count": 12,
+      "samples": ["trip_001", "trip_002", "trip_003"]
+    }
+  ]
+}
+```
+
+Each issue includes up to 5 sample IDs for diagnosing the problem. The frontend displays an interactive validation report.
+
 ## Reload
 
 ```
-POST /api/reload
+POST /api/gtfs/reload
 ```
 
 Triggers a hot-reload of GTFS data. The server remains fully available during the reload.
@@ -42,7 +85,7 @@ Triggers a hot-reload of GTFS data. The server remains fully available during th
 Requires the API key configured in `config.yaml`:
 
 ```bash
-curl -X POST http://localhost:8080/api/reload \
+curl -X POST http://localhost:8080/api/gtfs/reload \
   -H "Authorization: Bearer your-secret-key"
 ```
 

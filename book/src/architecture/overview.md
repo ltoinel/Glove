@@ -23,16 +23,19 @@ Glove is a monorepo with a Rust backend and React frontend.
   <text x="360" y="125" text-anchor="middle" fill="#e4e2ec" font-size="13" font-weight="700">Actix-web Server</text>
   <text x="360" y="142" text-anchor="middle" fill="#56546a" font-size="10">CORS · Rate Limiting · Metrics Middleware</text>
   <!-- API endpoints row -->
-  <rect x="70" y="160" width="140" height="50" rx="8" fill="url(#cyan-grad)" stroke="#00e5ff" stroke-opacity="0.4" stroke-width="1"/>
-  <text x="140" y="182" text-anchor="middle" fill="#00e5ff" font-size="11" font-weight="600">/journeys</text>
-  <text x="140" y="198" text-anchor="middle" fill="#56546a" font-size="9">/walk /bike /car</text>
-  <rect x="230" y="160" width="120" height="50" rx="8" fill="url(#cyan-grad)" stroke="#00e5ff" stroke-opacity="0.4" stroke-width="1"/>
-  <text x="290" y="190" text-anchor="middle" fill="#00e5ff" font-size="11" font-weight="600">/places</text>
-  <rect x="370" y="160" width="120" height="50" rx="8" fill="url(#cyan-grad)" stroke="#00e5ff" stroke-opacity="0.4" stroke-width="1"/>
-  <text x="430" y="182" text-anchor="middle" fill="#00e5ff" font-size="11" font-weight="600">/status</text>
-  <text x="430" y="198" text-anchor="middle" fill="#56546a" font-size="9">/reload</text>
-  <rect x="510" y="160" width="120" height="50" rx="8" fill="url(#cyan-grad)" stroke="#00e5ff" stroke-opacity="0.4" stroke-width="1"/>
-  <text x="570" y="190" text-anchor="middle" fill="#00e5ff" font-size="11" font-weight="600">/metrics</text>
+  <rect x="55" y="160" width="120" height="50" rx="8" fill="url(#cyan-grad)" stroke="#00e5ff" stroke-opacity="0.4" stroke-width="1"/>
+  <text x="115" y="182" text-anchor="middle" fill="#00e5ff" font-size="11" font-weight="600">/journeys</text>
+  <text x="115" y="198" text-anchor="middle" fill="#56546a" font-size="9">/walk /bike /car</text>
+  <rect x="185" y="160" width="100" height="50" rx="8" fill="url(#cyan-grad)" stroke="#00e5ff" stroke-opacity="0.4" stroke-width="1"/>
+  <text x="235" y="190" text-anchor="middle" fill="#00e5ff" font-size="11" font-weight="600">/places</text>
+  <rect x="295" y="160" width="100" height="50" rx="8" fill="url(#cyan-grad)" stroke="#00e5ff" stroke-opacity="0.4" stroke-width="1"/>
+  <text x="345" y="182" text-anchor="middle" fill="#00e5ff" font-size="11" font-weight="600">/status</text>
+  <text x="345" y="198" text-anchor="middle" fill="#56546a" font-size="9">/gtfs/*</text>
+  <rect x="405" y="160" width="100" height="50" rx="8" fill="url(#cyan-grad)" stroke="#00e5ff" stroke-opacity="0.4" stroke-width="1"/>
+  <text x="455" y="190" text-anchor="middle" fill="#00e5ff" font-size="11" font-weight="600">/metrics</text>
+  <rect x="515" y="160" width="110" height="50" rx="8" fill="url(#cyan-grad)" stroke="#00e5ff" stroke-opacity="0.4" stroke-width="1"/>
+  <text x="570" y="182" text-anchor="middle" fill="#00e5ff" font-size="11" font-weight="600">/tiles</text>
+  <text x="570" y="198" text-anchor="middle" fill="#56546a" font-size="9">cache proxy</text>
   <!-- RAPTOR Index -->
   <rect x="80" y="250" width="200" height="70" rx="10" fill="url(#amber-grad)" stroke="#ffb800" stroke-opacity="0.5" stroke-width="1.5"/>
   <text x="180" y="280" text-anchor="middle" fill="#ffb800" font-size="13" font-weight="700">RAPTOR Index</text>
@@ -60,7 +63,7 @@ There is no database. All GTFS data is loaded from CSV files at startup and held
 ```
 
 ```admonish example title="Lock-Free Hot-Reload"
-The RAPTOR index is wrapped in [ArcSwap](https://docs.rs/arc-swap), which allows atomic pointer swaps. When new GTFS data is loaded via `POST /api/reload`, the entire index is rebuilt in a background thread and swapped in atomically. No request is ever blocked or sees partial data.
+The RAPTOR index is wrapped in [ArcSwap](https://docs.rs/arc-swap), which allows atomic pointer swaps. When new GTFS data is loaded via `POST /api/gtfs/reload`, the entire index is rebuilt in a background thread and swapped in atomically. No request is ever blocked or sees partial data.
 ```
 
 ```admonish example title="Pattern Grouping"

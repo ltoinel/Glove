@@ -123,6 +123,7 @@ mod tests {
             stop_lon: 2.347,
             stop_lat: 48.858,
             parent_station: String::new(),
+            wheelchair_boarding: 0,
         }
     }
 

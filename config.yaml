@@ -36,6 +36,15 @@ map:
   bounds_sw_lon: 1.4
   bounds_ne_lat: 49.3          # North-east corner
   bounds_ne_lon: 3.6
+  tile_url: "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png"
+  tile_cache_duration: 864000    # seconds — browser cache duration for map tiles
+
+wheelchair:
+  step_penalty: 999999          # effectively avoid stairs
+  max_grade: 6                  # 6% slope max (wheelchair norms)
+  use_hills: 0.0                # avoid hills entirely
+  elevator_penalty: 0           # prefer elevators
+  walking_speed: 3.5            # km/h — typical wheelchair speed
 
 bike:
   city:                         # City bike (Velib' mécanique)

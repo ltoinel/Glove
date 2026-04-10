@@ -11,7 +11,7 @@ use utoipa::{IntoParams, ToSchema};
 
 use std::sync::Arc;
 
-use crate::config::AppConfig;
+use crate::config::{AppConfig, WheelchairConfig};
 use crate::raptor::{self, RaptorData, SectionType};
 
 use super::valhalla;
@@ -270,6 +270,7 @@ pub async fn get_journeys(
 
     let mode_excluded =
         compute_mode_exclusions(&raptor_data, query.forbidden_modes.as_deref().unwrap_or(""));
+    let wheelchair = query.wheelchair.unwrap_or(false);
 
     // Iterative search with pattern exclusion for route diversity
     let mut journeys: Vec<Journey> = Vec::new();
@@ -287,6 +288,7 @@ pub async fn get_journeys(
             &active,
             max_transfers,
             &excluded_patterns,
+            wheelchair,
         );
 
         let section_sets = raptor::reconstruct_journeys(&raptor_data, &result, &targets);
@@ -327,6 +329,8 @@ pub async fn get_journeys(
         let valhalla_base = format!("http://{}:{}", config.valhalla.host, config.valhalla.port);
         let walking_speed = query.walking_speed;
         let include_maneuvers = query.maneuvers.unwrap_or(false);
+        let language = query.language.as_deref();
+        let wc = if wheelchair { Some(&config.wheelchair) } else { None };
 
         // First/last mile: only when origin or destination are coordinates
         // (addresses). Stop IDs don't need first/last mile because RAPTOR
@@ -342,6 +346,8 @@ pub async fn get_journeys(
                 walking_speed,
                 include_maneuvers,
                 &effective_date,
+                language,
+                wc,
             )
             .await;
         }
@@ -353,11 +359,13 @@ pub async fn get_journeys(
             &valhalla_base,
             walking_speed,
             include_maneuvers,
+            language,
+            wc,
         )
         .await;
     }
 
-    tag_journeys(&mut journeys);
+    tag_journeys(&mut journeys, wheelchair);
 
     HttpResponse::Ok().json(JourneysResponse { journeys })
 }
@@ -382,6 +390,8 @@ async fn enrich_first_last_mile(
     walking_speed: Option<f64>,
     include_maneuvers: bool,
     date: &str,
+    language: Option<&str>,
+    wheelchair_config: Option<&WheelchairConfig>,
 ) {
     let mut first_mile_cache: rustc_hash::FxHashMap<usize, Option<Arc<valhalla::WalkLeg>>> =
         rustc_hash::FxHashMap::default();
@@ -423,6 +433,8 @@ async fn enrich_first_last_mile(
                     (stop.stop_lon, stop.stop_lat),
                     walking_speed,
                     false, // first mile: penalize stairs
+                    language,
+                    wheelchair_config,
                 )
                 .await
                 .map(Arc::new);
@@ -447,6 +459,8 @@ async fn enrich_first_last_mile(
                     to_c,
                     walking_speed,
                     false, // last mile: penalize stairs
+                    language,
+                    wheelchair_config,
                 )
                 .await
                 .map(Arc::new);
@@ -594,6 +608,8 @@ async fn enrich_transfers(
     valhalla_base: &str,
     walking_speed: Option<f64>,
     include_maneuvers: bool,
+    language: Option<&str>,
+    wheelchair_config: Option<&WheelchairConfig>,
 ) {
     type TransferReq = (usize, usize, (f64, f64), (f64, f64), bool);
     let mut transfer_requests: Vec<TransferReq> = Vec::new();
@@ -640,7 +656,7 @@ async fn enrich_transfers(
         .iter()
         .map(|(_, _, from, to, is_outdoor)| {
             let indoor_friendly = !is_outdoor;
-            valhalla::pedestrian_route(valhalla_base, *from, *to, walking_speed, indoor_friendly)
+            valhalla::pedestrian_route(valhalla_base, *from, *to, walking_speed, indoor_friendly, language, wheelchair_config)
         })
         .collect();
     let results = futures::future::join_all(futs).await;
@@ -1003,8 +1019,10 @@ fn build_journey(data: &RaptorData, sections: &[raptor::JourneySection], date: &
 /// Compute quality tags for a sorted list of journeys.
 ///
 /// Tags: `fastest`, `least_transfers`, `least_walking`.
+/// When `wheelchair` is true, also adds `most_accessible` to the journey
+/// with the best accessibility score (least walking + fewest transfers).
 /// If all journeys share a tag, only the first keeps it.
-fn tag_journeys(journeys: &mut [Journey]) {
+fn tag_journeys(journeys: &mut [Journey], wheelchair: bool) {
     if journeys.is_empty() {
         return;
     }
@@ -1036,7 +1054,30 @@ fn tag_journeys(journeys: &mut [Journey]) {
         }
     }
 
-    for tag in &["fastest", "least_transfers", "least_walking"] {
+    // Wheelchair: tag the most accessible journey (least walking + fewest
+    // transfers). Walking time is weighted more heavily because it represents
+    // the most physically demanding part for a wheelchair user.
+    if wheelchair {
+        let best_idx = journeys
+            .iter()
+            .enumerate()
+            .map(|(i, j)| {
+                let score = walking_times[i] as u64 * 3 + j.nb_transfers as u64 * 120;
+                (i, score)
+            })
+            .min_by_key(|(_, score)| *score)
+            .map(|(i, _)| i);
+        if let Some(idx) = best_idx {
+            journeys[idx].tags.push("most_accessible".to_string());
+        }
+    }
+
+    let all_tags: &[&str] = if wheelchair {
+        &["fastest", "least_transfers", "least_walking", "most_accessible"]
+    } else {
+        &["fastest", "least_transfers", "least_walking"]
+    };
+    for tag in all_tags {
         let count = journeys
             .iter()
             .filter(|j| j.tags.iter().any(|t| t == tag))
@@ -1070,6 +1111,7 @@ mod tests {
                     stop_lon: *lon,
                     stop_lat: *lat,
                     parent_station: String::new(),
+                    wheelchair_boarding: 0,
                 },
             );
         }
@@ -1094,6 +1136,7 @@ mod tests {
                 service_id: "SVC1".to_string(),
                 trip_id: "T1".to_string(),
                 trip_headsign: "StopC".to_string(),
+                wheelchair_accessible: 0,
             },
         );
         let stop_times = vec![
@@ -1160,7 +1203,7 @@ mod tests {
     #[test]
     fn tag_journeys_empty() {
         let mut journeys: Vec<Journey> = vec![];
-        tag_journeys(&mut journeys);
+        tag_journeys(&mut journeys, false);
         assert!(journeys.is_empty());
     }
 
@@ -1174,7 +1217,7 @@ mod tests {
             tags: vec![],
             sections: vec![],
         }];
-        tag_journeys(&mut journeys);
+        tag_journeys(&mut journeys, false);
         assert!(journeys[0].tags.contains(&"fastest".to_string()));
     }
 
@@ -1219,7 +1262,7 @@ mod tests {
                 sections: vec![],
             },
         ];
-        tag_journeys(&mut journeys);
+        tag_journeys(&mut journeys, false);
         assert!(journeys[0].tags.contains(&"fastest".to_string()));
         assert!(journeys[1].tags.contains(&"least_transfers".to_string()));
         assert!(journeys[1].tags.contains(&"least_walking".to_string()));
@@ -1242,6 +1285,7 @@ mod tests {
             &active,
             3,
             &rustc_hash::FxHashSet::default(),
+            false,
         );
         let section_sets = raptor::reconstruct_journeys(&data, &result, &[(target, 0)]);
         assert!(!section_sets.is_empty());
@@ -1265,6 +1309,7 @@ mod tests {
             &active,
             3,
             &rustc_hash::FxHashSet::default(),
+            false,
         );
         let section_sets = raptor::reconstruct_journeys(&data, &result, &[(target, 0)]);
         let journey = build_journey(&data, &section_sets[0], "20260406");

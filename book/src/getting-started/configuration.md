@@ -11,7 +11,7 @@ server:
   workers: 1                    # 0 = auto (one per logical CPU)
   log_level: "info"             # trace, debug, info, warn, error
   shutdown_timeout: 30          # seconds — graceful shutdown for in-flight requests
-  api_key: ""                   # Required for POST /api/reload. Empty = endpoint disabled
+  api_key: ""                   # Required for POST /api/gtfs/reload. Empty = endpoint disabled
   cors_origins: []              # Allowed origins. ["*"] = permissive (not for production)
   rate_limit: 20                # Max requests/sec per IP. 0 = disabled
 ```
@@ -90,9 +90,21 @@ map:
   bounds_sw_lon: 1.4
   bounds_ne_lat: 49.3
   bounds_ne_lon: 3.6
+  tile_url: "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png"
+  tile_cache_duration: 864000    # seconds (10 days)
 ```
 
-These settings control the initial map view and geographic bounds in the frontend.
+These settings control the initial map view, geographic bounds, and the tile caching proxy.
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `zoom` | Default map zoom level | `11` |
+| `center_lat` / `center_lon` | Default map center | `48.8566` / `2.3522` (Paris) |
+| `bounds_sw_*` / `bounds_ne_*` | Geographic bounds (SW and NE corners) | Île-de-France |
+| `tile_url` | Upstream tile server URL template. Placeholders: `{s}` (subdomain), `{z}`, `{x}`, `{y}`, `{r}` (retina) | CARTO Voyager |
+| `tile_cache_duration` | Browser cache duration for tiles (seconds) | `864000` (10 days) |
+
+Tiles are fetched from the upstream server on first request and cached to `data/tiles/` on disk. Subsequent requests are served from cache.
 
 ## Bike Profiles
 
@@ -122,3 +134,28 @@ Three bike profiles are available, each with independent Valhalla routing parame
 | **City** | 16 km/h | Velib' / city bikes, avoids hills and busy roads |
 | **E-bike** | 21 km/h | Electric bikes (VAE), handles hills easily |
 | **Road** | 25 km/h | Road bikes, prefers smooth tarmac |
+
+## Wheelchair Accessibility
+
+```yaml
+wheelchair:
+  step_penalty: 999999          # effectively avoid stairs
+  max_grade: 6                  # 6% slope max (wheelchair norms)
+  use_hills: 0.0                # avoid hills entirely
+  elevator_penalty: 0           # prefer elevators
+  walking_speed: 3.5            # km/h — typical wheelchair speed
+```
+
+These settings are used when the `wheelchair=true` parameter is passed to journey endpoints. They configure Valhalla's pedestrian costing model for wheelchair-accessible routing.
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `step_penalty` | Penalty for stairs. Very high value effectively avoids them | `999999` |
+| `max_grade` | Maximum road grade in percent (6% is the standard wheelchair norm) | `6` |
+| `use_hills` | Hill avoidance factor (0.0 = strongly avoid, 1.0 = no preference) | `0.0` |
+| `elevator_penalty` | Penalty for elevators (0 = prefer them) | `0` |
+| `walking_speed` | Wheelchair speed in km/h | `3.5` |
+
+```admonish info
+When wheelchair mode is active, the walking speed slider in the frontend is locked to the configured wheelchair speed (3.5 km/h), and bike/car modes are hidden.
+```

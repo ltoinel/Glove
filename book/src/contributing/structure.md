@@ -19,15 +19,19 @@ Glove/
 │       │   ├── car.rs           # Driving via Valhalla
 │       │   └── valhalla.rs      # Shared Valhalla HTTP client
 │       ├── places.rs            # Autocomplete (stops + addresses)
+│       ├── gtfs.rs              # GTFS validation & reload endpoints
+│       ├── tiles.rs             # Map tile proxy with disk cache
 │       ├── metrics.rs           # Prometheus metrics endpoint
-│       └── status.rs            # Status & reload endpoints
+│       └── status.rs            # Status endpoint
 │
 ├── portal/                      # React frontend
 │   ├── src/
 │   │   ├── App.jsx              # Main SPA (search, results, map, metrics)
 │   │   ├── i18n.jsx             # Internationalization (FR/EN)
 │   │   ├── main.jsx             # Entry point with MUI theme
-│   │   └── index.css            # Styling
+│   │   ├── index.css            # Styling
+│   │   ├── utils.js             # Pure utility functions (tested with vitest)
+│   │   └── test/                # Vitest test files
 │   ├── package.json
 │   ├── vite.config.js
 │   └── eslint.config.js
@@ -35,7 +39,9 @@ Glove/
 ├── bin/                         # Utility scripts
 │   ├── start.sh                 # Start script (production & dev)
 │   ├── download.sh              # Data download (GTFS, OSM, BAN)
-│   ├── valhalla.sh              # Valhalla Docker setup
+│   └── valhalla.sh              # Valhalla Docker setup
+│
+├── scripts/                     # Analysis & benchmarking
 │   ├── benchmark.py             # Performance benchmark with charts
 │   └── check_indoor.py          # Check GTFS transfers for indoor routing data
 │
@@ -52,6 +58,7 @@ Glove/
 │   ├── osm/                     # OpenStreetMap data
 │   ├── raptor/                  # Serialized RAPTOR index cache
 │   ├── ban/                     # French address data
+│   ├── tiles/                   # Cached map tiles (auto-populated)
 │   └── valhalla/                # Valhalla routing tiles
 │
 ├── config.yaml                  # Application configuration
@@ -66,10 +73,13 @@ Glove/
 
 | File | Lines | Description |
 |------|-------|-------------|
-| `src/raptor.rs` | ~2,100 | RAPTOR algorithm, the core of the application |
-| `portal/src/App.jsx` | ~1,065 | Entire frontend SPA in one file |
-| `src/api/journeys/public_transport.rs` | ~900 | Journey planning endpoint and response formatting |
-| `src/api/places.rs` | ~300 | Fuzzy search with ranking |
-| `src/api/metrics.rs` | ~280 | Prometheus metrics collection |
-| `src/gtfs.rs` | ~500 | GTFS CSV parsing and data model |
-| `src/config.rs` | ~150 | Configuration with defaults |
+| `src/raptor.rs` | ~2,200 | RAPTOR algorithm, the core of the application |
+| `portal/src/App.jsx` | ~2,200 | Entire frontend SPA in one file |
+| `src/api/journeys/public_transport.rs` | ~1,450 | Journey planning endpoint and response formatting |
+| `src/api/gtfs.rs` | ~830 | GTFS validation (19 checks) & reload endpoint |
+| `src/config.rs` | ~750 | Configuration with defaults (server, routing, map, bike, wheelchair) |
+| `src/ban.rs` | ~630 | BAN address geocoding with number interpolation |
+| `src/gtfs.rs` | ~570 | GTFS CSV parsing and data model |
+| `src/api/places.rs` | ~340 | Fuzzy search with ranking |
+| `src/api/metrics.rs` | ~370 | Prometheus metrics collection |
+| `src/api/tiles.rs` | ~110 | Map tile proxy with disk cache |

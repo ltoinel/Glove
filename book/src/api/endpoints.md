@@ -12,8 +12,10 @@ Glove exposes a REST API on the configured port (default: 8080). All endpoints r
 | `GET` | `/api/journeys/car` | Driving directions (Valhalla) |
 | `GET` | `/api/places` | Stop and address autocomplete |
 | `GET` | `/api/status` | GTFS stats and server status |
-| `POST` | `/api/reload` | Hot-reload GTFS data |
+| `GET` | `/api/gtfs/validate` | GTFS data quality validation (19 checks) |
+| `POST` | `/api/gtfs/reload` | Hot-reload GTFS data |
 | `GET` | `/api/metrics` | Prometheus-format metrics |
+| `GET` | `/api/tiles/{z}/{x}/{y}.png` | Map tile proxy with local disk cache |
 | `GET` | `/api-docs/openapi.json` | OpenAPI specification |
 
 ## Navitia Compatibility
@@ -30,7 +32,7 @@ All journey endpoints accept an optional `maneuvers=true` query parameter. When 
 
 ## Authentication
 
-Most endpoints are public. The `POST /api/reload` endpoint requires an API key configured in `config.yaml`:
+Most endpoints are public. The `POST /api/gtfs/reload` endpoint requires an API key configured in `config.yaml`:
 
 ```yaml
 server:
@@ -40,17 +42,17 @@ server:
 Pass the key in the `Authorization` header:
 
 ```bash
-curl -X POST http://localhost:8080/api/reload \
+curl -X POST http://localhost:8080/api/gtfs/reload \
   -H "Authorization: Bearer your-secret-key"
 ```
 
 ```admonish warning
-If `api_key` is empty in the config, the reload endpoint is disabled.
+If `api_key` is empty in the config, the reload and validate endpoints are disabled.
 ```
 
 ## Rate Limiting
 
-All endpoints are rate-limited per IP address. The default is 20 requests/second, configurable via:
+All endpoints except the tile proxy are rate-limited per IP address. The default is 20 requests/second, configurable via:
 
 ```yaml
 server:

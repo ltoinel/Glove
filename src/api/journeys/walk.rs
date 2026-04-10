@@ -28,6 +28,10 @@ pub struct WalkQuery {
     pub walking_speed: Option<f64>,
     /// Include turn-by-turn maneuvers in the response (default: false).
     pub maneuvers: Option<bool>,
+    /// Language for maneuver instructions (e.g. "fr-FR", "en-US").
+    pub language: Option<String>,
+    /// Enable wheelchair-accessible routing (avoid stairs, limit grade).
+    pub wheelchair: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -65,6 +69,8 @@ pub struct Maneuver {
     pub distance: u32,
     /// Duration in seconds.
     pub duration: u32,
+    /// Index into the encoded shape where this maneuver begins.
+    pub begin_shape_index: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -96,13 +102,30 @@ pub async fn get_walk(query: web::Query<WalkQuery>, config: web::Data<AppConfig>
     );
 
     let costing_options = {
-        let mut opts = serde_json::json!({
-            "pedestrian": {
-                "step_penalty": 30,
-                "elevator_penalty": 60
-            }
-        });
-        if let Some(speed) = query.walking_speed {
+        let mut opts = if query.wheelchair.unwrap_or(false) {
+            let wc = &config.wheelchair;
+            serde_json::json!({
+                "pedestrian": {
+                    "step_penalty": wc.step_penalty,
+                    "max_grade": wc.max_grade,
+                    "use_hills": wc.use_hills,
+                    "elevator_penalty": wc.elevator_penalty
+                }
+            })
+        } else {
+            serde_json::json!({
+                "pedestrian": {
+                    "step_penalty": 30,
+                    "elevator_penalty": 60
+                }
+            })
+        };
+        let effective_speed = if query.wheelchair.unwrap_or(false) {
+            Some(config.wheelchair.walking_speed)
+        } else {
+            query.walking_speed
+        };
+        if let Some(speed) = effective_speed {
             opts["pedestrian"]["walking_speed"] = serde_json::json!(speed.clamp(0.5, 25.5));
         }
         Some(opts)
@@ -123,6 +146,7 @@ pub async fn get_walk(query: web::Query<WalkQuery>, config: web::Data<AppConfig>
         costing_options,
         directions_options: DirectionsOptions {
             units: "kilometers".to_string(),
+            language: query.language.clone(),
         },
     };
 
@@ -173,6 +197,7 @@ pub async fn get_walk(query: web::Query<WalkQuery>, config: web::Data<AppConfig>
                     maneuver_type: m.maneuver_type,
                     distance: (m.length * 1000.0) as u32,
                     duration: m.time as u32,
+                    begin_shape_index: m.begin_shape_index,
                 })
                 .collect(),
         )
