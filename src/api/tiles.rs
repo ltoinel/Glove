@@ -28,7 +28,9 @@ pub async fn get_tile(
     }
 
     let tiles_dir = config.data.tiles_dir();
-    let base = PathBuf::from(&tiles_dir).canonicalize().unwrap_or_else(|_| PathBuf::from(&tiles_dir));
+    let base = PathBuf::from(&tiles_dir)
+        .canonicalize()
+        .unwrap_or_else(|_| PathBuf::from(&tiles_dir));
     // z, x, y are u32 — no path traversal possible, but we canonicalize
     // and verify the resulting path stays under the tiles directory.
     let tile_path = base
@@ -47,7 +49,10 @@ pub async fn get_tile(
             Ok(data) => {
                 return HttpResponse::Ok()
                     .content_type("image/png")
-                    .append_header(("Cache-Control", format!("public, max-age={}", config.map.tile_cache_duration)))
+                    .append_header((
+                        "Cache-Control",
+                        format!("public, max-age={}", config.map.tile_cache_duration),
+                    ))
                     .body(data);
             }
             Err(e) => {
@@ -117,6 +122,9 @@ pub async fn get_tile(
 
     HttpResponse::Ok()
         .content_type("image/png")
-        .append_header(("Cache-Control", format!("public, max-age={}", config.map.tile_cache_duration)))
+        .append_header((
+            "Cache-Control",
+            format!("public, max-age={}", config.map.tile_cache_duration),
+        ))
         .body(bytes)
 }

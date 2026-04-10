@@ -330,7 +330,11 @@ pub async fn get_journeys(
         let walking_speed = query.walking_speed;
         let include_maneuvers = query.maneuvers.unwrap_or(false);
         let language = query.language.as_deref();
-        let wc = if wheelchair { Some(&config.wheelchair) } else { None };
+        let wc = if wheelchair {
+            Some(&config.wheelchair)
+        } else {
+            None
+        };
 
         // First/last mile: only when origin or destination are coordinates
         // (addresses). Stop IDs don't need first/last mile because RAPTOR
@@ -656,7 +660,15 @@ async fn enrich_transfers(
         .iter()
         .map(|(_, _, from, to, is_outdoor)| {
             let indoor_friendly = !is_outdoor;
-            valhalla::pedestrian_route(valhalla_base, *from, *to, walking_speed, indoor_friendly, language, wheelchair_config)
+            valhalla::pedestrian_route(
+                valhalla_base,
+                *from,
+                *to,
+                walking_speed,
+                indoor_friendly,
+                language,
+                wheelchair_config,
+            )
         })
         .collect();
     let results = futures::future::join_all(futs).await;
@@ -1073,7 +1085,12 @@ fn tag_journeys(journeys: &mut [Journey], wheelchair: bool) {
     }
 
     let all_tags: &[&str] = if wheelchair {
-        &["fastest", "least_transfers", "least_walking", "most_accessible"]
+        &[
+            "fastest",
+            "least_transfers",
+            "least_walking",
+            "most_accessible",
+        ]
     } else {
         &["fastest", "least_transfers", "least_walking"]
     };

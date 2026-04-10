@@ -1027,7 +1027,9 @@ fn find_earliest_trip(
 
     for (idx, trip) in trips.iter().enumerate().skip(start) {
         let dep = trip.stop_times[pos].1;
-        if dep >= min_departure && dep < best_dep && active[trip.service_idx]
+        if dep >= min_departure
+            && dep < best_dep
+            && active[trip.service_idx]
             && (!wheelchair || trip.wheelchair_accessible != 2)
         {
             best_dep = dep;
