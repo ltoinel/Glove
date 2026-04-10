@@ -28,10 +28,18 @@ pub async fn get_tile(
     }
 
     let tiles_dir = config.data.tiles_dir();
-    let tile_path = PathBuf::from(&tiles_dir)
+    let base = PathBuf::from(&tiles_dir).canonicalize().unwrap_or_else(|_| PathBuf::from(&tiles_dir));
+    // z, x, y are u32 — no path traversal possible, but we canonicalize
+    // and verify the resulting path stays under the tiles directory.
+    let tile_path = base
         .join(z.to_string())
         .join(x.to_string())
         .join(format!("{y}.png"));
+    if !tile_path.starts_with(&base) {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": { "id": "bad_request", "message": "Invalid tile path" }
+        }));
+    }
 
     // Serve from cache if available
     if tile_path.exists() {

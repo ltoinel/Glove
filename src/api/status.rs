@@ -9,13 +9,20 @@ use crate::config::AppConfig;
 use crate::raptor::RaptorData;
 
 /// Check Valhalla connectivity by hitting its /status endpoint.
+///
+/// The URL is built exclusively from admin-controlled config values
+/// (`valhalla.host` and `valhalla.port`), not from user input.
 async fn check_valhalla(config: &AppConfig) -> bool {
-    let url = format!(
-        "http://{}:{}/status",
-        config.valhalla.host, config.valhalla.port
-    );
+    // Validate host: only allow hostnames and IPs, no scheme or slashes
+    let host = &config.valhalla.host;
+    if host.is_empty() || host.contains('/') || host.contains(':') {
+        tracing::warn!("Invalid Valhalla host in config: {host}");
+        return false;
+    }
+    let url = format!("http://{}:{}/status", host, config.valhalla.port);
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(3))
+        .redirect(reqwest::redirect::Policy::none())
         .build();
     match client {
         Ok(c) => c
