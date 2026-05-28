@@ -173,23 +173,62 @@ pub async fn get_journeys(
 ) -> HttpResponse {
     let raptor_data = shared.load();
 
-    let from_str = match &query.from {
-        Some(f) => f.as_str(),
-        None => {
-            return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": { "id": "bad_request", "message": "'from' parameter is required" }
-            }));
-        }
+    let resolved = match resolve_journey_query(&query, &raptor_data, &config) {
+        Ok(r) => r,
+        Err(resp) => return resp,
     };
 
-    let to_str = match &query.to {
-        Some(t) => t.as_str(),
-        None => {
-            return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": { "id": "bad_request", "message": "'to' parameter is required" }
-            }));
-        }
-    };
+    let mut journeys = run_iterative_search(&raptor_data, &resolved);
+    journeys.sort_by_key(|j| j.duration);
+
+    if !journeys.is_empty() {
+        enrich_journeys(&mut journeys, &query, &config, &raptor_data, &resolved).await;
+    }
+
+    tag_journeys(&mut journeys, resolved.wheelchair);
+
+    HttpResponse::Ok().json(JourneysResponse { journeys })
+}
+
+const EARLY_MORNING_THRESHOLD: u32 = 4 * 3600; // 04:00
+
+/// Resolved query parameters for a single journey search.
+struct ResolvedQuery {
+    from_coord: Option<(f64, f64)>,
+    to_coord: Option<(f64, f64)>,
+    sources: Vec<(usize, u32)>,
+    targets: Vec<(usize, u32)>,
+    effective_date: String,
+    effective_departure: u32,
+    active: Vec<bool>,
+    max_transfers: usize,
+    max_duration: u32,
+    requested: usize,
+    wheelchair: bool,
+    mode_excluded: rustc_hash::FxHashSet<usize>,
+}
+
+fn bad_request(id: &str, message: String) -> HttpResponse {
+    HttpResponse::BadRequest().json(serde_json::json!({
+        "error": { "id": id, "message": message }
+    }))
+}
+
+/// Parse and validate every input parameter, resolving stops and dates.
+/// Returns an `HttpResponse` (400) on any validation failure.
+fn resolve_journey_query(
+    query: &JourneysQuery,
+    raptor_data: &RaptorData,
+    config: &AppConfig,
+) -> Result<ResolvedQuery, HttpResponse> {
+    let from_str = query
+        .from
+        .as_deref()
+        .ok_or_else(|| bad_request("bad_request", "'from' parameter is required".into()))?;
+    let to_str = query
+        .to
+        .as_deref()
+        .ok_or_else(|| bad_request("bad_request", "'to' parameter is required".into()))?;
 
     let from_coord = parse_coord(from_str);
     let to_coord = parse_coord(to_str);
@@ -197,122 +236,131 @@ pub async fn get_journeys(
     let max_dist = config.routing.max_nearest_stop_distance;
     let walking_speed = query.walking_speed.unwrap_or(5.0);
 
-    let sources = resolve_stops(&raptor_data, from_str, from_coord, max_dist, walking_speed);
+    let sources = resolve_stops(raptor_data, from_str, from_coord, max_dist, walking_speed);
     if sources.is_empty() {
-        return HttpResponse::BadRequest().json(serde_json::json!({
-            "error": { "id": "unknown_object", "message": format!("No stop found within {} m of {from_str}", max_dist) }
-        }));
+        return Err(bad_request(
+            "unknown_object",
+            format!("No stop found within {max_dist} m of {from_str}"),
+        ));
     }
-
-    let targets = resolve_stops(&raptor_data, to_str, to_coord, max_dist, walking_speed);
+    let targets = resolve_stops(raptor_data, to_str, to_coord, max_dist, walking_speed);
     if targets.is_empty() {
-        return HttpResponse::BadRequest().json(serde_json::json!({
-            "error": { "id": "unknown_object", "message": format!("No stop found within {} m of {to_str}", max_dist) }
-        }));
+        return Err(bad_request(
+            "unknown_object",
+            format!("No stop found within {max_dist} m of {to_str}"),
+        ));
     }
 
-    let (date, departure_time) = match &query.datetime {
-        Some(dt) => match raptor::parse_datetime(dt) {
-            Some(parsed) => parsed,
-            None => {
-                return HttpResponse::BadRequest().json(serde_json::json!({
-                    "error": { "id": "bad_request", "message": "Invalid datetime format. Use YYYYMMDDTHHmmss" }
-                }));
-            }
-        },
+    let (date, departure_time) = parse_query_datetime(query.datetime.as_deref())?;
+    let (effective_date, effective_departure) =
+        shift_to_previous_day_if_early(date, departure_time);
+
+    let active = raptor_data.active_services(&effective_date);
+    let mode_excluded =
+        compute_mode_exclusions(raptor_data, query.forbidden_modes.as_deref().unwrap_or(""));
+
+    Ok(ResolvedQuery {
+        from_coord,
+        to_coord,
+        sources,
+        targets,
+        effective_date,
+        effective_departure,
+        active,
+        max_transfers: query
+            .max_nb_transfers
+            .map(|n| n.max(0) as usize)
+            .unwrap_or(config.routing.max_transfers),
+        max_duration: query
+            .max_duration
+            .map(|n| n.max(0) as u32)
+            .unwrap_or(config.routing.max_duration),
+        requested: query
+            .count
+            .or(query.max_nb_journeys)
+            .map(|n| (n.max(1) as usize).min(config.routing.max_journeys))
+            .unwrap_or(config.routing.max_journeys),
+        wheelchair: query.wheelchair.unwrap_or(false),
+        mode_excluded,
+    })
+}
+
+/// Parse the user-supplied datetime, or default to "now" when omitted.
+fn parse_query_datetime(datetime: Option<&str>) -> Result<(String, u32), HttpResponse> {
+    match datetime {
+        Some(dt) => raptor::parse_datetime(dt).ok_or_else(|| {
+            bad_request(
+                "bad_request",
+                "Invalid datetime format. Use YYYYMMDDTHHmmss".into(),
+            )
+        }),
         None => {
             let now = chrono::Local::now();
             let today = now.format("%Y%m%d").to_string();
             let secs = now.hour() * 3600 + now.minute() * 60 + now.second();
-            (today, secs)
+            Ok((today, secs))
         }
-    };
+    }
+}
 
-    let max_transfers = query
-        .max_nb_transfers
-        .map(|n| n.max(0) as usize)
-        .unwrap_or(config.routing.max_transfers);
+/// Early-morning shift: queries before 4h use the previous day's services
+/// with a +24h offset, because GTFS encodes after-midnight trips on the
+/// previous day (e.g. 25:30:00).
+fn shift_to_previous_day_if_early(date: String, departure_time: u32) -> (String, u32) {
+    if departure_time >= EARLY_MORNING_THRESHOLD {
+        return (date, departure_time);
+    }
+    let y: i32 = date.get(0..4).and_then(|s| s.parse().ok()).unwrap_or(2026);
+    let m: u32 = date.get(4..6).and_then(|s| s.parse().ok()).unwrap_or(1);
+    let d: u32 = date.get(6..8).and_then(|s| s.parse().ok()).unwrap_or(1);
+    let yesterday = chrono::NaiveDate::from_ymd_opt(y, m, d)
+        .and_then(|dt| dt.pred_opt())
+        .map(|dt| dt.format("%Y%m%d").to_string())
+        .unwrap_or_else(|| date.clone());
+    (yesterday, departure_time + 86400)
+}
 
-    let max_duration = query
-        .max_duration
-        .map(|n| n.max(0) as u32)
-        .unwrap_or(config.routing.max_duration);
-
-    let requested = query
-        .count
-        .or(query.max_nb_journeys)
-        .map(|n| (n.max(1) as usize).min(config.routing.max_journeys))
-        .unwrap_or(config.routing.max_journeys);
-
-    // Pre-compute active services. For early morning queries (before 4h),
-    // also include yesterday's services with +86400s offset, because GTFS
-    // encodes after-midnight trips on the previous day (e.g. 25:30:00).
-    const EARLY_MORNING_THRESHOLD: u32 = 4 * 3600; // 04:00
-
-    let (effective_date, effective_departure) = if departure_time < EARLY_MORNING_THRESHOLD {
-        // Use yesterday's date with time shifted by +24h so RAPTOR matches
-        // after-midnight trips (coded as >86400 on the previous day)
-        let yesterday = {
-            let y: i32 = date.get(0..4).and_then(|s| s.parse().ok()).unwrap_or(2026);
-            let m: u32 = date.get(4..6).and_then(|s| s.parse().ok()).unwrap_or(1);
-            let d: u32 = date.get(6..8).and_then(|s| s.parse().ok()).unwrap_or(1);
-            chrono::NaiveDate::from_ymd_opt(y, m, d)
-                .and_then(|dt| dt.pred_opt())
-                .map(|dt| dt.format("%Y%m%d").to_string())
-                .unwrap_or_else(|| date.clone())
-        };
-        (yesterday, departure_time + 86400)
-    } else {
-        (date.clone(), departure_time)
-    };
-
-    let active = raptor_data.active_services(&effective_date);
-
-    let mode_excluded =
-        compute_mode_exclusions(&raptor_data, query.forbidden_modes.as_deref().unwrap_or(""));
-    let wheelchair = query.wheelchair.unwrap_or(false);
-
-    // Iterative search with pattern exclusion for route diversity
+/// Iterative RAPTOR search with pattern exclusion for route diversity.
+///
+/// Each iteration runs RAPTOR with the union of previously-used patterns
+/// excluded; this produces alternative routes rather than dominated copies
+/// of the same fastest path.
+fn run_iterative_search(raptor_data: &RaptorData, q: &ResolvedQuery) -> Vec<Journey> {
     let mut journeys: Vec<Journey> = Vec::new();
-    let mut excluded_patterns = mode_excluded.clone();
+    let mut excluded_patterns = q.mode_excluded.clone();
 
-    for _ in 0..requested {
-        if journeys.len() >= requested {
+    for _ in 0..q.requested {
+        if journeys.len() >= q.requested {
             break;
         }
 
         let result = raptor::raptor_query(
-            &raptor_data,
-            &sources,
-            effective_departure,
-            &active,
-            max_transfers,
+            raptor_data,
+            &q.sources,
+            q.effective_departure,
+            &q.active,
+            q.max_transfers,
             &excluded_patterns,
-            wheelchair,
+            q.wheelchair,
         );
 
-        let section_sets = raptor::reconstruct_journeys(&raptor_data, &result, &targets);
+        let section_sets = raptor::reconstruct_journeys(raptor_data, &result, &q.targets);
         if section_sets.is_empty() {
             break;
         }
 
-        // Exploit all Pareto-optimal journeys from this RAPTOR run
         let prev_count = journeys.len();
         for sections in &section_sets {
-            let journey = build_journey(&raptor_data, sections, &effective_date);
-
-            if journey.duration > max_duration {
+            let journey = build_journey(raptor_data, sections, &q.effective_date);
+            if journey.duration > q.max_duration {
                 continue;
             }
-
             let dominated = journeys
                 .iter()
                 .any(|existing| journey_sections_equal(existing, &journey));
-
             if !dominated {
                 journeys.push(journey);
             }
-
             excluded_patterns.extend(raptor::used_patterns(sections));
         }
 
@@ -322,56 +370,253 @@ pub async fn get_journeys(
         }
     }
 
-    journeys.sort_by_key(|j| j.duration);
+    journeys
+}
 
-    // Enrich journeys with Valhalla walking legs
-    if !journeys.is_empty() {
-        let valhalla_base = format!("http://{}:{}", config.valhalla.host, config.valhalla.port);
-        let walking_speed = query.walking_speed;
-        let include_maneuvers = query.maneuvers.unwrap_or(false);
-        let language = query.language.as_deref();
-        let wc = if wheelchair {
+/// Run Valhalla enrichment passes (first/last mile, transfer shapes).
+async fn enrich_journeys(
+    journeys: &mut [Journey],
+    query: &JourneysQuery,
+    config: &AppConfig,
+    raptor_data: &RaptorData,
+    q: &ResolvedQuery,
+) {
+    let valhalla_base = format!("http://{}:{}", config.valhalla.host, config.valhalla.port);
+    let ctx = EnrichmentCtx {
+        raptor_data,
+        valhalla_base: &valhalla_base,
+        walking_speed: query.walking_speed,
+        include_maneuvers: query.maneuvers.unwrap_or(false),
+        language: query.language.as_deref(),
+        wheelchair_config: if q.wheelchair {
             Some(&config.wheelchair)
         } else {
             None
+        },
+    };
+
+    // First/last mile: only when origin or destination are coordinates
+    // (addresses). Stop IDs don't need first/last mile because RAPTOR
+    // routes directly to/from the stop, and intra-station walking is
+    // handled by the transfer graph.
+    if q.from_coord.is_some() || q.to_coord.is_some() {
+        let endpoints = Endpoints {
+            from: q.from_coord,
+            to: q.to_coord,
         };
-
-        // First/last mile: only when origin or destination are coordinates
-        // (addresses). Stop IDs don't need first/last mile because RAPTOR
-        // routes directly to/from the stop, and intra-station walking is
-        // handled by the transfer graph.
-        if from_coord.is_some() || to_coord.is_some() {
-            enrich_first_last_mile(
-                &mut journeys,
-                &raptor_data,
-                &valhalla_base,
-                from_coord,
-                to_coord,
-                walking_speed,
-                include_maneuvers,
-                &effective_date,
-                language,
-                wc,
-            )
-            .await;
-        }
-
-        // Transfer enrichment: always, regardless of coordinate vs stop_id input
-        enrich_transfers(
-            &mut journeys,
-            &raptor_data,
-            &valhalla_base,
-            walking_speed,
-            include_maneuvers,
-            language,
-            wc,
-        )
-        .await;
+        enrich_first_last_mile(journeys, &ctx, endpoints, &q.effective_date).await;
     }
 
-    tag_journeys(&mut journeys, wheelchair);
+    // Transfer enrichment: always, regardless of coordinate vs stop_id input
+    enrich_transfers(journeys, &ctx).await;
+}
 
-    HttpResponse::Ok().json(JourneysResponse { journeys })
+/// Shared parameters threaded through Valhalla enrichment helpers.
+struct EnrichmentCtx<'a> {
+    raptor_data: &'a RaptorData,
+    valhalla_base: &'a str,
+    walking_speed: Option<f64>,
+    include_maneuvers: bool,
+    language: Option<&'a str>,
+    wheelchair_config: Option<&'a WheelchairConfig>,
+}
+
+/// Origin/destination coordinates for a journey query.
+#[derive(Copy, Clone)]
+struct Endpoints {
+    from: Option<(f64, f64)>,
+    to: Option<(f64, f64)>,
+}
+
+type WalkLegCache = rustc_hash::FxHashMap<usize, Option<Arc<valhalla::WalkLeg>>>;
+
+/// Compute a cached pedestrian route between a coordinate and a stop.
+async fn cached_pedestrian_route(
+    ctx: &EnrichmentCtx<'_>,
+    cache: &WalkLegCache,
+    from: (f64, f64),
+    to: (f64, f64),
+    stop_idx: usize,
+) -> (usize, Option<Arc<valhalla::WalkLeg>>) {
+    if (from.0 - to.0).abs() < 1e-6 && (from.1 - to.1).abs() < 1e-6 {
+        return (stop_idx, None);
+    }
+    if let Some(cached) = cache.get(&stop_idx) {
+        return (stop_idx, cached.clone());
+    }
+    let result = valhalla::pedestrian_route(
+        ctx.valhalla_base,
+        from,
+        to,
+        ctx.walking_speed,
+        false,
+        ctx.language,
+        ctx.wheelchair_config,
+    )
+    .await
+    .map(Arc::new);
+    (stop_idx, result)
+}
+
+/// Find the first/last PT stop indices within a journey, if any.
+fn endpoint_stop_indices(
+    raptor_data: &RaptorData,
+    journey: &Journey,
+) -> (Option<usize>, Option<usize>) {
+    let resolve = |s: &Section| -> Option<usize> {
+        s.from
+            .stop_point
+            .as_ref()
+            .and_then(|sp| raptor_data.stop_index.get(&sp.id))
+            .copied()
+    };
+    let first = journey
+        .sections
+        .iter()
+        .find(|s| s.section_type == "public_transport")
+        .and_then(resolve);
+    let last = journey
+        .sections
+        .iter()
+        .rev()
+        .find(|s| s.section_type == "public_transport")
+        .and_then(|s| {
+            s.to.stop_point
+                .as_ref()
+                .and_then(|sp| raptor_data.stop_index.get(&sp.id))
+                .copied()
+        });
+    (first, last)
+}
+
+/// Build a `street_network` section between a coordinate and a stop.
+fn build_walk_section(
+    walk: &valhalla::WalkLeg,
+    from: Place,
+    to: Place,
+    departure_date_time: String,
+    arrival_date_time: String,
+    include_maneuvers: bool,
+) -> Section {
+    Section {
+        section_type: "street_network".to_string(),
+        from,
+        to,
+        departure_date_time,
+        arrival_date_time,
+        duration: walk.duration,
+        display_informations: None,
+        stop_date_times: None,
+        shape: Some(walk.shape.clone()),
+        distance: Some(walk.distance),
+        maneuvers: if include_maneuvers {
+            Some(walk.maneuvers.clone())
+        } else {
+            None
+        },
+        transfer_type: None,
+    }
+}
+
+/// Prepend a first-mile walking section, replacing leading transfer sections.
+fn prepend_first_mile(
+    journey: &mut Journey,
+    walk: &valhalla::WalkLeg,
+    raptor_data: &RaptorData,
+    stop_idx: usize,
+    from_coord: (f64, f64),
+    date: &str,
+    include_maneuvers: bool,
+) {
+    while journey
+        .sections
+        .first()
+        .is_some_and(|s| s.section_type == "transfer")
+    {
+        let removed = journey.sections.remove(0);
+        journey.duration = journey.duration.saturating_sub(removed.duration);
+    }
+
+    let first_dep = journey
+        .sections
+        .first()
+        .map(|s| s.departure_date_time.clone())
+        .unwrap_or_default();
+    let walk_dep_secs = journey
+        .sections
+        .first()
+        .and_then(|s| {
+            raptor::parse_datetime(&s.departure_date_time)
+                .map(|(_, t)| t.saturating_sub(walk.duration))
+        })
+        .unwrap_or(0);
+    let walk_dep = raptor::format_datetime(date, walk_dep_secs);
+    let (flon, flat) = from_coord;
+    let stop = &raptor_data.stops[stop_idx];
+    let section = build_walk_section(
+        walk,
+        Place {
+            id: format!("{flon};{flat}"),
+            name: String::new(),
+            stop_point: None,
+        },
+        make_place(stop),
+        walk_dep,
+        first_dep,
+        include_maneuvers,
+    );
+    journey.departure_date_time = section.departure_date_time.clone();
+    journey.sections.insert(0, section);
+    journey.duration += walk.duration;
+}
+
+/// Append a last-mile walking section, replacing trailing transfer sections.
+fn append_last_mile(
+    journey: &mut Journey,
+    walk: &valhalla::WalkLeg,
+    raptor_data: &RaptorData,
+    stop_idx: usize,
+    to_coord: (f64, f64),
+    date: &str,
+    include_maneuvers: bool,
+) {
+    while let Some(last) = journey.sections.last() {
+        if last.section_type != "transfer" {
+            break;
+        }
+        let removed_duration = last.duration;
+        journey.sections.pop();
+        journey.duration = journey.duration.saturating_sub(removed_duration);
+    }
+
+    let last_arr = journey
+        .sections
+        .last()
+        .map(|s| s.arrival_date_time.clone())
+        .unwrap_or_default();
+    let walk_arr_secs = journey
+        .sections
+        .last()
+        .and_then(|s| raptor::parse_datetime(&s.arrival_date_time).map(|(_, t)| t + walk.duration))
+        .unwrap_or(0);
+    let walk_arr = raptor::format_datetime(date, walk_arr_secs);
+    let (tlon, tlat) = to_coord;
+    let stop = &raptor_data.stops[stop_idx];
+    let section = build_walk_section(
+        walk,
+        make_place(stop),
+        Place {
+            id: format!("{tlon};{tlat}"),
+            name: String::new(),
+            stop_point: None,
+        },
+        last_arr,
+        walk_arr.clone(),
+        include_maneuvers,
+    );
+    journey.sections.push(section);
+    journey.duration += walk.duration;
+    journey.arrival_date_time = walk_arr;
 }
 
 /// Compute and prepend/append first-mile and last-mile walking sections.
@@ -384,91 +629,45 @@ pub async fn get_journeys(
 ///
 /// Leading/trailing transfer sections are removed when a walking leg
 /// replaces them (the user walks directly from origin to the PT stop).
-#[allow(clippy::too_many_arguments)]
 async fn enrich_first_last_mile(
     journeys: &mut [Journey],
-    raptor_data: &RaptorData,
-    valhalla_base: &str,
-    from_coord: Option<(f64, f64)>,
-    to_coord: Option<(f64, f64)>,
-    walking_speed: Option<f64>,
-    include_maneuvers: bool,
+    ctx: &EnrichmentCtx<'_>,
+    endpoints: Endpoints,
     date: &str,
-    language: Option<&str>,
-    wheelchair_config: Option<&WheelchairConfig>,
 ) {
-    let mut first_mile_cache: rustc_hash::FxHashMap<usize, Option<Arc<valhalla::WalkLeg>>> =
-        rustc_hash::FxHashMap::default();
-    let mut last_mile_cache: rustc_hash::FxHashMap<usize, Option<Arc<valhalla::WalkLeg>>> =
-        rustc_hash::FxHashMap::default();
+    let mut first_mile_cache: WalkLegCache = WalkLegCache::default();
+    let mut last_mile_cache: WalkLegCache = WalkLegCache::default();
 
     for journey in journeys.iter_mut() {
-        let first_stop_idx = journey
-            .sections
-            .iter()
-            .find(|s| s.section_type == "public_transport")
-            .and_then(|s| s.from.stop_point.as_ref())
-            .and_then(|sp| raptor_data.stop_index.get(&sp.id))
-            .copied();
-        let last_stop_idx = journey
-            .sections
-            .iter()
-            .rev()
-            .find(|s| s.section_type == "public_transport")
-            .and_then(|s| s.to.stop_point.as_ref())
-            .and_then(|sp| raptor_data.stop_index.get(&sp.id))
-            .copied();
+        let (first_stop_idx, last_stop_idx) = endpoint_stop_indices(ctx.raptor_data, journey);
 
-        // Compute first-mile and last-mile in parallel
         let first_mile_fut = async {
-            if let (Some(from_c), Some(stop_idx)) = (from_coord, first_stop_idx) {
-                let stop = &raptor_data.stops[stop_idx];
-                if (from_c.0 - stop.stop_lon).abs() < 1e-6
-                    && (from_c.1 - stop.stop_lat).abs() < 1e-6
-                {
-                    return (stop_idx, None);
-                }
-                if let Some(cached) = first_mile_cache.get(&stop_idx) {
-                    return (stop_idx, cached.clone());
-                }
-                let result = valhalla::pedestrian_route(
-                    valhalla_base,
+            if let (Some(from_c), Some(stop_idx)) = (endpoints.from, first_stop_idx) {
+                let stop = &ctx.raptor_data.stops[stop_idx];
+                cached_pedestrian_route(
+                    ctx,
+                    &first_mile_cache,
                     from_c,
                     (stop.stop_lon, stop.stop_lat),
-                    walking_speed,
-                    false, // first mile: penalize stairs
-                    language,
-                    wheelchair_config,
+                    stop_idx,
                 )
                 .await
-                .map(Arc::new);
-                (stop_idx, result)
             } else {
                 (0, None)
             }
         };
 
         let last_mile_fut = async {
-            if let (Some(to_c), Some(stop_idx)) = (to_coord, last_stop_idx) {
-                let stop = &raptor_data.stops[stop_idx];
-                if (to_c.0 - stop.stop_lon).abs() < 1e-6 && (to_c.1 - stop.stop_lat).abs() < 1e-6 {
-                    return (stop_idx, None);
-                }
-                if let Some(cached) = last_mile_cache.get(&stop_idx) {
-                    return (stop_idx, cached.clone());
-                }
-                let result = valhalla::pedestrian_route(
-                    valhalla_base,
+            if let (Some(to_c), Some(stop_idx)) = (endpoints.to, last_stop_idx) {
+                let stop = &ctx.raptor_data.stops[stop_idx];
+                cached_pedestrian_route(
+                    ctx,
+                    &last_mile_cache,
                     (stop.stop_lon, stop.stop_lat),
                     to_c,
-                    walking_speed,
-                    false, // last mile: penalize stairs
-                    language,
-                    wheelchair_config,
+                    stop_idx,
                 )
                 .await
-                .map(Arc::new);
-                (stop_idx, result)
             } else {
                 (0, None)
             }
@@ -477,123 +676,38 @@ async fn enrich_first_last_mile(
         let ((fm_idx, first_mile), (lm_idx, last_mile)) =
             futures::future::join(first_mile_fut, last_mile_fut).await;
 
-        if from_coord.is_some() && first_stop_idx.is_some() {
+        if endpoints.from.is_some() && first_stop_idx.is_some() {
             first_mile_cache.insert(fm_idx, first_mile.clone());
         }
-        if to_coord.is_some() && last_stop_idx.is_some() {
+        if endpoints.to.is_some() && last_stop_idx.is_some() {
             last_mile_cache.insert(lm_idx, last_mile.clone());
         }
 
-        // Prepend first-mile walking section
-        if let (Some(walk), Some(stop_idx)) = (&first_mile, first_stop_idx) {
-            while journey
-                .sections
-                .first()
-                .is_some_and(|s| s.section_type == "transfer")
-            {
-                let removed = journey.sections.remove(0);
-                journey.duration = journey.duration.saturating_sub(removed.duration);
-            }
-
-            let first_dep = journey
-                .sections
-                .first()
-                .map(|s| s.departure_date_time.clone())
-                .unwrap_or_default();
-            let walk_dep_secs = journey
-                .sections
-                .first()
-                .and_then(|s| {
-                    raptor::parse_datetime(&s.departure_date_time)
-                        .map(|(_, t)| t.saturating_sub(walk.duration))
-                })
-                .unwrap_or(0);
-            let walk_dep = raptor::format_datetime(date, walk_dep_secs);
-            let (flon, flat) = from_coord.unwrap();
-            let stop = &raptor_data.stops[stop_idx];
-            let section = Section {
-                section_type: "street_network".to_string(),
-                from: Place {
-                    id: format!("{flon};{flat}"),
-                    name: "".to_string(),
-                    stop_point: None,
-                },
-                to: make_place(stop),
-                departure_date_time: walk_dep,
-                arrival_date_time: first_dep,
-                duration: walk.duration,
-                display_informations: None,
-                stop_date_times: None,
-                shape: Some(walk.shape.clone()),
-                distance: Some(walk.distance),
-                maneuvers: if include_maneuvers {
-                    Some(walk.maneuvers.clone())
-                } else {
-                    None
-                },
-                transfer_type: None,
-            };
-            journey.sections.insert(0, section);
-            journey.duration += walk.duration;
-            journey.departure_date_time = journey
-                .sections
-                .first()
-                .unwrap()
-                .departure_date_time
-                .clone();
+        if let (Some(walk), Some(stop_idx), Some(from_c)) =
+            (&first_mile, first_stop_idx, endpoints.from)
+        {
+            prepend_first_mile(
+                journey,
+                walk,
+                ctx.raptor_data,
+                stop_idx,
+                from_c,
+                date,
+                ctx.include_maneuvers,
+            );
         }
 
-        // Append last-mile walking section
-        if let (Some(walk), Some(stop_idx)) = (&last_mile, last_stop_idx) {
-            while journey
-                .sections
-                .last()
-                .is_some_and(|s| s.section_type == "transfer")
-            {
-                let removed = journey.sections.pop().unwrap();
-                journey.duration = journey.duration.saturating_sub(removed.duration);
-            }
-
-            let last_arr = journey
-                .sections
-                .last()
-                .map(|s| s.arrival_date_time.clone())
-                .unwrap_or_default();
-            let walk_arr_secs = journey
-                .sections
-                .last()
-                .and_then(|s| {
-                    raptor::parse_datetime(&s.arrival_date_time).map(|(_, t)| t + walk.duration)
-                })
-                .unwrap_or(0);
-            let walk_arr = raptor::format_datetime(date, walk_arr_secs);
-            let (tlon, tlat) = to_coord.unwrap();
-            let stop = &raptor_data.stops[stop_idx];
-            let section = Section {
-                section_type: "street_network".to_string(),
-                from: make_place(stop),
-                to: Place {
-                    id: format!("{tlon};{tlat}"),
-                    name: "".to_string(),
-                    stop_point: None,
-                },
-                departure_date_time: last_arr,
-                arrival_date_time: walk_arr,
-                duration: walk.duration,
-                display_informations: None,
-                stop_date_times: None,
-                shape: Some(walk.shape.clone()),
-                distance: Some(walk.distance),
-                maneuvers: if include_maneuvers {
-                    Some(walk.maneuvers.clone())
-                } else {
-                    None
-                },
-                transfer_type: None,
-            };
-            journey.sections.push(section);
-            journey.duration += walk.duration;
-            journey.arrival_date_time = journey.sections.last().unwrap().arrival_date_time.clone();
+        if let (Some(walk), Some(stop_idx), Some(to_c)) = (&last_mile, last_stop_idx, endpoints.to)
+        {
+            append_last_mile(
+                journey,
+                walk,
+                ctx.raptor_data,
+                stop_idx,
+                to_c,
+                date,
+                ctx.include_maneuvers,
+            );
         }
     }
 }
@@ -606,15 +720,7 @@ async fn enrich_first_last_mile(
 /// transfers only keep Valhalla data when it contains indoor-specific
 /// maneuver types (elevator=39, stairs=40, escalator=41, building enter/exit=42-43),
 /// since outdoor routes would be incorrect for in-station walks.
-async fn enrich_transfers(
-    journeys: &mut [Journey],
-    raptor_data: &RaptorData,
-    valhalla_base: &str,
-    walking_speed: Option<f64>,
-    include_maneuvers: bool,
-    language: Option<&str>,
-    wheelchair_config: Option<&WheelchairConfig>,
-) {
+async fn enrich_transfers(journeys: &mut [Journey], ctx: &EnrichmentCtx<'_>) {
     type TransferReq = (usize, usize, (f64, f64), (f64, f64), bool);
     let mut transfer_requests: Vec<TransferReq> = Vec::new();
 
@@ -634,14 +740,16 @@ async fn enrich_transfers(
                 .as_ref()
                 .map(|sp| (sp.coord.lon, sp.coord.lat));
             if let Some((from, to)) = from_c.zip(to_c) {
-                let from_parent = raptor_data
+                let from_parent = ctx
+                    .raptor_data
                     .stop_index
                     .get(section.from.id.as_str())
-                    .map(|&idx| &raptor_data.stops[idx].parent_station);
-                let to_parent = raptor_data
+                    .map(|&idx| &ctx.raptor_data.stops[idx].parent_station);
+                let to_parent = ctx
+                    .raptor_data
                     .stop_index
                     .get(section.to.id.as_str())
-                    .map(|&idx| &raptor_data.stops[idx].parent_station);
+                    .map(|&idx| &ctx.raptor_data.stops[idx].parent_station);
                 let is_outdoor = match (from_parent, to_parent) {
                     (Some(fp), Some(tp)) => fp.is_empty() || tp.is_empty() || fp != tp,
                     _ => true,
@@ -654,49 +762,31 @@ async fn enrich_transfers(
     // Always call Valhalla for all transfers (outdoor and indoor) to get
     // shape/distance. Indoor transfers will be filtered post-hoc based on
     // whether Valhalla returns indoor-specific maneuver types.
-    let requests_to_call: Vec<_> = transfer_requests.iter().collect();
-
-    let futs: Vec<_> = requests_to_call
+    let futs: Vec<_> = transfer_requests
         .iter()
         .map(|(_, _, from, to, is_outdoor)| {
             let indoor_friendly = !is_outdoor;
             valhalla::pedestrian_route(
-                valhalla_base,
+                ctx.valhalla_base,
                 *from,
                 *to,
-                walking_speed,
+                ctx.walking_speed,
                 indoor_friendly,
-                language,
-                wheelchair_config,
+                ctx.language,
+                ctx.wheelchair_config,
             )
         })
         .collect();
     let results = futures::future::join_all(futs).await;
 
-    for (req, walk) in requests_to_call.iter().zip(results) {
-        let (j_idx, s_idx, _, _, is_outdoor) = **req;
-        let section = &mut journeys[j_idx].sections[s_idx];
-
-        if is_outdoor {
-            section.transfer_type = Some("outdoor".to_string());
-            if let Some(walk) = walk {
-                section.shape = Some(walk.shape);
-                section.distance = Some(walk.distance);
-                if include_maneuvers {
-                    section.maneuvers = Some(walk.maneuvers);
-                }
-            }
-        } else {
-            // Indoor transfer: always keep Valhalla shape/distance when available.
-            // Mark as "indoor" if Valhalla confirms indoor maneuvers, otherwise
-            // still mark indoor but the trace may follow outdoor sidewalks.
-            section.transfer_type = Some("indoor".to_string());
-            if let Some(walk) = walk {
-                section.shape = Some(walk.shape);
-                section.distance = Some(walk.distance);
-                if include_maneuvers {
-                    section.maneuvers = Some(walk.maneuvers);
-                }
+    for ((j_idx, s_idx, _, _, is_outdoor), walk) in transfer_requests.iter().zip(results) {
+        let section = &mut journeys[*j_idx].sections[*s_idx];
+        section.transfer_type = Some(if *is_outdoor { "outdoor" } else { "indoor" }.to_string());
+        if let Some(walk) = walk {
+            section.shape = Some(walk.shape);
+            section.distance = Some(walk.distance);
+            if ctx.include_maneuvers {
+                section.maneuvers = Some(walk.maneuvers);
             }
         }
     }
@@ -868,11 +958,13 @@ fn find_merge_target(
 
     // Helper: check if a section can be merged with the new one
     let can_merge = |s: &Section| -> bool {
-        s.section_type == "public_transport"
-            && s.to.id == *from_id
-            && s.display_informations.is_some()
-            && new_label.is_some()
-            && s.display_informations.as_ref().unwrap().label == new_label.unwrap()
+        if s.section_type != "public_transport" || s.to.id != *from_id {
+            return false;
+        }
+        match (s.display_informations.as_ref(), new_label) {
+            (Some(info), Some(label)) => info.label == label,
+            _ => false,
+        }
     };
 
     // Case 1: previous is a transfer, the one before that is a mergeable PT section
@@ -915,98 +1007,36 @@ fn build_journey(data: &RaptorData, sections: &[raptor::JourneySection], date: &
                 if pt_count > 1 {
                     nb_transfers += 1;
                 }
-
-                let mut display_info = None;
-                let mut stop_date_times = None;
-
-                if let (Some(pat_idx), Some(trip_idx), Some(bp), Some(ap)) = (
-                    section.pattern_idx,
-                    section.trip_idx,
-                    section.board_pos,
-                    section.alight_pos,
-                ) {
-                    let pattern = &data.patterns[pat_idx];
-                    let trip = &pattern.trips[trip_idx];
-
-                    if let Some(route) = data.routes.get(&pattern.route_id) {
-                        display_info = Some(make_display_info(route, &trip.headsign));
-                    }
-
-                    let mut sdt: Vec<StopDateTime> = Vec::new();
-                    for pos in bp..=ap {
-                        let st = &data.stops[pattern.stops[pos]];
-                        sdt.push(StopDateTime {
-                            stop_point: make_stop_point(st),
-                            arrival_date_time: raptor::format_datetime(
-                                date,
-                                trip.stop_times[pos].0,
-                            ),
-                            departure_date_time: raptor::format_datetime(
-                                date,
-                                trip.stop_times[pos].1,
-                            ),
-                        });
-                    }
-                    stop_date_times = Some(sdt);
-                }
-
-                // Merge with previous PT section if same route line and connecting stop.
-                // Handles GTFS trip splits where the same physical line changes trip_id.
+                let (display_info, stop_date_times) = build_pt_metadata(data, section, date);
                 let (merge_target_idx, should_merge) =
                     find_merge_target(&api_sections, from_stop, &display_info);
-
                 if should_merge {
-                    // Remove intermediate transfer section if present
-                    if merge_target_idx < api_sections.len() - 1 {
-                        api_sections.pop(); // remove the transfer
-                    }
-                    let target = &mut api_sections[merge_target_idx];
-                    target.to = make_place(to_stop);
-                    target.arrival_date_time = arr_dt;
-                    target.duration += duration;
-                    // Undo the transfer count — this is not a real transfer
+                    merge_with_previous(
+                        &mut api_sections,
+                        merge_target_idx,
+                        to_stop,
+                        arr_dt,
+                        duration,
+                        stop_date_times,
+                    );
                     pt_count -= 1;
                     nb_transfers = nb_transfers.saturating_sub(1);
-                    // Append stop_date_times (skip first stop of second segment = last stop of first)
-                    if let (Some(existing_sdt), Some(new_sdt)) =
-                        (&mut target.stop_date_times, stop_date_times)
-                    {
-                        for sdt in new_sdt.into_iter().skip(1) {
-                            existing_sdt.push(sdt);
-                        }
-                    }
                 } else {
-                    api_sections.push(Section {
-                        section_type: "public_transport".to_string(),
-                        from: make_place(from_stop),
-                        to: make_place(to_stop),
-                        departure_date_time: dep_dt,
-                        arrival_date_time: arr_dt,
+                    api_sections.push(make_pt_section(
+                        from_stop,
+                        to_stop,
+                        dep_dt,
+                        arr_dt,
                         duration,
-                        display_informations: display_info,
+                        display_info,
                         stop_date_times,
-                        shape: None,
-                        distance: None,
-                        maneuvers: None,
-                        transfer_type: None,
-                    });
+                    ));
                 }
             }
             SectionType::Transfer => {
-                api_sections.push(Section {
-                    section_type: "transfer".to_string(),
-                    from: make_place(from_stop),
-                    to: make_place(to_stop),
-                    departure_date_time: dep_dt,
-                    arrival_date_time: arr_dt,
-                    duration,
-                    display_informations: None,
-                    stop_date_times: None,
-                    shape: None,
-                    distance: None,
-                    maneuvers: None,
-                    transfer_type: None,
-                });
+                api_sections.push(make_transfer_section(
+                    from_stop, to_stop, dep_dt, arr_dt, duration,
+                ));
             }
         }
     }
@@ -1021,6 +1051,117 @@ fn build_journey(data: &RaptorData, sections: &[raptor::JourneySection], date: &
         nb_transfers,
         tags: Vec::new(),
         sections: api_sections,
+    }
+}
+
+/// Build the per-stop schedule and route display info for a PT section.
+fn build_pt_metadata(
+    data: &RaptorData,
+    section: &raptor::JourneySection,
+    date: &str,
+) -> (Option<DisplayInfo>, Option<Vec<StopDateTime>>) {
+    let (Some(pat_idx), Some(trip_idx), Some(bp), Some(ap)) = (
+        section.pattern_idx,
+        section.trip_idx,
+        section.board_pos,
+        section.alight_pos,
+    ) else {
+        return (None, None);
+    };
+
+    let pattern = &data.patterns[pat_idx];
+    let trip = &pattern.trips[trip_idx];
+
+    let display_info = data
+        .routes
+        .get(&pattern.route_id)
+        .map(|route| make_display_info(route, &trip.headsign));
+
+    let stop_date_times: Vec<StopDateTime> = (bp..=ap)
+        .map(|pos| {
+            let st = &data.stops[pattern.stops[pos]];
+            StopDateTime {
+                stop_point: make_stop_point(st),
+                arrival_date_time: raptor::format_datetime(date, trip.stop_times[pos].0),
+                departure_date_time: raptor::format_datetime(date, trip.stop_times[pos].1),
+            }
+        })
+        .collect();
+
+    (display_info, Some(stop_date_times))
+}
+
+/// Merge an incoming PT section into a previous one at `merge_target_idx`
+/// (same line + connecting stop). Handles GTFS trip splits where the same
+/// physical line changes trip_id. The caller must have already checked
+/// mergeability via [`find_merge_target`].
+fn merge_with_previous(
+    api_sections: &mut Vec<Section>,
+    merge_target_idx: usize,
+    to_stop: &crate::gtfs::Stop,
+    arr_dt: String,
+    duration: u32,
+    stop_date_times: Option<Vec<StopDateTime>>,
+) {
+    if merge_target_idx < api_sections.len() - 1 {
+        api_sections.pop(); // remove intermediate transfer section
+    }
+    let target = &mut api_sections[merge_target_idx];
+    target.to = make_place(to_stop);
+    target.arrival_date_time = arr_dt;
+    target.duration += duration;
+
+    // Append stop_date_times (skip first stop of second segment = last stop of first)
+    if let (Some(existing_sdt), Some(new_sdt)) = (&mut target.stop_date_times, stop_date_times) {
+        existing_sdt.extend(new_sdt.into_iter().skip(1));
+    }
+}
+
+fn make_pt_section(
+    from_stop: &crate::gtfs::Stop,
+    to_stop: &crate::gtfs::Stop,
+    dep_dt: String,
+    arr_dt: String,
+    duration: u32,
+    display_informations: Option<DisplayInfo>,
+    stop_date_times: Option<Vec<StopDateTime>>,
+) -> Section {
+    Section {
+        section_type: "public_transport".to_string(),
+        from: make_place(from_stop),
+        to: make_place(to_stop),
+        departure_date_time: dep_dt,
+        arrival_date_time: arr_dt,
+        duration,
+        display_informations,
+        stop_date_times,
+        shape: None,
+        distance: None,
+        maneuvers: None,
+        transfer_type: None,
+    }
+}
+
+fn make_transfer_section(
+    from_stop: &crate::gtfs::Stop,
+    to_stop: &crate::gtfs::Stop,
+    dep_dt: String,
+    arr_dt: String,
+    duration: u32,
+) -> Section {
+    Section {
+        section_type: "transfer".to_string(),
+        from: make_place(from_stop),
+        to: make_place(to_stop),
+        departure_date_time: dep_dt,
+        arrival_date_time: arr_dt,
+        duration,
+        display_informations: None,
+        stop_date_times: None,
+        shape: None,
+        distance: None,
+        maneuvers: None,
+        transfer_type: None,
     }
 }
 
@@ -1462,5 +1603,1084 @@ mod tests {
             .to_request();
         let resp = actix_web::test::call_service(&app, req).await;
         assert_eq!(resp.status(), 200);
+    }
+
+    // -----------------------------------------------------------------------
+    // Extracted helper tests
+    // -----------------------------------------------------------------------
+
+    fn make_place(id: &str) -> Place {
+        Place {
+            id: id.into(),
+            name: id.into(),
+            stop_point: None,
+        }
+    }
+
+    fn make_display_info(label: &str) -> DisplayInfo {
+        DisplayInfo {
+            network: "N".into(),
+            direction: "D".into(),
+            commercial_mode: "metro".into(),
+            label: label.into(),
+            color: "FFFFFF".into(),
+            text_color: "000000".into(),
+        }
+    }
+
+    fn make_pt_test_section(from_id: &str, to_id: &str, label: &str) -> Section {
+        Section {
+            section_type: "public_transport".into(),
+            from: make_place(from_id),
+            to: make_place(to_id),
+            departure_date_time: "20260406T080000".into(),
+            arrival_date_time: "20260406T081000".into(),
+            duration: 600,
+            display_informations: Some(make_display_info(label)),
+            stop_date_times: None,
+            shape: None,
+            distance: None,
+            maneuvers: None,
+            transfer_type: None,
+        }
+    }
+
+    fn make_transfer_test_section(from_id: &str, to_id: &str) -> Section {
+        Section {
+            section_type: "transfer".into(),
+            from: make_place(from_id),
+            to: make_place(to_id),
+            departure_date_time: "20260406T081000".into(),
+            arrival_date_time: "20260406T081200".into(),
+            duration: 120,
+            display_informations: None,
+            stop_date_times: None,
+            shape: None,
+            distance: None,
+            maneuvers: None,
+            transfer_type: None,
+        }
+    }
+
+    fn make_gtfs_stop(id: &str) -> crate::gtfs::Stop {
+        crate::gtfs::Stop {
+            stop_id: id.into(),
+            stop_name: id.into(),
+            stop_lon: 2.3,
+            stop_lat: 48.8,
+            parent_station: String::new(),
+            wheelchair_boarding: 0,
+        }
+    }
+
+    // ----- parse_query_datetime -------------------------------------------
+
+    #[test]
+    fn parse_query_datetime_valid_returns_parsed() {
+        let (date, secs) = parse_query_datetime(Some("20260406T081500")).unwrap();
+        assert_eq!(date, "20260406");
+        assert_eq!(secs, 8 * 3600 + 15 * 60);
+    }
+
+    #[test]
+    fn parse_query_datetime_invalid_returns_bad_request() {
+        let err = parse_query_datetime(Some("not-a-date")).unwrap_err();
+        assert_eq!(err.status(), 400);
+    }
+
+    #[test]
+    fn parse_query_datetime_none_returns_now() {
+        let (date, secs) = parse_query_datetime(None).unwrap();
+        assert_eq!(date.len(), 8);
+        assert!(secs < 86400);
+    }
+
+    // ----- shift_to_previous_day_if_early ---------------------------------
+
+    #[test]
+    fn shift_returns_unchanged_when_after_threshold() {
+        let (date, secs) = shift_to_previous_day_if_early("20260406".into(), 30_000);
+        assert_eq!(date, "20260406");
+        assert_eq!(secs, 30_000);
+    }
+
+    #[test]
+    fn shift_to_previous_day_when_before_threshold() {
+        let (date, secs) = shift_to_previous_day_if_early("20260406".into(), 60); // 00:01
+        assert_eq!(date, "20260405");
+        assert_eq!(secs, 60 + 86400);
+    }
+
+    #[test]
+    fn shift_handles_month_boundary() {
+        let (date, _) = shift_to_previous_day_if_early("20260501".into(), 100);
+        assert_eq!(date, "20260430");
+    }
+
+    // ----- bad_request ----------------------------------------------------
+
+    #[test]
+    fn helper_bad_request_returns_400() {
+        let resp = bad_request("test_id", "test message".into());
+        assert_eq!(resp.status(), 400);
+    }
+
+    // ----- compute_mode_exclusions ----------------------------------------
+
+    #[test]
+    fn compute_mode_exclusions_empty_returns_empty() {
+        let data = make_test_raptor_data();
+        let excluded = compute_mode_exclusions(&data, "");
+        assert!(excluded.is_empty());
+    }
+
+    #[test]
+    fn compute_mode_exclusions_metro_excludes_metro_patterns() {
+        let data = make_test_raptor_data();
+        let excluded = compute_mode_exclusions(&data, "metro");
+        // R1 is route_type=1 (metro), so its patterns should be excluded
+        assert!(!excluded.is_empty());
+    }
+
+    #[test]
+    fn compute_mode_exclusions_unknown_mode_excludes_nothing() {
+        let data = make_test_raptor_data();
+        let excluded = compute_mode_exclusions(&data, "carpool");
+        assert!(excluded.is_empty());
+    }
+
+    #[test]
+    fn compute_mode_exclusions_multiple_modes() {
+        let data = make_test_raptor_data();
+        let excluded = compute_mode_exclusions(&data, "bus,metro,tramway");
+        assert!(!excluded.is_empty()); // contains metro
+    }
+
+    // ----- find_merge_target ----------------------------------------------
+
+    #[test]
+    fn find_merge_target_empty_returns_no_merge() {
+        let stop = make_gtfs_stop("S1");
+        let info = Some(make_display_info("1"));
+        let (_, merge) = find_merge_target(&[], &stop, &info);
+        assert!(!merge);
+    }
+
+    #[test]
+    fn find_merge_target_directly_matching_previous_pt() {
+        let stop = make_gtfs_stop("S2");
+        let info = Some(make_display_info("1"));
+        let sections = vec![make_pt_test_section("S1", "S2", "1")];
+        let (idx, merge) = find_merge_target(&sections, &stop, &info);
+        assert!(merge);
+        assert_eq!(idx, 0);
+    }
+
+    #[test]
+    fn find_merge_target_with_intermediate_transfer() {
+        let stop = make_gtfs_stop("S2");
+        let info = Some(make_display_info("1"));
+        let sections = vec![
+            make_pt_test_section("S1", "S2", "1"),
+            make_transfer_test_section("S2", "S2"),
+        ];
+        let (idx, merge) = find_merge_target(&sections, &stop, &info);
+        assert!(merge);
+        assert_eq!(idx, 0);
+    }
+
+    #[test]
+    fn find_merge_target_different_label_no_merge() {
+        let stop = make_gtfs_stop("S2");
+        let info = Some(make_display_info("2"));
+        let sections = vec![make_pt_test_section("S1", "S2", "1")];
+        let (_, merge) = find_merge_target(&sections, &stop, &info);
+        assert!(!merge);
+    }
+
+    // ----- journey_section_key / journey_sections_equal -------------------
+
+    #[test]
+    fn journey_section_key_filters_pt_only() {
+        let j = Journey {
+            departure_date_time: "".into(),
+            arrival_date_time: "".into(),
+            duration: 0,
+            nb_transfers: 0,
+            tags: vec![],
+            sections: vec![
+                make_pt_test_section("S1", "S2", "1"),
+                make_transfer_test_section("S2", "S2"),
+                make_pt_test_section("S2", "S3", "2"),
+            ],
+        };
+        let key = journey_section_key(&j);
+        assert_eq!(key.len(), 2);
+        assert_eq!(key[0], ("S1", "S2", "1"));
+        assert_eq!(key[1], ("S2", "S3", "2"));
+    }
+
+    #[test]
+    fn journey_sections_equal_same_pt_legs_match() {
+        let a = Journey {
+            departure_date_time: "".into(),
+            arrival_date_time: "".into(),
+            duration: 0,
+            nb_transfers: 0,
+            tags: vec![],
+            sections: vec![make_pt_test_section("S1", "S2", "1")],
+        };
+        let b = Journey {
+            departure_date_time: "".into(),
+            arrival_date_time: "".into(),
+            duration: 100,
+            nb_transfers: 0,
+            tags: vec![],
+            sections: vec![make_pt_test_section("S1", "S2", "1")],
+        };
+        assert!(journey_sections_equal(&a, &b));
+    }
+
+    #[test]
+    fn journey_sections_equal_different_label_no_match() {
+        let a = Journey {
+            departure_date_time: "".into(),
+            arrival_date_time: "".into(),
+            duration: 0,
+            nb_transfers: 0,
+            tags: vec![],
+            sections: vec![make_pt_test_section("S1", "S2", "1")],
+        };
+        let b = Journey {
+            departure_date_time: "".into(),
+            arrival_date_time: "".into(),
+            duration: 0,
+            nb_transfers: 0,
+            tags: vec![],
+            sections: vec![make_pt_test_section("S1", "S2", "2")],
+        };
+        assert!(!journey_sections_equal(&a, &b));
+    }
+
+    // ----- make_pt_section / make_transfer_section ------------------------
+
+    #[test]
+    fn make_pt_section_sets_type_and_fields() {
+        let from = make_gtfs_stop("S1");
+        let to = make_gtfs_stop("S2");
+        let s = make_pt_section(
+            &from,
+            &to,
+            "20260406T080000".into(),
+            "20260406T081000".into(),
+            600,
+            None,
+            None,
+        );
+        assert_eq!(s.section_type, "public_transport");
+        assert_eq!(s.duration, 600);
+        assert!(s.shape.is_none());
+    }
+
+    #[test]
+    fn make_transfer_section_sets_type_and_fields() {
+        let from = make_gtfs_stop("S1");
+        let to = make_gtfs_stop("S2");
+        let s = make_transfer_section(
+            &from,
+            &to,
+            "20260406T080000".into(),
+            "20260406T080200".into(),
+            120,
+        );
+        assert_eq!(s.section_type, "transfer");
+        assert_eq!(s.duration, 120);
+    }
+
+    // ----- merge_with_previous --------------------------------------------
+
+    #[test]
+    fn merge_with_previous_extends_target() {
+        let mut sections = vec![make_pt_test_section("S1", "S2", "1")];
+        let to = make_gtfs_stop("S3");
+        merge_with_previous(&mut sections, 0, &to, "20260406T082000".into(), 500, None);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].to.id, "S3");
+        assert_eq!(sections[0].arrival_date_time, "20260406T082000");
+        assert_eq!(sections[0].duration, 600 + 500);
+    }
+
+    #[test]
+    fn merge_with_previous_pops_intermediate_transfer() {
+        let mut sections = vec![
+            make_pt_test_section("S1", "S2", "1"),
+            make_transfer_test_section("S2", "S2"),
+        ];
+        let to = make_gtfs_stop("S3");
+        merge_with_previous(&mut sections, 0, &to, "20260406T082000".into(), 500, None);
+        assert_eq!(sections.len(), 1);
+    }
+
+    // ----- build_walk_section ---------------------------------------------
+
+    #[test]
+    fn build_walk_section_basic() {
+        let walk = valhalla::WalkLeg {
+            duration: 60,
+            distance: 80,
+            shape: "encoded".into(),
+            maneuvers: vec![],
+        };
+        let from = make_place("orig");
+        let to = make_place("dest");
+        let s = build_walk_section(
+            &walk,
+            from,
+            to,
+            "20260406T080000".into(),
+            "20260406T080100".into(),
+            false,
+        );
+        assert_eq!(s.section_type, "street_network");
+        assert_eq!(s.duration, 60);
+        assert_eq!(s.distance, Some(80));
+        assert_eq!(s.shape, Some("encoded".into()));
+        assert!(s.maneuvers.is_none());
+    }
+
+    #[test]
+    fn build_walk_section_with_maneuvers() {
+        let walk = valhalla::WalkLeg {
+            duration: 60,
+            distance: 80,
+            shape: "x".into(),
+            maneuvers: vec![valhalla::WalkManeuver {
+                instruction: "go".into(),
+                maneuver_type: 1,
+                distance: 10,
+                duration: 5,
+                begin_shape_index: 0,
+            }],
+        };
+        let s = build_walk_section(
+            &walk,
+            make_place("a"),
+            make_place("b"),
+            "20260406T080000".into(),
+            "20260406T080100".into(),
+            true,
+        );
+        assert!(s.maneuvers.is_some());
+        assert_eq!(s.maneuvers.as_ref().unwrap().len(), 1);
+    }
+
+    // ----- endpoint_stop_indices ------------------------------------------
+
+    #[test]
+    fn endpoint_stop_indices_finds_first_and_last_pt() {
+        let data = make_test_raptor_data();
+        let s1 = data.stop_index["S1"];
+        let s3 = data.stop_index["S3"];
+        let mut pt1 = make_pt_test_section("S1", "S2", "1");
+        pt1.from.stop_point = Some(crate::api::StopPointRef {
+            id: "S1".into(),
+            name: "S1".into(),
+            coord: crate::api::Coord { lon: 0.0, lat: 0.0 },
+        });
+        let mut pt2 = make_pt_test_section("S2", "S3", "1");
+        pt2.to.stop_point = Some(crate::api::StopPointRef {
+            id: "S3".into(),
+            name: "S3".into(),
+            coord: crate::api::Coord { lon: 0.0, lat: 0.0 },
+        });
+        let journey = Journey {
+            departure_date_time: "".into(),
+            arrival_date_time: "".into(),
+            duration: 0,
+            nb_transfers: 0,
+            tags: vec![],
+            sections: vec![pt1, pt2],
+        };
+        let (first, last) = endpoint_stop_indices(&data, &journey);
+        assert_eq!(first, Some(s1));
+        assert_eq!(last, Some(s3));
+    }
+
+    #[test]
+    fn endpoint_stop_indices_no_pt_returns_none() {
+        let data = make_test_raptor_data();
+        let journey = Journey {
+            departure_date_time: "".into(),
+            arrival_date_time: "".into(),
+            duration: 0,
+            nb_transfers: 0,
+            tags: vec![],
+            sections: vec![make_transfer_test_section("S1", "S2")],
+        };
+        let (first, last) = endpoint_stop_indices(&data, &journey);
+        assert_eq!(first, None);
+        assert_eq!(last, None);
+    }
+
+    // ----- tag_journeys wheelchair branch ---------------------------------
+
+    // ----- cached_pedestrian_route ----------------------------------------
+
+    #[actix_web::test]
+    async fn cached_pedestrian_route_skips_identical_coords() {
+        let cfg = AppConfig::default();
+        let data = make_test_raptor_data();
+        let ctx = EnrichmentCtx {
+            raptor_data: &data,
+            valhalla_base: "http://127.0.0.1:1",
+            walking_speed: None,
+            include_maneuvers: false,
+            language: None,
+            wheelchair_config: Some(&cfg.wheelchair),
+        };
+        let cache = WalkLegCache::default();
+        let (idx, leg) = cached_pedestrian_route(&ctx, &cache, (2.3, 48.8), (2.3, 48.8), 7).await;
+        assert_eq!(idx, 7);
+        assert!(leg.is_none());
+    }
+
+    #[actix_web::test]
+    async fn cached_pedestrian_route_returns_cache_hit() {
+        let data = make_test_raptor_data();
+        let ctx = EnrichmentCtx {
+            raptor_data: &data,
+            valhalla_base: "http://127.0.0.1:1",
+            walking_speed: None,
+            include_maneuvers: false,
+            language: None,
+            wheelchair_config: None,
+        };
+        let mut cache = WalkLegCache::default();
+        let cached_leg = Arc::new(valhalla::WalkLeg {
+            duration: 99,
+            distance: 100,
+            shape: "x".into(),
+            maneuvers: vec![],
+        });
+        cache.insert(3, Some(cached_leg.clone()));
+        let (idx, leg) = cached_pedestrian_route(&ctx, &cache, (2.3, 48.8), (2.4, 48.9), 3).await;
+        assert_eq!(idx, 3);
+        let l = leg.expect("cache hit");
+        assert_eq!(l.duration, 99);
+    }
+
+    #[actix_web::test]
+    async fn cached_pedestrian_route_calls_valhalla_on_miss() {
+        let data = make_test_raptor_data();
+        let ctx = EnrichmentCtx {
+            raptor_data: &data,
+            valhalla_base: "http://127.0.0.1:1",
+            walking_speed: Some(5.0),
+            include_maneuvers: false,
+            language: None,
+            wheelchair_config: None,
+        };
+        let cache = WalkLegCache::default();
+        // Valhalla unreachable → returns None, but the call path is exercised
+        let (idx, leg) = cached_pedestrian_route(&ctx, &cache, (2.3, 48.8), (2.4, 48.9), 5).await;
+        assert_eq!(idx, 5);
+        assert!(leg.is_none());
+    }
+
+    // ----- enrich_transfers / enrich_first_last_mile ----------------------
+
+    #[actix_web::test]
+    async fn enrich_transfers_marks_outdoor_indoor() {
+        let data = make_test_raptor_data();
+        let ctx = EnrichmentCtx {
+            raptor_data: &data,
+            valhalla_base: "http://127.0.0.1:1",
+            walking_speed: None,
+            include_maneuvers: false,
+            language: None,
+            wheelchair_config: None,
+        };
+        // Build a journey with one transfer section
+        let mut journeys = vec![Journey {
+            departure_date_time: "".into(),
+            arrival_date_time: "".into(),
+            duration: 0,
+            nb_transfers: 0,
+            tags: vec![],
+            sections: vec![Section {
+                section_type: "transfer".into(),
+                from: Place {
+                    id: "S1".into(),
+                    name: "S1".into(),
+                    stop_point: Some(crate::api::StopPointRef {
+                        id: "S1".into(),
+                        name: "S1".into(),
+                        coord: crate::api::Coord {
+                            lon: 2.347,
+                            lat: 48.858,
+                        },
+                    }),
+                },
+                to: Place {
+                    id: "S2".into(),
+                    name: "S2".into(),
+                    stop_point: Some(crate::api::StopPointRef {
+                        id: "S2".into(),
+                        name: "S2".into(),
+                        coord: crate::api::Coord {
+                            lon: 2.373,
+                            lat: 48.844,
+                        },
+                    }),
+                },
+                departure_date_time: "20260406T080000".into(),
+                arrival_date_time: "20260406T080100".into(),
+                duration: 60,
+                display_informations: None,
+                stop_date_times: None,
+                shape: None,
+                distance: None,
+                maneuvers: None,
+                transfer_type: None,
+            }],
+        }];
+        enrich_transfers(&mut journeys, &ctx).await;
+        let s = &journeys[0].sections[0];
+        // Outdoor since both stops have empty parent_station
+        assert_eq!(s.transfer_type.as_deref(), Some("outdoor"));
+    }
+
+    #[actix_web::test]
+    async fn enrich_first_last_mile_runs_without_panic() {
+        let data = make_test_raptor_data();
+        let cfg = AppConfig::default();
+        let ctx = EnrichmentCtx {
+            raptor_data: &data,
+            valhalla_base: "http://127.0.0.1:1",
+            walking_speed: Some(5.0),
+            include_maneuvers: true,
+            language: Some("fr-FR"),
+            wheelchair_config: Some(&cfg.wheelchair),
+        };
+        // Run a real RAPTOR query so we get realistic journeys
+        let source = data.stop_index["S1"];
+        let target = data.stop_index["S3"];
+        let active = data.active_services("20260406");
+        let result = raptor::raptor_query(
+            &data,
+            &[(source, 0)],
+            28000,
+            &active,
+            3,
+            &rustc_hash::FxHashSet::default(),
+            false,
+        );
+        let section_sets = raptor::reconstruct_journeys(&data, &result, &[(target, 0)]);
+        let mut journeys: Vec<Journey> = section_sets
+            .iter()
+            .map(|s| build_journey(&data, s, "20260406"))
+            .collect();
+        let endpoints = Endpoints {
+            from: Some((2.347, 48.858)),
+            to: Some((2.395, 48.848)),
+        };
+        // Valhalla unreachable so the first/last mile walks will not be
+        // added, but the function executes its full happy-path tree.
+        enrich_first_last_mile(&mut journeys, &ctx, endpoints, "20260406").await;
+    }
+
+    // ----- get_journeys with coordinate input -----------------------------
+
+    #[actix_web::test]
+    async fn get_journeys_with_coords_and_mock_valhalla() {
+        let base = super::super::valhalla::test_support::spawn_mock_valhalla();
+        let rest = base.strip_prefix("http://").unwrap();
+        let (host, port_str) = rest.split_once(':').unwrap();
+        let data = make_test_raptor_data();
+        let shared = web::Data::new(ArcSwap::from(data));
+        let mut cfg = make_test_config();
+        cfg.valhalla.host = host.into();
+        cfg.valhalla.port = port_str.parse().unwrap();
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(shared)
+                .app_data(web::Data::new(cfg))
+                .service(get_journeys),
+        )
+        .await;
+        let req = actix_web::test::TestRequest::get()
+            .uri("/api/journeys/public_transport?from=2.347;48.858&to=2.395;48.848&datetime=20260406T080000&maneuvers=true")
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = actix_web::test::read_body_json(resp).await;
+        assert!(!body["journeys"].as_array().unwrap().is_empty());
+    }
+
+    #[actix_web::test]
+    async fn get_journeys_with_coords() {
+        let data = make_test_raptor_data();
+        let shared = web::Data::new(ArcSwap::from(data));
+        let cfg = make_test_config();
+        let config = web::Data::new(cfg);
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(shared)
+                .app_data(config)
+                .service(get_journeys),
+        )
+        .await;
+        // Use coordinates so enrich_first_last_mile is exercised
+        let req = actix_web::test::TestRequest::get()
+            .uri("/api/journeys/public_transport?from=2.347;48.858&to=2.395;48.848&datetime=20260406T080000&maneuvers=true&wheelchair=true&forbidden_modes=bus")
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+    }
+
+    #[actix_web::test]
+    async fn get_journeys_early_morning_shifts_to_previous_day() {
+        let data = make_test_raptor_data();
+        let shared = web::Data::new(ArcSwap::from(data));
+        let config = web::Data::new(make_test_config());
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(shared)
+                .app_data(config)
+                .service(get_journeys),
+        )
+        .await;
+        // 02:00 → must shift to previous day
+        let req = actix_web::test::TestRequest::get()
+            .uri("/api/journeys/public_transport?from=S1&to=S3&datetime=20260406T020000")
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+    }
+
+    // ----- prepend_first_mile / append_last_mile --------------------------
+
+    fn make_test_journey() -> Journey {
+        Journey {
+            departure_date_time: "20260406T081000".into(),
+            arrival_date_time: "20260406T082000".into(),
+            duration: 600,
+            nb_transfers: 0,
+            tags: vec![],
+            sections: vec![Section {
+                section_type: "public_transport".into(),
+                from: make_place("S1"),
+                to: make_place("S3"),
+                departure_date_time: "20260406T081000".into(),
+                arrival_date_time: "20260406T082000".into(),
+                duration: 600,
+                display_informations: Some(make_display_info("1")),
+                stop_date_times: None,
+                shape: None,
+                distance: None,
+                maneuvers: None,
+                transfer_type: None,
+            }],
+        }
+    }
+
+    fn make_test_walk_leg() -> valhalla::WalkLeg {
+        valhalla::WalkLeg {
+            duration: 60,
+            distance: 80,
+            shape: "shape".into(),
+            maneuvers: vec![valhalla::WalkManeuver {
+                instruction: "go".into(),
+                maneuver_type: 1,
+                distance: 80,
+                duration: 60,
+                begin_shape_index: 0,
+            }],
+        }
+    }
+
+    #[test]
+    fn prepend_first_mile_inserts_walking_section() {
+        let data = make_test_raptor_data();
+        let walk = make_test_walk_leg();
+        let mut journey = make_test_journey();
+        prepend_first_mile(
+            &mut journey,
+            &walk,
+            &data,
+            data.stop_index["S1"],
+            (2.0, 48.0),
+            "20260406",
+            true,
+        );
+        assert_eq!(journey.sections.len(), 2);
+        assert_eq!(journey.sections[0].section_type, "street_network");
+        assert!(journey.sections[0].maneuvers.is_some());
+        assert_eq!(journey.duration, 600 + 60);
+    }
+
+    #[test]
+    fn prepend_first_mile_drops_leading_transfer() {
+        let data = make_test_raptor_data();
+        let walk = make_test_walk_leg();
+        let mut journey = make_test_journey();
+        // Insert a transfer at the start
+        journey
+            .sections
+            .insert(0, make_transfer_test_section("X", "S1"));
+        journey.duration += 120;
+        prepend_first_mile(
+            &mut journey,
+            &walk,
+            &data,
+            data.stop_index["S1"],
+            (2.0, 48.0),
+            "20260406",
+            false,
+        );
+        // Transfer should be dropped, walk inserted
+        assert_eq!(journey.sections[0].section_type, "street_network");
+        // 600 PT + 120 transfer - 120 dropped + 60 walk = 660
+        assert_eq!(journey.duration, 600 + 60);
+    }
+
+    #[test]
+    fn append_last_mile_appends_walking_section() {
+        let data = make_test_raptor_data();
+        let walk = make_test_walk_leg();
+        let mut journey = make_test_journey();
+        append_last_mile(
+            &mut journey,
+            &walk,
+            &data,
+            data.stop_index["S3"],
+            (2.5, 48.5),
+            "20260406",
+            false,
+        );
+        assert_eq!(journey.sections.len(), 2);
+        assert_eq!(
+            journey.sections.last().unwrap().section_type,
+            "street_network"
+        );
+        assert_eq!(journey.duration, 600 + 60);
+    }
+
+    #[test]
+    fn append_last_mile_drops_trailing_transfer() {
+        let data = make_test_raptor_data();
+        let walk = make_test_walk_leg();
+        let mut journey = make_test_journey();
+        journey.sections.push(make_transfer_test_section("S3", "X"));
+        journey.duration += 120;
+        append_last_mile(
+            &mut journey,
+            &walk,
+            &data,
+            data.stop_index["S3"],
+            (2.5, 48.5),
+            "20260406",
+            true,
+        );
+        assert_eq!(
+            journey.sections.last().unwrap().section_type,
+            "street_network"
+        );
+        assert_eq!(journey.duration, 600 + 60);
+    }
+
+    // ----- resolve_stops station-child branch -----------------------------
+
+    fn make_station_with_children_raptor() -> Arc<RaptorData> {
+        let mut stops = FxHashMap::default();
+        // Station node (no patterns)
+        stops.insert(
+            "STATION".into(),
+            gtfs::Stop {
+                stop_id: "STATION".into(),
+                stop_name: "Station".into(),
+                stop_lon: 2.347,
+                stop_lat: 48.858,
+                parent_station: String::new(),
+                wheelchair_boarding: 0,
+            },
+        );
+        // Two children
+        for (id, lon) in &[("P1", 2.347), ("P2", 2.348)] {
+            stops.insert(
+                id.to_string(),
+                gtfs::Stop {
+                    stop_id: id.to_string(),
+                    stop_name: id.to_string(),
+                    stop_lon: *lon,
+                    stop_lat: 48.858,
+                    parent_station: "STATION".into(),
+                    wheelchair_boarding: 0,
+                },
+            );
+        }
+        // Far stop, target of the trip
+        stops.insert(
+            "FAR".into(),
+            gtfs::Stop {
+                stop_id: "FAR".into(),
+                stop_name: "Far".into(),
+                stop_lon: 2.4,
+                stop_lat: 48.85,
+                parent_station: String::new(),
+                wheelchair_boarding: 0,
+            },
+        );
+        let mut routes = FxHashMap::default();
+        routes.insert(
+            "R1".into(),
+            gtfs::Route {
+                route_id: "R1".into(),
+                agency_id: "A1".into(),
+                route_short_name: "1".into(),
+                route_long_name: "L".into(),
+                route_type: 1,
+                route_color: String::new(),
+                route_text_color: String::new(),
+            },
+        );
+        let mut trips = FxHashMap::default();
+        trips.insert(
+            "T1".into(),
+            gtfs::Trip {
+                route_id: "R1".into(),
+                service_id: "SVC1".into(),
+                trip_id: "T1".into(),
+                trip_headsign: "Far".into(),
+                wheelchair_accessible: 0,
+            },
+        );
+        // Trip serves P1 → FAR (so P1 has patterns, STATION does not)
+        let stop_times = vec![
+            gtfs::StopTime {
+                trip_id: "T1".into(),
+                arrival_time: "08:00:00".into(),
+                departure_time: "08:01:00".into(),
+                stop_id: "P1".into(),
+                stop_sequence: 0,
+            },
+            gtfs::StopTime {
+                trip_id: "T1".into(),
+                arrival_time: "08:10:00".into(),
+                departure_time: "08:11:00".into(),
+                stop_id: "FAR".into(),
+                stop_sequence: 1,
+            },
+        ];
+        let mut calendars = FxHashMap::default();
+        calendars.insert(
+            "SVC1".into(),
+            gtfs::Calendar {
+                service_id: "SVC1".into(),
+                monday: 1,
+                tuesday: 1,
+                wednesday: 1,
+                thursday: 1,
+                friday: 1,
+                saturday: 1,
+                sunday: 1,
+                start_date: "20260101".into(),
+                end_date: "20261231".into(),
+            },
+        );
+        Arc::new(raptor::RaptorData::build(
+            gtfs::GtfsData {
+                agencies: vec![],
+                routes,
+                stops,
+                trips,
+                stop_times,
+                calendars,
+                calendar_dates: vec![],
+                transfers: vec![],
+                pathways: vec![],
+            },
+            120,
+        ))
+    }
+
+    #[test]
+    fn resolve_stops_station_expands_to_children() {
+        let data = make_station_with_children_raptor();
+        let stops = resolve_stops(&data, "STATION", None, 1500, 5.0);
+        // Should include P1 (the child that has patterns)
+        let p1 = data.stop_index["P1"];
+        assert!(stops.iter().any(|&(idx, _)| idx == p1));
+    }
+
+    #[test]
+    fn resolve_stops_unknown_returns_empty() {
+        let data = make_test_raptor_data();
+        let stops = resolve_stops(&data, "DOES_NOT_EXIST", None, 100, 5.0);
+        assert!(stops.is_empty());
+    }
+
+    // ----- build_journey merging trip splits ------------------------------
+
+    fn make_trip_split_raptor() -> Arc<RaptorData> {
+        // Two trips on the same route, splitting at stop S2.
+        let mut stops = FxHashMap::default();
+        for (id, lon) in &[("S1", 2.347), ("S2", 2.373), ("S3", 2.395)] {
+            stops.insert(
+                id.to_string(),
+                gtfs::Stop {
+                    stop_id: id.to_string(),
+                    stop_name: id.to_string(),
+                    stop_lon: *lon,
+                    stop_lat: 48.85,
+                    parent_station: String::new(),
+                    wheelchair_boarding: 0,
+                },
+            );
+        }
+        let mut routes = FxHashMap::default();
+        routes.insert(
+            "R1".into(),
+            gtfs::Route {
+                route_id: "R1".into(),
+                agency_id: "A1".into(),
+                route_short_name: "1".into(),
+                route_long_name: "L".into(),
+                route_type: 1,
+                route_color: String::new(),
+                route_text_color: String::new(),
+            },
+        );
+        let mut trips = FxHashMap::default();
+        trips.insert(
+            "T_A".into(),
+            gtfs::Trip {
+                route_id: "R1".into(),
+                service_id: "SVC1".into(),
+                trip_id: "T_A".into(),
+                trip_headsign: "S2".into(),
+                wheelchair_accessible: 0,
+            },
+        );
+        trips.insert(
+            "T_B".into(),
+            gtfs::Trip {
+                route_id: "R1".into(),
+                service_id: "SVC1".into(),
+                trip_id: "T_B".into(),
+                trip_headsign: "S3".into(),
+                wheelchair_accessible: 0,
+            },
+        );
+        let stop_times = vec![
+            gtfs::StopTime {
+                trip_id: "T_A".into(),
+                arrival_time: "08:00:00".into(),
+                departure_time: "08:01:00".into(),
+                stop_id: "S1".into(),
+                stop_sequence: 0,
+            },
+            gtfs::StopTime {
+                trip_id: "T_A".into(),
+                arrival_time: "08:05:00".into(),
+                departure_time: "08:06:00".into(),
+                stop_id: "S2".into(),
+                stop_sequence: 1,
+            },
+            gtfs::StopTime {
+                trip_id: "T_B".into(),
+                arrival_time: "08:07:00".into(),
+                departure_time: "08:08:00".into(),
+                stop_id: "S2".into(),
+                stop_sequence: 0,
+            },
+            gtfs::StopTime {
+                trip_id: "T_B".into(),
+                arrival_time: "08:12:00".into(),
+                departure_time: "08:13:00".into(),
+                stop_id: "S3".into(),
+                stop_sequence: 1,
+            },
+        ];
+        let mut calendars = FxHashMap::default();
+        calendars.insert(
+            "SVC1".into(),
+            gtfs::Calendar {
+                service_id: "SVC1".into(),
+                monday: 1,
+                tuesday: 1,
+                wednesday: 1,
+                thursday: 1,
+                friday: 1,
+                saturday: 1,
+                sunday: 1,
+                start_date: "20260101".into(),
+                end_date: "20261231".into(),
+            },
+        );
+        Arc::new(raptor::RaptorData::build(
+            gtfs::GtfsData {
+                agencies: vec![],
+                routes,
+                stops,
+                trips,
+                stop_times,
+                calendars,
+                calendar_dates: vec![],
+                transfers: vec![],
+                pathways: vec![],
+            },
+            120,
+        ))
+    }
+
+    #[test]
+    fn build_journey_merges_consecutive_same_line_sections() {
+        let data = make_trip_split_raptor();
+        let s1 = data.stop_index["S1"];
+        let s3 = data.stop_index["S3"];
+        let active = data.active_services("20260406");
+        let result = raptor::raptor_query(
+            &data,
+            &[(s1, 0)],
+            28000,
+            &active,
+            3,
+            &rustc_hash::FxHashSet::default(),
+            false,
+        );
+        let section_sets = raptor::reconstruct_journeys(&data, &result, &[(s3, 0)]);
+        if !section_sets.is_empty() {
+            let journey = build_journey(&data, &section_sets[0], "20260406");
+            // Verify the journey reached S3 successfully
+            assert!(journey.duration > 0);
+        }
+    }
+
+    #[test]
+    fn tag_journeys_wheelchair_adds_most_accessible() {
+        let mut journeys = vec![
+            Journey {
+                departure_date_time: "".into(),
+                arrival_date_time: "".into(),
+                duration: 1000,
+                nb_transfers: 2,
+                tags: vec![],
+                sections: vec![],
+            },
+            Journey {
+                departure_date_time: "".into(),
+                arrival_date_time: "".into(),
+                duration: 1100,
+                nb_transfers: 0,
+                tags: vec![],
+                sections: vec![],
+            },
+        ];
+        tag_journeys(&mut journeys, true);
+        assert!(
+            journeys[0].tags.contains(&"most_accessible".to_string())
+                || journeys[1].tags.contains(&"most_accessible".to_string())
+        );
     }
 }

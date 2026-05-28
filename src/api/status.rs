@@ -191,6 +191,30 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn check_valhalla_rejects_empty_host() {
+        let mut cfg = AppConfig::default();
+        cfg.valhalla.host = String::new();
+        assert!(!check_valhalla(&cfg).await);
+    }
+
+    #[actix_web::test]
+    async fn check_valhalla_rejects_host_with_slash_or_scheme() {
+        let mut cfg = AppConfig::default();
+        cfg.valhalla.host = "http://evil".into();
+        assert!(!check_valhalla(&cfg).await);
+        cfg.valhalla.host = "host/path".into();
+        assert!(!check_valhalla(&cfg).await);
+    }
+
+    #[actix_web::test]
+    async fn check_valhalla_unreachable_returns_false() {
+        let mut cfg = AppConfig::default();
+        cfg.valhalla.host = "127.0.0.1".into();
+        cfg.valhalla.port = 1; // unreachable
+        assert!(!check_valhalla(&cfg).await);
+    }
+
+    #[actix_web::test]
     async fn status_returns_ok() {
         let data = make_test_raptor();
         let app = actix_web::test::init_service(

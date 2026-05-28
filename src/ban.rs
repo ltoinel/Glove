@@ -107,6 +107,106 @@ struct BanRow {
 // Loading
 // ---------------------------------------------------------------------------
 
+/// In-progress accumulator while parsing BAN CSV rows.
+struct StreetAcc {
+    label: String,
+    name_lower: String,
+    points: Vec<AddressPoint>,
+}
+
+type StreetMap = std::collections::HashMap<(String, String), StreetAcc>;
+
+/// List `adresses-*.csv` files in `ban_dir`, sorted by name. Returns `None`
+/// if the directory can't be read.
+fn list_ban_files(ban_dir: &Path) -> Option<Vec<std::fs::DirEntry>> {
+    let read_dir = match std::fs::read_dir(ban_dir) {
+        Ok(rd) => rd,
+        Err(e) => {
+            info!("Cannot read BAN directory {}: {e}", ban_dir.display());
+            return None;
+        }
+    };
+    let mut files: Vec<_> = read_dir
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| n.starts_with("adresses-") && n.ends_with(".csv"))
+        })
+        .collect();
+    files.sort_by_key(|e| e.file_name());
+    Some(files)
+}
+
+/// Stream one BAN CSV into the per-street accumulator. Malformed rows are
+/// silently skipped (BAN files contain occasional bad records).
+fn ingest_ban_file(path: &Path, streets: &mut StreetMap) {
+    info!("Loading {}", path.display());
+
+    let mut reader = match csv::ReaderBuilder::new()
+        .delimiter(b';')
+        .flexible(true)
+        .from_path(path)
+    {
+        Ok(r) => r,
+        Err(e) => {
+            info!("Failed to open {}: {e}", path.display());
+            return;
+        }
+    };
+
+    for result in reader.deserialize::<BanRow>() {
+        let Ok(row) = result else { continue };
+        if row.nom_voie.is_empty() || row.code_postal.is_empty() {
+            continue;
+        }
+        let (Ok(lon), Ok(lat)) = (row.lon.parse::<f64>(), row.lat.parse::<f64>()) else {
+            continue;
+        };
+        let num: u32 = row.numero.parse().unwrap_or(0);
+        let key = (row.nom_voie.clone(), row.code_postal.clone());
+
+        streets
+            .entry(key)
+            .or_insert_with(|| {
+                let label = format!("{}, {} {}", row.nom_voie, row.code_postal, row.nom_commune);
+                let name_lower = normalize(&label);
+                StreetAcc {
+                    label,
+                    name_lower,
+                    points: Vec::new(),
+                }
+            })
+            .points
+            .push(AddressPoint { num, lon, lat });
+    }
+}
+
+/// Collapse the per-street accumulator into the sorted, deduped index entries.
+fn finalize_streets(streets: StreetMap) -> Vec<BanEntry> {
+    let mut entries: Vec<BanEntry> = streets
+        .into_values()
+        .map(|mut acc| {
+            acc.points.sort_by_key(|p| p.num);
+            acc.points.dedup_by_key(|p| p.num);
+            let (sum_lon, sum_lat) = acc
+                .points
+                .iter()
+                .fold((0.0, 0.0), |(sl, sa), p| (sl + p.lon, sa + p.lat));
+            let n = acc.points.len().max(1) as f64;
+            BanEntry {
+                label: acc.label,
+                name_lower: acc.name_lower,
+                lon: sum_lon / n,
+                lat: sum_lat / n,
+                points: acc.points,
+            }
+        })
+        .collect();
+    entries.sort_by(|a, b| a.name_lower.cmp(&b.name_lower));
+    entries
+}
+
 impl BanData {
     /// Load all BAN CSV files from a directory and build the search index.
     ///
@@ -122,117 +222,22 @@ impl BanData {
 
         info!("Loading BAN data from {}", ban_dir.display());
 
-        use std::collections::HashMap;
-
-        struct StreetAcc {
-            label: String,
-            name_lower: String,
-            points: Vec<AddressPoint>,
-        }
-
-        let mut streets: HashMap<(String, String), StreetAcc> = HashMap::new();
-
-        let read_dir = match std::fs::read_dir(ban_dir) {
-            Ok(rd) => rd,
-            Err(e) => {
-                info!("Cannot read BAN directory {}: {e}", ban_dir.display());
+        let files = match list_ban_files(ban_dir) {
+            Some(files) => files,
+            None => {
                 return BanData {
                     entries: Vec::new(),
                 };
             }
         };
-        let mut files: Vec<_> = read_dir
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_name()
-                    .to_str()
-                    .is_some_and(|n| n.starts_with("adresses-") && n.ends_with(".csv"))
-            })
-            .collect();
-        files.sort_by_key(|e| e.file_name());
 
+        let mut streets: StreetMap = StreetMap::new();
         for file in &files {
-            let path = file.path();
-            info!("Loading {}", path.display());
-
-            let mut reader = match csv::ReaderBuilder::new()
-                .delimiter(b';')
-                .flexible(true)
-                .from_path(&path)
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    info!("Failed to open {}: {e}", path.display());
-                    continue;
-                }
-            };
-
-            for result in reader.deserialize::<BanRow>() {
-                let row = match result {
-                    Ok(r) => r,
-                    Err(_) => continue,
-                };
-
-                if row.nom_voie.is_empty() || row.code_postal.is_empty() {
-                    continue;
-                }
-
-                let lon: f64 = match row.lon.parse() {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
-                let lat: f64 = match row.lat.parse() {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
-
-                let num: u32 = row.numero.parse().unwrap_or(0);
-                let key = (row.nom_voie.clone(), row.code_postal.clone());
-
-                streets
-                    .entry(key)
-                    .or_insert_with(|| {
-                        let label =
-                            format!("{}, {} {}", row.nom_voie, row.code_postal, row.nom_commune);
-                        let name_lower = normalize(&label);
-                        StreetAcc {
-                            label,
-                            name_lower,
-                            points: Vec::new(),
-                        }
-                    })
-                    .points
-                    .push(AddressPoint { num, lon, lat });
-            }
+            ingest_ban_file(&file.path(), &mut streets);
         }
 
         let total_points: usize = streets.values().map(|s| s.points.len()).sum();
-
-        let mut entries: Vec<BanEntry> = streets
-            .into_values()
-            .map(|mut acc| {
-                // Sort points by street number for binary search
-                acc.points.sort_by_key(|p| p.num);
-                acc.points.dedup_by_key(|p| p.num);
-
-                // Centroid as fallback (when no number requested)
-                let (sum_lon, sum_lat) = acc
-                    .points
-                    .iter()
-                    .fold((0.0, 0.0), |(sl, sa), p| (sl + p.lon, sa + p.lat));
-                let n = acc.points.len().max(1) as f64;
-
-                BanEntry {
-                    label: acc.label,
-                    name_lower: acc.name_lower,
-                    lon: sum_lon / n,
-                    lat: sum_lat / n,
-                    points: acc.points,
-                }
-            })
-            .collect();
-
-        entries.sort_by(|a, b| a.name_lower.cmp(&b.name_lower));
+        let entries = finalize_streets(streets);
         info!(
             "{} BAN streets loaded ({} address points, {:.1} MB est.)",
             entries.len(),
@@ -452,6 +457,68 @@ mod tests {
         let ban = make_test_ban();
         let results = ban.search("paris", 1);
         assert_eq!(results.len(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // BanEntry::locate
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn locate_no_number_returns_centroid() {
+        let entry = make_entry("Rue X, 75001 Paris", 2.0, 48.0);
+        let (lon, lat) = entry.locate(None);
+        assert!((lon - 2.0).abs() < 1e-6);
+        assert!((lat - 48.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn locate_no_points_returns_centroid() {
+        let entry = BanEntry {
+            label: "X".into(),
+            name_lower: "x".into(),
+            lon: 1.0,
+            lat: 2.0,
+            points: vec![],
+        };
+        let (lon, lat) = entry.locate(Some(42));
+        assert_eq!((lon, lat), (1.0, 2.0));
+    }
+
+    #[test]
+    fn locate_exact_match_returns_point() {
+        let entry = make_entry("X", 2.0, 48.0);
+        let (lon, lat) = entry.locate(Some(100));
+        // 100 is one of the seeded points → exact coord (lon, lat)
+        assert!((lon - 2.0).abs() < 1e-6);
+        assert!((lat - 48.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn locate_below_first_returns_first_point() {
+        let entry = make_entry("X", 2.0, 48.0);
+        let (lon, lat) = entry.locate(Some(0));
+        // 0 < first point (1) → returns first point coords
+        let first = &entry.points[0];
+        assert_eq!((lon, lat), (first.lon, first.lat));
+    }
+
+    #[test]
+    fn locate_above_last_returns_last_point() {
+        let entry = make_entry("X", 2.0, 48.0);
+        let (lon, lat) = entry.locate(Some(9999));
+        let last = entry.points.last().unwrap();
+        assert_eq!((lon, lat), (last.lon, last.lat));
+    }
+
+    #[test]
+    fn locate_interpolates_between_points() {
+        let entry = make_entry("X", 2.0, 48.0);
+        // 50 lies between 1 and 100 → interpolation
+        let (lon, lat) = entry.locate(Some(50));
+        assert!(lon.is_finite());
+        assert!(lat.is_finite());
+        // Should be between point[0] and point[1] coords
+        assert!(lon >= entry.points[0].lon && lon <= entry.points[1].lon);
     }
 
     // -----------------------------------------------------------------------

@@ -58,7 +58,9 @@ Core of the application. Round-based public transit routing with:
 - `GET /api/status` — GTFS stats and last load timestamp
 - `GET /api/gtfs/validate` — GTFS data quality validation (19 checks)
 - `POST /api/gtfs/reload` — Hot-reload GTFS data without downtime (atomic swap via ArcSwap)
+- `GET /api/metrics` — Prometheus-format metrics (HTTP counters, CPU, memory)
 - `GET /api/tiles/{z}/{x}/{y}.png` — Map tile proxy with local disk cache
+- `GET /api-docs/openapi.json` — Auto-generated OpenAPI specification
 
 ### Frontend (`portal/`)
 Single-page app: vertical nav rail (56px) + sidebar (450px) + Leaflet map. Dark theme with cached CARTO tiles. i18n for FR/EN in `i18n.jsx`. Queries all endpoints in parallel (PT, walk, bike, car). Views: search (default), GTFS validation, dataset, swagger, metrics. Pure utility functions in `utils.js`, tested with vitest.

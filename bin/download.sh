@@ -62,11 +62,13 @@ yaml_val() {
         # then use sed to find the indented key under the section header.
         local section="${1%%.*}"
         local key="${1#*.}"
-        val=$(sed -n "/^${section}:/,/^[^ ]/{ s/^  *${key}:[[:space:]]*//p; }" "$CONFIG" | head -1 | tr -d '"')
+        val=$(sed -n "/^${section}:/,/^[^ ]/{ s/^  *${key}:[[:space:]]*//p; }" "$CONFIG" | head -1)
     else
         # Top-level key: simple grep.
-        val=$(grep "^$1:" "$CONFIG" 2>/dev/null | sed 's/^[^:]*:[[:space:]]*//' | tr -d '"')
+        val=$(grep "^$1:" "$CONFIG" 2>/dev/null | sed 's/^[^:]*:[[:space:]]*//')
     fi
+    # Strip inline comments, surrounding quotes and trailing whitespace.
+    val=$(echo "$val" | sed 's/[[:space:]]*#.*$//; s/^"//; s/"$//; s/[[:space:]]*$//')
     if [ -z "$val" ]; then
         fail "Missing key '$1' in $CONFIG"
     fi

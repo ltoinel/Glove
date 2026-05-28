@@ -826,15 +826,43 @@ pub struct RaptorResult {
     sources: FxHashSet<usize>,
 }
 
+/// Mutable per-round scratch buffers, reused across rounds to avoid reallocation.
+struct RaptorBuffers {
+    tau: Vec<Vec<u32>>,
+    best: Vec<u32>,
+    labels: Vec<Vec<Option<Label>>>,
+    marked: Vec<bool>,
+    new_marked: Vec<bool>,
+    route_earliest: Vec<usize>,
+    active_routes: Vec<usize>,
+    trip_improved: Vec<usize>,
+}
+
+impl RaptorBuffers {
+    fn new(num_stops: usize, num_patterns: usize, rounds: usize) -> Self {
+        Self {
+            tau: vec![vec![INFINITY; num_stops]; rounds + 1],
+            best: vec![INFINITY; num_stops],
+            labels: vec![vec![None; num_stops]; rounds + 1],
+            marked: vec![false; num_stops],
+            new_marked: vec![false; num_stops],
+            route_earliest: vec![usize::MAX; num_patterns],
+            active_routes: Vec::with_capacity(num_patterns),
+            trip_improved: Vec::new(),
+        }
+    }
+}
+
 /// Run the RAPTOR algorithm to find earliest-arrival journeys.
 ///
 /// # Arguments
 /// - `data`: pre-built RAPTOR data
-/// - `source`, `target`: numeric stop indices
+/// - `sources`: source stop indices paired with walking-time offsets
 /// - `departure_time`: seconds since midnight
 /// - `active`: pre-computed active services bitmap (from [`RaptorData::active_services`])
 /// - `max_transfers`: maximum number of vehicle changes allowed
 /// - `excluded_patterns`: patterns to skip (used for diverse route alternatives)
+/// - `wheelchair`: when `true`, skip stops with `wheelchair_boarding == 2`
 pub fn raptor_query(
     data: &RaptorData,
     sources: &[(usize, u32)],
@@ -847,157 +875,184 @@ pub fn raptor_query(
     let n = data.stops.len();
     let rounds = max_transfers.min(MAX_ROUNDS - 1) + 1;
 
-    let mut tau: Vec<Vec<u32>> = vec![vec![INFINITY; n]; rounds + 1];
-    let mut best: Vec<u32> = vec![INFINITY; n];
-    let mut labels: Vec<Vec<Option<Label>>> = vec![vec![None; n]; rounds + 1];
+    let mut buf = RaptorBuffers::new(n, data.patterns.len(), rounds);
+    init_source_stops(data, sources, departure_time, &mut buf);
 
-    // Track which stops were improved (to limit route scanning)
-    let mut marked: Vec<bool> = vec![false; n];
-
-    // Initialize all source stops with their walking-time offset
-    for &(source, walk_time) in sources {
-        let arr = departure_time.saturating_add(walk_time);
-        if arr < tau[0][source] {
-            tau[0][source] = arr;
-            best[source] = arr;
-            marked[source] = true;
-        }
-
-        // Apply initial foot transfers from each source
-        for &(to_stop, duration) in &data.stop_transfers[source] {
-            let total = arr.saturating_add(duration);
-            if total < tau[0][to_stop] {
-                tau[0][to_stop] = total;
-                best[to_stop] = total;
-                labels[0][to_stop] = Some(Label::Transfer {
-                    from_stop: source,
-                    duration,
-                });
-                marked[to_stop] = true;
-            }
-        }
-    }
-
-    // Pre-allocated buffers reused across rounds
-    let num_patterns = data.patterns.len();
-    let mut route_earliest: Vec<usize> = vec![usize::MAX; num_patterns]; // earliest position per pattern
-    let mut active_routes: Vec<usize> = Vec::with_capacity(num_patterns); // patterns to scan this round
-    let mut new_marked: Vec<bool> = vec![false; n];
-    let mut trip_improved: Vec<usize> = Vec::new(); // stops improved by trips (for transfers)
-
-    // Main RAPTOR loop: one round per additional vehicle trip
     for k in 1..=rounds {
-        // Collect route patterns serving any marked stop (Vec-based, no HashMap)
-        active_routes.clear();
-        for (stop_idx, is_marked) in marked.iter().enumerate() {
-            if !*is_marked {
-                continue;
-            }
-            for &(pat_idx, pos) in &data.stop_patterns[stop_idx] {
-                if excluded_patterns.contains(&pat_idx) {
-                    continue;
-                }
-                if route_earliest[pat_idx] == usize::MAX {
-                    active_routes.push(pat_idx);
-                    route_earliest[pat_idx] = pos;
-                } else if pos < route_earliest[pat_idx] {
-                    route_earliest[pat_idx] = pos;
-                }
-            }
-        }
+        collect_active_routes(data, excluded_patterns, &mut buf);
+        buf.new_marked.fill(false);
+        buf.trip_improved.clear();
 
-        new_marked.fill(false);
-        trip_improved.clear();
+        scan_active_routes(data, k, active, wheelchair, &mut buf);
+        apply_transfers_after_trips(data, k, &mut buf);
 
-        // Scan each collected route pattern
-        for &pat_idx in &active_routes {
-            let start_pos = route_earliest[pat_idx];
-            route_earliest[pat_idx] = usize::MAX; // reset for next round
-
-            let pattern = &data.patterns[pat_idx];
-            let mut current_trip: Option<usize> = None;
-            let mut board_pos: usize = 0;
-
-            for pos in start_pos..pattern.stops.len() {
-                let stop_idx = pattern.stops[pos];
-
-                // Try to board an earlier trip at this stop
-                if tau[k - 1][stop_idx] != INFINITY {
-                    let board_time = tau[k - 1][stop_idx];
-                    let new_trip = find_earliest_trip(pattern, pos, board_time, active, wheelchair);
-
-                    if let Some(trip_idx) = new_trip {
-                        match current_trip {
-                            None => {
-                                current_trip = Some(trip_idx);
-                                board_pos = pos;
-                            }
-                            Some(curr) => {
-                                // Switch to this trip if it arrives earlier
-                                let curr_arr = pattern.trips[curr].stop_times[pos].0;
-                                let new_arr = pattern.trips[trip_idx].stop_times[pos].0;
-                                if new_arr < curr_arr {
-                                    current_trip = Some(trip_idx);
-                                    board_pos = pos;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // If on a trip, update arrival time at this stop
-                if let Some(trip_idx) = current_trip {
-                    // Skip stops explicitly not wheelchair-accessible
-                    if wheelchair && data.stops[stop_idx].wheelchair_boarding == 2 {
-                        continue;
-                    }
-                    let arr = pattern.trips[trip_idx].stop_times[pos].0;
-                    if arr < best[stop_idx] {
-                        tau[k][stop_idx] = arr;
-                        best[stop_idx] = arr;
-                        labels[k][stop_idx] = Some(Label::Trip {
-                            pattern_idx: pat_idx,
-                            trip_idx,
-                            board_pos,
-                            alight_pos: pos,
-                        });
-                        new_marked[stop_idx] = true;
-                        trip_improved.push(stop_idx); // collect inline
-                    }
-                }
-            }
-        }
-
-        // Apply transfers ONLY from stops improved by trips (not by other transfers)
-        // to prevent transitive transfer chains within a single round.
-        for &stop_idx in &trip_improved {
-            for &(to_stop, duration) in &data.stop_transfers[stop_idx] {
-                let arr = tau[k][stop_idx].saturating_add(duration);
-                if arr < best[to_stop] {
-                    tau[k][to_stop] = arr;
-                    best[to_stop] = arr;
-                    labels[k][to_stop] = Some(Label::Transfer {
-                        from_stop: stop_idx,
-                        duration,
-                    });
-                    new_marked[to_stop] = true;
-                }
-            }
-        }
-
-        std::mem::swap(&mut marked, &mut new_marked);
-
-        // Early termination if no stop was improved
-        if !marked.iter().any(|&m| m) {
+        std::mem::swap(&mut buf.marked, &mut buf.new_marked);
+        if !buf.marked.iter().any(|&m| m) {
             break;
         }
     }
 
     let source_set: FxHashSet<usize> = sources.iter().map(|&(idx, _)| idx).collect();
     RaptorResult {
-        tau,
-        labels,
+        tau: buf.tau,
+        labels: buf.labels,
         sources: source_set,
+    }
+}
+
+/// Initialize source stops with their walking-time offset and apply initial
+/// foot transfers from each source.
+fn init_source_stops(
+    data: &RaptorData,
+    sources: &[(usize, u32)],
+    departure_time: u32,
+    buf: &mut RaptorBuffers,
+) {
+    for &(source, walk_time) in sources {
+        let arr = departure_time.saturating_add(walk_time);
+        if arr < buf.tau[0][source] {
+            buf.tau[0][source] = arr;
+            buf.best[source] = arr;
+            buf.marked[source] = true;
+        }
+        for &(to_stop, duration) in &data.stop_transfers[source] {
+            let total = arr.saturating_add(duration);
+            if total < buf.tau[0][to_stop] {
+                buf.tau[0][to_stop] = total;
+                buf.best[to_stop] = total;
+                buf.labels[0][to_stop] = Some(Label::Transfer {
+                    from_stop: source,
+                    duration,
+                });
+                buf.marked[to_stop] = true;
+            }
+        }
+    }
+}
+
+/// Collect every route pattern serving a stop marked in the previous round,
+/// recording the earliest position on each pattern.
+fn collect_active_routes(
+    data: &RaptorData,
+    excluded_patterns: &FxHashSet<usize>,
+    buf: &mut RaptorBuffers,
+) {
+    buf.active_routes.clear();
+    for (stop_idx, is_marked) in buf.marked.iter().enumerate() {
+        if !*is_marked {
+            continue;
+        }
+        for &(pat_idx, pos) in &data.stop_patterns[stop_idx] {
+            if excluded_patterns.contains(&pat_idx) {
+                continue;
+            }
+            if buf.route_earliest[pat_idx] == usize::MAX {
+                buf.active_routes.push(pat_idx);
+                buf.route_earliest[pat_idx] = pos;
+            } else if pos < buf.route_earliest[pat_idx] {
+                buf.route_earliest[pat_idx] = pos;
+            }
+        }
+    }
+}
+
+/// Scan every active route, attempting to board an earlier trip at each stop
+/// and updating arrival times when a trip improves them.
+fn scan_active_routes(
+    data: &RaptorData,
+    k: usize,
+    active: &[bool],
+    wheelchair: bool,
+    buf: &mut RaptorBuffers,
+) {
+    for i in 0..buf.active_routes.len() {
+        let pat_idx = buf.active_routes[i];
+        let start_pos = buf.route_earliest[pat_idx];
+        buf.route_earliest[pat_idx] = usize::MAX; // reset for next round
+
+        scan_pattern(data, pat_idx, start_pos, k, active, wheelchair, buf);
+    }
+}
+
+/// Scan a single pattern from `start_pos` onward.
+fn scan_pattern(
+    data: &RaptorData,
+    pat_idx: usize,
+    start_pos: usize,
+    k: usize,
+    active: &[bool],
+    wheelchair: bool,
+    buf: &mut RaptorBuffers,
+) {
+    let pattern = &data.patterns[pat_idx];
+    let mut current_trip: Option<usize> = None;
+    let mut board_pos: usize = 0;
+
+    for pos in start_pos..pattern.stops.len() {
+        let stop_idx = pattern.stops[pos];
+
+        // Try to board an earlier trip at this stop
+        if buf.tau[k - 1][stop_idx] != INFINITY {
+            let board_time = buf.tau[k - 1][stop_idx];
+            if let Some(trip_idx) = find_earliest_trip(pattern, pos, board_time, active, wheelchair)
+            {
+                match current_trip {
+                    None => {
+                        current_trip = Some(trip_idx);
+                        board_pos = pos;
+                    }
+                    Some(curr) => {
+                        let curr_arr = pattern.trips[curr].stop_times[pos].0;
+                        let new_arr = pattern.trips[trip_idx].stop_times[pos].0;
+                        if new_arr < curr_arr {
+                            current_trip = Some(trip_idx);
+                            board_pos = pos;
+                        }
+                    }
+                }
+            }
+        }
+
+        // If on a trip, update arrival time at this stop
+        let Some(trip_idx) = current_trip else {
+            continue;
+        };
+        if wheelchair && data.stops[stop_idx].wheelchair_boarding == 2 {
+            continue;
+        }
+        let arr = pattern.trips[trip_idx].stop_times[pos].0;
+        if arr < buf.best[stop_idx] {
+            buf.tau[k][stop_idx] = arr;
+            buf.best[stop_idx] = arr;
+            buf.labels[k][stop_idx] = Some(Label::Trip {
+                pattern_idx: pat_idx,
+                trip_idx,
+                board_pos,
+                alight_pos: pos,
+            });
+            buf.new_marked[stop_idx] = true;
+            buf.trip_improved.push(stop_idx);
+        }
+    }
+}
+
+/// Apply transfers ONLY from stops improved by trips (not by other transfers)
+/// to prevent transitive transfer chains within a single round.
+fn apply_transfers_after_trips(data: &RaptorData, k: usize, buf: &mut RaptorBuffers) {
+    for i in 0..buf.trip_improved.len() {
+        let stop_idx = buf.trip_improved[i];
+        for &(to_stop, duration) in &data.stop_transfers[stop_idx] {
+            let arr = buf.tau[k][stop_idx].saturating_add(duration);
+            if arr < buf.best[to_stop] {
+                buf.tau[k][to_stop] = arr;
+                buf.best[to_stop] = arr;
+                buf.labels[k][to_stop] = Some(Label::Transfer {
+                    from_stop: stop_idx,
+                    duration,
+                });
+                buf.new_marked[to_stop] = true;
+            }
+        }
     }
 }
 
@@ -2214,5 +2269,45 @@ mod tests {
         std::fs::write(dir.path().join("raptor.bin"), b"not valid bincode").unwrap();
         let loaded = RaptorData::load_cached(dir.path(), "fp1");
         assert!(loaded.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // find_nearby_stops
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn find_nearby_stops_returns_stops_within_radius() {
+        let data = build_test_data();
+        // Coordinate close to S1 (2.347, 48.858)
+        let nearby = data.find_nearby_stops(2.347, 48.858, 200, 5.0);
+        assert!(!nearby.is_empty());
+        // Must include S1 with walk_time near 0
+        let s1 = data.stop_index["S1"];
+        assert!(nearby.iter().any(|&(idx, _)| idx == s1));
+    }
+
+    #[test]
+    fn find_nearby_stops_excludes_when_too_far() {
+        let data = build_test_data();
+        // Coordinate very far away (Marseille)
+        let nearby = data.find_nearby_stops(5.37, 43.30, 200, 5.0);
+        assert!(nearby.is_empty());
+    }
+
+    #[test]
+    fn find_nearby_stops_walking_time_scales_with_speed() {
+        let data = build_test_data();
+        let slow = data.find_nearby_stops(2.347, 48.858, 200, 1.0);
+        let fast = data.find_nearby_stops(2.347, 48.858, 200, 10.0);
+        // Both should hit S1; slow walking time > fast walking time
+        let slow_s1 = slow
+            .iter()
+            .find(|(idx, _)| *idx == data.stop_index["S1"])
+            .unwrap();
+        let fast_s1 = fast
+            .iter()
+            .find(|(idx, _)| *idx == data.stop_index["S1"])
+            .unwrap();
+        assert!(slow_s1.1 >= fast_s1.1);
     }
 }

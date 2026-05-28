@@ -227,3 +227,171 @@ pub async fn pedestrian_route(
         maneuvers,
     })
 }
+
+/// Test-only helpers shared with the other journey modules.
+/// A tiny in-process actix server that mimics Valhalla's `/route` and
+/// `/height` endpoints with canned JSON.
+#[cfg(test)]
+pub mod test_support {
+    use actix_web::{App, HttpResponse, HttpServer, post, web};
+    use std::net::TcpListener;
+    use std::sync::Once;
+
+    fn ok_route_body() -> serde_json::Value {
+        // Empty shape is safe across all decoders (bike's decode_polyline
+        // would otherwise panic on non-polyline data).
+        serde_json::json!({
+            "trip": {
+                "legs": [{
+                    "shape": "",
+                    "maneuvers": [{
+                        "instruction": "go",
+                        "length": 0.1,
+                        "time": 6.0,
+                        "type": 1,
+                        "begin_shape_index": 0
+                    }]
+                }],
+                "summary": { "length": 1.2, "time": 600.0 }
+            }
+        })
+    }
+
+    fn ok_height_body() -> serde_json::Value {
+        serde_json::json!({ "height": [10.0, 15.0, 12.0, 20.0] })
+    }
+
+    #[post("/route")]
+    async fn route_handler(_body: web::Json<serde_json::Value>) -> HttpResponse {
+        HttpResponse::Ok().json(ok_route_body())
+    }
+
+    #[post("/height")]
+    async fn height_handler(_body: web::Json<serde_json::Value>) -> HttpResponse {
+        HttpResponse::Ok().json(ok_height_body())
+    }
+
+    /// Spawn an actix mock server on a free port and return its base URL.
+    /// The server keeps running until the test process exits.
+    pub fn spawn_mock_valhalla() -> String {
+        static INIT: Once = Once::new();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().unwrap();
+        let port = addr.port();
+        let base = format!("http://127.0.0.1:{port}");
+
+        std::thread::spawn(move || {
+            let sys = actix_web::rt::System::new();
+            sys.block_on(async {
+                let server =
+                    HttpServer::new(|| App::new().service(route_handler).service(height_handler))
+                        .listen(listener)
+                        .expect("listen")
+                        .workers(1)
+                        .run();
+                let _ = server.await;
+            });
+        });
+
+        // Allow the server thread a brief moment to bind.
+        INIT.call_once(|| {});
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        base
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AppConfig;
+
+    // All four flag combinations of pedestrian_route reach the request-build
+    // stage, exercising the three costing_options branches and the speed
+    // clamp; the actual HTTP call will fail against the unreachable URL,
+    // confirming the None return path too.
+
+    fn unreachable_base() -> &'static str {
+        "http://127.0.0.1:1"
+    }
+
+    #[actix_web::test]
+    async fn pedestrian_route_outdoor_default() {
+        let out = pedestrian_route(
+            unreachable_base(),
+            (2.3, 48.8),
+            (2.4, 48.9),
+            Some(5.0),
+            false,
+            None,
+            None,
+        )
+        .await;
+        assert!(out.is_none());
+    }
+
+    #[actix_web::test]
+    async fn pedestrian_route_indoor_friendly() {
+        let out = pedestrian_route(
+            unreachable_base(),
+            (2.3, 48.8),
+            (2.4, 48.9),
+            None,
+            true,
+            Some("fr-FR"),
+            None,
+        )
+        .await;
+        assert!(out.is_none());
+    }
+
+    #[actix_web::test]
+    async fn pedestrian_route_wheelchair_overrides_speed() {
+        let cfg = AppConfig::default();
+        let out = pedestrian_route(
+            unreachable_base(),
+            (2.3, 48.8),
+            (2.4, 48.9),
+            Some(99.0), // ignored because wheelchair_config is set
+            false,
+            None,
+            Some(&cfg.wheelchair),
+        )
+        .await;
+        assert!(out.is_none());
+    }
+
+    #[actix_web::test]
+    async fn pedestrian_route_clamps_walking_speed() {
+        let out = pedestrian_route(
+            unreachable_base(),
+            (2.3, 48.8),
+            (2.4, 48.9),
+            Some(99.0),
+            false,
+            None,
+            None,
+        )
+        .await;
+        assert!(out.is_none());
+    }
+
+    #[actix_web::test]
+    async fn pedestrian_route_success_against_mock_valhalla() {
+        let base = test_support::spawn_mock_valhalla();
+        let leg = pedestrian_route(
+            &base,
+            (2.3, 48.8),
+            (2.4, 48.9),
+            Some(5.0),
+            false,
+            None,
+            None,
+        )
+        .await
+        .expect("mock returns a leg");
+        assert_eq!(leg.shape, "");
+        assert_eq!(leg.maneuvers.len(), 1);
+        assert_eq!(leg.duration, 600);
+        assert_eq!(leg.distance, 1200);
+    }
+}

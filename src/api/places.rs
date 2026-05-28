@@ -326,6 +326,70 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn places_with_street_number_prefixes_label() {
+        let (raptor, ban) = make_test_data();
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(web::Data::new(ArcSwap::from(raptor)))
+                .app_data(web::Data::new(ban))
+                .service(get_places),
+        )
+        .await;
+        // Need two alpha words so BAN's multi-word fallback matches the
+        // entry "Rue de Rivoli…" while "100" supplies the street number.
+        let req = actix_web::test::TestRequest::get()
+            .uri("/api/places?q=100%20rue%20rivoli")
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+        let body: serde_json::Value = actix_web::test::read_body_json(resp).await;
+        let places = body["places"].as_array().unwrap();
+        let address = places
+            .iter()
+            .find(|p| p["type"] == "address")
+            .expect("an address result");
+        assert!(address["name"].as_str().unwrap().starts_with("100 "));
+    }
+
+    #[actix_web::test]
+    async fn places_short_stripped_query_skips_stop_search() {
+        let (raptor, ban) = make_test_data();
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(web::Data::new(ArcSwap::from(raptor)))
+                .app_data(web::Data::new(ban))
+                .service(get_places),
+        )
+        .await;
+        // "1a" → strip digits → "a" → too short for stop search;
+        // but full "1a" stays for BAN. The BAN entry won't match,
+        // so we expect no stop results (covers Vec::new() branch).
+        let req = actix_web::test::TestRequest::get()
+            .uri("/api/places?q=1a")
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+        let body: serde_json::Value = actix_web::test::read_body_json(resp).await;
+        let places = body["places"].as_array().unwrap();
+        assert!(places.iter().all(|p| p["type"] != "stop"));
+    }
+
+    #[actix_web::test]
+    async fn places_respects_limit_clamp() {
+        let (raptor, ban) = make_test_data();
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(web::Data::new(ArcSwap::from(raptor)))
+                .app_data(web::Data::new(ban))
+                .service(get_places),
+        )
+        .await;
+        let req = actix_web::test::TestRequest::get()
+            .uri("/api/places?q=ch&limit=999")
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+    }
+
+    #[actix_web::test]
     async fn places_no_query() {
         let (raptor, ban) = make_test_data();
         let app = actix_web::test::init_service(

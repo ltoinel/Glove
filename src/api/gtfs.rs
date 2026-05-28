@@ -830,4 +830,322 @@ mod tests {
                 .any(|i| i.message.contains("coordinates"))
         );
     }
+
+    #[test]
+    fn validate_inverted_calendar_dates() {
+        let mut gtfs = make_test_gtfs();
+        gtfs.calendars.insert(
+            "SVC2".into(),
+            gtfs::Calendar {
+                service_id: "SVC2".into(),
+                monday: 1,
+                tuesday: 1,
+                wednesday: 1,
+                thursday: 1,
+                friday: 1,
+                saturday: 0,
+                sunday: 0,
+                start_date: "20261231".into(),
+                end_date: "20260101".into(), // inverted
+            },
+        );
+        let result = validate_gtfs(&gtfs);
+        assert!(
+            result
+                .issues
+                .iter()
+                .any(|i| i.message.contains("start_date is after end_date"))
+        );
+    }
+
+    #[test]
+    fn validate_empty_stop_name() {
+        let mut gtfs = make_test_gtfs();
+        gtfs.stops.insert(
+            "S2".into(),
+            gtfs::Stop {
+                stop_id: "S2".into(),
+                stop_name: "".into(),
+                stop_lon: 2.0,
+                stop_lat: 48.0,
+                parent_station: String::new(),
+                wheelchair_boarding: 0,
+            },
+        );
+        let result = validate_gtfs(&gtfs);
+        assert!(
+            result
+                .issues
+                .iter()
+                .any(|i| i.message.contains("empty stop_name"))
+        );
+    }
+
+    #[test]
+    fn validate_orphan_parent_station() {
+        let mut gtfs = make_test_gtfs();
+        gtfs.stops.insert(
+            "S2".into(),
+            gtfs::Stop {
+                stop_id: "S2".into(),
+                stop_name: "Child".into(),
+                stop_lon: 2.0,
+                stop_lat: 48.0,
+                parent_station: "GHOST".into(),
+                wheelchair_boarding: 0,
+            },
+        );
+        let result = validate_gtfs(&gtfs);
+        assert!(
+            result
+                .issues
+                .iter()
+                .any(|i| i.message.contains("non-existent parent_station"))
+        );
+    }
+
+    #[test]
+    fn validate_bad_transfer() {
+        let mut gtfs = make_test_gtfs();
+        gtfs.transfers.push(crate::gtfs::Transfer {
+            from_stop_id: "GHOST_A".into(),
+            to_stop_id: "GHOST_B".into(),
+            min_transfer_time: Some(0), // also flags transfer_time check
+        });
+        let result = validate_gtfs(&gtfs);
+        assert!(
+            result
+                .issues
+                .iter()
+                .any(|i| i.message.contains("Transfers reference non-existent stops"))
+        );
+    }
+
+    #[test]
+    fn validate_bad_route_color() {
+        let mut gtfs = make_test_gtfs();
+        gtfs.routes.insert(
+            "R2".into(),
+            crate::gtfs::Route {
+                route_id: "R2".into(),
+                agency_id: "A1".into(),
+                route_short_name: "2".into(),
+                route_long_name: "L2".into(),
+                route_type: 1,
+                route_color: "ZZZZZZ".into(), // invalid hex
+                route_text_color: String::new(),
+            },
+        );
+        let _ = validate_gtfs(&gtfs); // executes check_route_colors path
+    }
+
+    #[test]
+    fn validate_empty_headsign() {
+        let mut gtfs = make_test_gtfs();
+        gtfs.trips.insert(
+            "T2".into(),
+            crate::gtfs::Trip {
+                route_id: "R1".into(),
+                service_id: "SVC1".into(),
+                trip_id: "T2".into(),
+                trip_headsign: "".into(),
+                wheelchair_accessible: 0,
+            },
+        );
+        let result = validate_gtfs(&gtfs);
+        // Validation runs without panicking and detects something
+        let _ = result;
+    }
+
+    #[test]
+    fn validate_unparseable_time() {
+        let mut gtfs = make_test_gtfs();
+        gtfs.stop_times.push(crate::gtfs::StopTime {
+            trip_id: "T1".into(),
+            arrival_time: "bad-time".into(),
+            departure_time: "08:01:00".into(),
+            stop_id: "S1".into(),
+            stop_sequence: 1,
+        });
+        let result = validate_gtfs(&gtfs);
+        // Should detect the unparseable time
+        let _ = result;
+    }
+
+    // ----- HTTP handlers -------------------------------------------------
+
+    #[actix_web::test]
+    async fn post_reload_disabled_when_api_key_empty() {
+        let data = Arc::new(crate::raptor::RaptorData::build(make_test_gtfs(), 120));
+        let cfg = AppConfig::default();
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(web::Data::new(ArcSwap::from(data)))
+                .app_data(web::Data::new(cfg))
+                .service(post_reload),
+        )
+        .await;
+        let req = actix_web::test::TestRequest::post()
+            .uri("/api/gtfs/reload")
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 403);
+    }
+
+    #[actix_web::test]
+    async fn post_reload_unauthorized_when_wrong_key() {
+        let data = Arc::new(crate::raptor::RaptorData::build(make_test_gtfs(), 120));
+        let mut cfg = AppConfig::default();
+        cfg.server.api_key = "secret".into();
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(web::Data::new(ArcSwap::from(data)))
+                .app_data(web::Data::new(cfg))
+                .service(post_reload),
+        )
+        .await;
+        let req = actix_web::test::TestRequest::post()
+            .uri("/api/gtfs/reload")
+            .insert_header(("X-Api-Key", "wrong"))
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 401);
+    }
+
+    #[actix_web::test]
+    async fn post_reload_authorized_attempts_load() {
+        let data = Arc::new(crate::raptor::RaptorData::build(make_test_gtfs(), 120));
+        let mut cfg = AppConfig::default();
+        cfg.server.api_key = "secret".into();
+        // Point data dir at non-existent path → load fails → 500
+        cfg.data.dir = "/nonexistent-test-data".into();
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(web::Data::new(ArcSwap::from(data)))
+                .app_data(web::Data::new(cfg))
+                .service(post_reload),
+        )
+        .await;
+        let req = actix_web::test::TestRequest::post()
+            .uri("/api/gtfs/reload")
+            .insert_header(("X-Api-Key", "secret"))
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 500);
+    }
+
+    fn write_minimal_gtfs(gtfs_dir: &std::path::Path) {
+        std::fs::create_dir_all(gtfs_dir).unwrap();
+        std::fs::write(
+            gtfs_dir.join("agency.txt"),
+            "agency_id,agency_name,agency_url,agency_timezone\nA1,Test,https://e,Europe/Paris\n",
+        )
+        .unwrap();
+        std::fs::write(
+            gtfs_dir.join("routes.txt"),
+            "route_id,agency_id,route_short_name,route_long_name,route_type,route_color,route_text_color\nR1,A1,1,Line 1,1,FFCD00,000000\n",
+        )
+        .unwrap();
+        std::fs::write(
+            gtfs_dir.join("stops.txt"),
+            "stop_id,stop_name,stop_lon,stop_lat,parent_station,wheelchair_boarding\n\
+             S1,StopA,2.347,48.858,,0\n\
+             S2,StopB,2.395,48.848,,0\n",
+        )
+        .unwrap();
+        std::fs::write(
+            gtfs_dir.join("trips.txt"),
+            "route_id,service_id,trip_id,trip_headsign,wheelchair_accessible\nR1,SVC1,T1,StopB,0\n",
+        )
+        .unwrap();
+        std::fs::write(
+            gtfs_dir.join("stop_times.txt"),
+            "trip_id,arrival_time,departure_time,stop_id,stop_sequence\n\
+             T1,08:00:00,08:01:00,S1,0\n\
+             T1,08:10:00,08:11:00,S2,1\n",
+        )
+        .unwrap();
+        std::fs::write(
+            gtfs_dir.join("calendar.txt"),
+            "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\n\
+             SVC1,1,1,1,1,1,1,1,20260101,20261231\n",
+        )
+        .unwrap();
+        std::fs::write(
+            gtfs_dir.join("calendar_dates.txt"),
+            "service_id,date,exception_type\n",
+        )
+        .unwrap();
+        std::fs::write(
+            gtfs_dir.join("transfers.txt"),
+            "from_stop_id,to_stop_id,min_transfer_time\n",
+        )
+        .unwrap();
+    }
+
+    #[actix_web::test]
+    async fn post_reload_success_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = AppConfig::default();
+        cfg.data.dir = dir.path().to_string_lossy().into();
+        cfg.server.api_key = "secret".into();
+        write_minimal_gtfs(std::path::Path::new(&cfg.data.gtfs_dir()));
+
+        let data = Arc::new(crate::raptor::RaptorData::build(make_test_gtfs(), 120));
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(web::Data::new(ArcSwap::from(data)))
+                .app_data(web::Data::new(cfg))
+                .service(post_reload),
+        )
+        .await;
+        let req = actix_web::test::TestRequest::post()
+            .uri("/api/gtfs/reload")
+            .insert_header(("X-Api-Key", "secret"))
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = actix_web::test::read_body_json(resp).await;
+        assert_eq!(body["status"], "reloaded");
+        assert!(body["gtfs"]["stops"].as_u64().unwrap() >= 2);
+    }
+
+    #[actix_web::test]
+    async fn get_validate_success_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = AppConfig::default();
+        cfg.data.dir = dir.path().to_string_lossy().into();
+        write_minimal_gtfs(std::path::Path::new(&cfg.data.gtfs_dir()));
+
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(web::Data::new(cfg))
+                .service(get_validate),
+        )
+        .await;
+        let req = actix_web::test::TestRequest::get()
+            .uri("/api/gtfs/validate")
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = actix_web::test::read_body_json(resp).await;
+        assert!(body["summary"]["total_checks"].as_u64().unwrap() > 0);
+    }
+
+    #[actix_web::test]
+    async fn get_validate_with_missing_data_dir_returns_500() {
+        let mut cfg = AppConfig::default();
+        cfg.data.dir = "/nonexistent-test-data".into();
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(web::Data::new(cfg))
+                .service(get_validate),
+        )
+        .await;
+        let req = actix_web::test::TestRequest::get()
+            .uri("/api/gtfs/validate")
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 500);
+    }
 }

@@ -1,4 +1,4 @@
-# Glove
+# Glove : GTFS Lightweight Optimal Velocity Engine
 
 [![CI](https://github.com/ltoinel/Glove/actions/workflows/ci.yml/badge.svg)](https://github.com/ltoinel/Glove/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/ltoinel/Glove/graph/badge.svg)](https://codecov.io/gh/ltoinel/Glove)

@@ -89,4 +89,61 @@ mod tests {
         assert!(parse_coord("2.347").is_none());
         assert!(parse_coord("abc;def").is_none());
     }
+
+    #[test]
+    fn parse_from_to_both_valid() {
+        let (flon, flat, tlon, tlat) = parse_from_to("2.3;48.8", "2.4;48.9").unwrap();
+        assert!((flon - 2.3).abs() < 1e-6);
+        assert!((flat - 48.8).abs() < 1e-6);
+        assert!((tlon - 2.4).abs() < 1e-6);
+        assert!((tlat - 48.9).abs() < 1e-6);
+    }
+
+    #[test]
+    fn parse_from_to_bad_from_returns_400() {
+        let err = parse_from_to("bad", "2.4;48.9").unwrap_err();
+        assert_eq!(err.status(), 400);
+    }
+
+    #[test]
+    fn parse_from_to_bad_to_returns_400() {
+        let err = parse_from_to("2.3;48.8", "bad").unwrap_err();
+        assert_eq!(err.status(), 400);
+    }
+
+    #[test]
+    fn dir_fingerprint_includes_existing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path_a = dir.path().join("a.txt");
+        std::fs::write(&path_a, b"hello").unwrap();
+        let fp1 = dir_fingerprint(dir.path(), &["a.txt", "missing.txt"]);
+        // changing file size must change the fingerprint
+        std::fs::write(&path_a, b"hello world").unwrap();
+        let fp2 = dir_fingerprint(dir.path(), &["a.txt", "missing.txt"]);
+        assert_ne!(fp1, fp2);
+        // hex-encoded SHA-256 = 64 chars
+        assert_eq!(fp1.len(), 64);
+    }
+
+    #[test]
+    fn dir_fingerprint_glob_picks_matching_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("data-01.csv"), b"a").unwrap();
+        std::fs::write(dir.path().join("data-02.csv"), b"b").unwrap();
+        std::fs::write(dir.path().join("readme.md"), b"ignore me").unwrap();
+        let fp = dir_fingerprint_glob(dir.path(), "data-", ".csv");
+        assert_eq!(fp.len(), 64);
+
+        // Removing a matching file changes the fingerprint
+        std::fs::remove_file(dir.path().join("data-02.csv")).unwrap();
+        let fp2 = dir_fingerprint_glob(dir.path(), "data-", ".csv");
+        assert_ne!(fp, fp2);
+    }
+
+    #[test]
+    fn dir_fingerprint_glob_returns_stable_value_for_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let fp = dir_fingerprint_glob(dir.path(), "data-", ".csv");
+        assert_eq!(fp.len(), 64);
+    }
 }

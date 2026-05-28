@@ -184,3 +184,99 @@ pub async fn get_car(query: web::Query<CarQuery>, config: web::Data<AppConfig>) 
         journeys: vec![journey],
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn convert_maneuvers_scales_units() {
+        let raw = vec![
+            RawManeuver {
+                instruction: "Continue".into(),
+                length: 2.0,
+                time: 120.0,
+                maneuver_type: 1,
+                begin_shape_index: 0,
+            },
+            RawManeuver {
+                instruction: "Turn left".into(),
+                length: 0.05,
+                time: 5.0,
+                maneuver_type: 4,
+                begin_shape_index: 10,
+            },
+        ];
+        let out = convert_maneuvers(&raw);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].distance, 2000);
+        assert_eq!(out[0].duration, 120);
+        assert_eq!(out[1].distance, 50);
+        assert_eq!(out[1].begin_shape_index, 10);
+    }
+
+    #[test]
+    fn convert_maneuvers_empty() {
+        assert!(convert_maneuvers(&[]).is_empty());
+    }
+
+    fn unreachable_config() -> AppConfig {
+        let mut cfg = AppConfig::default();
+        cfg.valhalla.host = "127.0.0.1".into();
+        cfg.valhalla.port = 1;
+        cfg
+    }
+
+    #[actix_web::test]
+    async fn get_car_rejects_bad_coords() {
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(actix_web::web::Data::new(unreachable_config()))
+                .service(get_car),
+        )
+        .await;
+        let req = actix_web::test::TestRequest::get()
+            .uri("/api/journeys/car?from=bad&to=2.4;48.9")
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 400);
+    }
+
+    #[actix_web::test]
+    async fn get_car_success_against_mock() {
+        let base = super::super::valhalla::test_support::spawn_mock_valhalla();
+        let rest = base.strip_prefix("http://").unwrap();
+        let (host, port_str) = rest.split_once(':').unwrap();
+        let mut cfg = AppConfig::default();
+        cfg.valhalla.host = host.into();
+        cfg.valhalla.port = port_str.parse().unwrap();
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(actix_web::web::Data::new(cfg))
+                .service(get_car),
+        )
+        .await;
+        let req = actix_web::test::TestRequest::get()
+            .uri("/api/journeys/car?from=2.3;48.8&to=2.4;48.9&maneuvers=true")
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = actix_web::test::read_body_json(resp).await;
+        assert!(body["journeys"][0]["duration"].as_u64().unwrap() > 0);
+    }
+
+    #[actix_web::test]
+    async fn get_car_unreachable_valhalla_returns_502() {
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(actix_web::web::Data::new(unreachable_config()))
+                .service(get_car),
+        )
+        .await;
+        let req = actix_web::test::TestRequest::get()
+            .uri("/api/journeys/car?from=2.3;48.8&to=2.4;48.9&maneuvers=true")
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 502);
+    }
+}

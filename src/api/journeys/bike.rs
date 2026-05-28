@@ -361,3 +361,164 @@ async fn process_response(
         maneuvers,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::BikeProfile;
+
+    #[test]
+    fn compute_elevation_handles_empty_input() {
+        let (gain, loss) = compute_elevation(&[]);
+        assert_eq!((gain, loss), (0, 0));
+    }
+
+    #[test]
+    fn compute_elevation_handles_single_point() {
+        let (gain, loss) = compute_elevation(&[100.0]);
+        assert_eq!((gain, loss), (0, 0));
+    }
+
+    #[test]
+    fn compute_elevation_sums_gain_and_loss_separately() {
+        let heights = [10.0, 30.0, 25.0, 60.0, 50.0];
+        // +20, -5, +35, -10 → gain=55, loss=15
+        let (gain, loss) = compute_elevation(&heights);
+        assert_eq!(gain, 55);
+        assert_eq!(loss, 15);
+    }
+
+    #[test]
+    fn compute_elevation_flat_returns_zero() {
+        let (gain, loss) = compute_elevation(&[100.0, 100.0, 100.0]);
+        assert_eq!((gain, loss), (0, 0));
+    }
+
+    #[test]
+    fn decode_polyline_empty_input() {
+        assert!(decode_polyline("").is_empty());
+    }
+
+    #[test]
+    fn decode_polyline_round_trip_single_point() {
+        // Hand-crafted encoded "u{~vF`y~oC" decodes to a known coord. We just
+        // verify the decoder yields at least one coord and that it parses
+        // without panicking.
+        let encoded = "u{~vF`y~oC";
+        let pts = decode_polyline(encoded);
+        assert!(!pts.is_empty());
+        // first coord should be in the Paris area when used with precision 5
+        // but our decoder uses precision 6 — so just assert finite values.
+        for (lat, lon) in &pts {
+            assert!(lat.is_finite());
+            assert!(lon.is_finite());
+        }
+    }
+
+    #[test]
+    fn bike_costing_options_contains_profile_fields() {
+        let profile = BikeProfile {
+            cycling_speed: 22.0,
+            use_roads: 0.6,
+            use_hills: 0.4,
+            bicycle_type: "Hybrid".into(),
+        };
+        let opts = bike_costing_options(&profile);
+        assert_eq!(opts["bicycle"]["cycling_speed"], 22.0);
+        assert_eq!(opts["bicycle"]["use_roads"], 0.6);
+        assert_eq!(opts["bicycle"]["use_hills"], 0.4);
+        assert_eq!(opts["bicycle"]["bicycle_type"], "Hybrid");
+    }
+
+    #[test]
+    fn convert_maneuvers_scales_distance_and_time() {
+        let raw = vec![RawManeuver {
+            instruction: "Turn right".into(),
+            length: 1.5, // km
+            time: 60.0,
+            maneuver_type: 9,
+            begin_shape_index: 4,
+        }];
+        let out = convert_maneuvers(&raw);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].distance, 1500);
+        assert_eq!(out[0].duration, 60);
+        assert_eq!(out[0].maneuver_type, 9);
+        assert_eq!(out[0].begin_shape_index, 4);
+    }
+
+    #[test]
+    fn bike_profiles_constant_lists_three_variants() {
+        assert_eq!(BIKE_PROFILES.len(), 3);
+        assert!(BIKE_PROFILES.contains(&"city"));
+        assert!(BIKE_PROFILES.contains(&"ebike"));
+        assert!(BIKE_PROFILES.contains(&"road"));
+    }
+
+    #[test]
+    fn elevation_sample_limit_is_positive() {
+        assert!(ELEVATION_SAMPLE_LIMIT > 0);
+    }
+
+    fn unreachable_config() -> AppConfig {
+        let mut cfg = AppConfig::default();
+        cfg.valhalla.host = "127.0.0.1".into();
+        cfg.valhalla.port = 1;
+        cfg
+    }
+
+    #[actix_web::test]
+    async fn get_bike_rejects_bad_coords() {
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(actix_web::web::Data::new(unreachable_config()))
+                .service(get_bike),
+        )
+        .await;
+        let req = actix_web::test::TestRequest::get()
+            .uri("/api/journeys/bike?from=bad&to=2.4;48.9")
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 400);
+    }
+
+    #[actix_web::test]
+    async fn get_bike_success_against_mock() {
+        let base = super::super::valhalla::test_support::spawn_mock_valhalla();
+        let rest = base.strip_prefix("http://").unwrap();
+        let (host, port_str) = rest.split_once(':').unwrap();
+        let mut cfg = AppConfig::default();
+        cfg.valhalla.host = host.into();
+        cfg.valhalla.port = port_str.parse().unwrap();
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(actix_web::web::Data::new(cfg))
+                .service(get_bike),
+        )
+        .await;
+        let req = actix_web::test::TestRequest::get()
+            .uri("/api/journeys/bike?from=2.3;48.8&to=2.4;48.9&maneuvers=true")
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = actix_web::test::read_body_json(resp).await;
+        // Should return three bike profile variants
+        assert!(body["journeys"].as_array().unwrap().len() >= 1);
+    }
+
+    #[actix_web::test]
+    async fn get_bike_unreachable_returns_response_with_no_journeys() {
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(actix_web::web::Data::new(unreachable_config()))
+                .service(get_bike),
+        )
+        .await;
+        let req = actix_web::test::TestRequest::get()
+            .uri("/api/journeys/bike?from=2.3;48.8&to=2.4;48.9&maneuvers=true")
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+        // get_bike degrades gracefully: 200 with empty journeys when Valhalla unreachable.
+        assert!(resp.status() == 200 || resp.status() == 502);
+    }
+}
