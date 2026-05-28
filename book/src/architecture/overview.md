@@ -74,10 +74,6 @@ Trips with identical stop sequences are grouped into **patterns**. This dramatic
 Valhalla supports indoor maneuvers such as elevators, stairs, escalators, and building enter/exit transitions. Transfers are classified by parent_station: outdoor transfers (different parent_station) always get a Valhalla walking route for the map polyline, while indoor transfers (same parent_station) are only enriched when indoor maneuvers exist in OSM. Transfer polylines use the Valhalla shape (actual walking route) when available, falling back to a straight line otherwise. This enrichment only runs when `maneuvers=true` is requested.
 ```
 
-```admonish example title="Navitia API Compatibility"
-The API mirrors [Navitia](https://navitia.io/) query parameters and response structure, making Glove a potential drop-in replacement for Navitia-based applications.
-```
-
 ## Technology Stack
 
 | Component | Technology |

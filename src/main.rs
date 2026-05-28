@@ -109,7 +109,7 @@ fn load_or_build_ban(config: &config::AppConfig) -> Arc<ban::BanData> {
 #[openapi(
     info(
         title = "Glove API",
-        description = "GTFS journey planner — Navitia-compatible REST API powered by the RAPTOR algorithm",
+        description = "GTFS journey planner — REST API powered by the RAPTOR algorithm",
         version = "0.1.0",
     ),
     paths(

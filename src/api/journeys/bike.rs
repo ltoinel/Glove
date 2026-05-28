@@ -18,7 +18,7 @@ use crate::util::parse_from_to;
 
 /// Query parameters for `GET /api/journeys/bike`.
 ///
-/// Coordinates are passed as `lon;lat` strings (same convention as Navitia).
+/// Coordinates are passed as `lon;lat` strings.
 #[derive(Debug, Deserialize, IntoParams)]
 pub struct BikeQuery {
     /// Origin as `lon;lat`.

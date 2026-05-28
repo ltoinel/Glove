@@ -110,7 +110,7 @@ Glove loads the following GTFS files:
   <!-- Reconstruct -->
   <rect x="110" y="385" width="260" height="50" rx="8" fill="url(#g2)" stroke="#00e676" stroke-opacity="0.4" stroke-width="1"/>
   <text x="240" y="407" text-anchor="middle" fill="#00e676" font-size="11" font-weight="600">Reconstruct journeys</text>
-  <text x="240" y="425" text-anchor="middle" fill="#56546a" font-size="9">Tag · Format Navitia response</text>
+  <text x="240" y="425" text-anchor="middle" fill="#56546a" font-size="9">Tag · Format response</text>
   <line x1="240" y1="435" x2="240" y2="460" stroke="#8b89a0" stroke-width="1.5" marker-end="url(#a2)"/>
   <!-- Response -->
   <rect x="155" y="465" width="170" height="36" rx="18" fill="rgba(0,230,118,0.08)" stroke="#00e676" stroke-opacity="0.3" stroke-width="1"/>
@@ -142,7 +142,7 @@ Glove loads the following GTFS files:
   <!-- Process -->
   <rect x="90" y="215" width="300" height="60" rx="8" fill="url(#c5)" stroke="#00e5ff" stroke-opacity="0.3" stroke-width="1"/>
   <text x="240" y="237" text-anchor="middle" fill="#e4e2ec" font-size="11" font-weight="600">Decode polyline · Extract maneuvers</text>
-  <text x="240" y="255" text-anchor="middle" fill="#56546a" font-size="9">Elevation colors (bike) · Format Navitia response</text>
+  <text x="240" y="255" text-anchor="middle" fill="#56546a" font-size="9">Elevation colors (bike) · Format response</text>
   <line x1="240" y1="275" x2="240" y2="305" stroke="#8b89a0" stroke-width="1.5" marker-end="url(#a5)"/>
   <!-- Response -->
   <rect x="155" y="310" width="170" height="36" rx="18" fill="rgba(0,230,118,0.08)" stroke="#00e676" stroke-opacity="0.3" stroke-width="1"/>

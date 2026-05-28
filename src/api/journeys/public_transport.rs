@@ -1,4 +1,4 @@
-//! Journey planning endpoint (Navitia-compatible).
+//! Journey planning endpoint.
 //!
 //! Runs RAPTOR iteratively with pattern exclusion to produce diverse
 //! route alternatives, sorted by duration and tagged with quality labels.
@@ -23,8 +23,7 @@ use crate::api::{Place, Section, StopDateTime, make_place, make_stop_point};
 
 /// Query parameters for `GET /api/journeys`.
 ///
-/// Mirrors the Navitia `/journeys` API parameters. Most fields are optional
-/// and fall back to values from [`AppConfig`].
+/// Most fields are optional and fall back to values from [`AppConfig`].
 #[derive(Debug, Deserialize, IntoParams)]
 #[allow(dead_code)]
 pub struct JourneysQuery {

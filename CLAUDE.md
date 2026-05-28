@@ -50,7 +50,7 @@ Core of the application. Round-based public transit routing with:
 3. Actix-web serves API + static frontend files
 
 ### API Endpoints
-- `GET /api/journeys/public_transport` — RAPTOR journey planning (Navitia-compatible query params)
+- `GET /api/journeys/public_transport` — RAPTOR journey planning
 - `GET /api/journeys/walk` — Walking directions via Valhalla
 - `GET /api/journeys/bike` — Cycling directions via Valhalla (city, ebike, road profiles)
 - `GET /api/journeys/car` — Driving directions via Valhalla
@@ -70,7 +70,6 @@ Single-page app: vertical nav rail (56px) + sidebar (450px) + Leaflet map. Dark 
 - **Lock-free hot-reload**: `ArcSwap` swaps entire RAPTOR index atomically
 - **Pattern grouping**: trips with identical stop sequences share a pattern (memory + speed)
 - **Iterative diverse search**: runs RAPTOR multiple times with pattern exclusion for varied alternatives
-- **Navitia API compatibility**: mirrors Navitia query parameters for drop-in replacement
 - **Tile caching proxy**: map tiles fetched from upstream once, cached to `data/tiles/` on disk
 - **Indoor-aware transfers**: Valhalla pedestrian routing with zero step/elevator penalties for intra-station walks
 - **After-midnight routing**: queries before 4h use previous day's GTFS services with +86400s offset

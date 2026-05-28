@@ -40,7 +40,7 @@ datetime=20240315T083000"
 
 ### Response
 
-The response follows the Navitia journey format:
+The response follows this journey format:
 
 ```json
 {

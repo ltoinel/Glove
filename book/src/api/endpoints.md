@@ -18,15 +18,13 @@ Glove exposes a REST API on the configured port (default: 8080). All endpoints r
 | `GET` | `/api/tiles/{z}/{x}/{y}.png` | Map tile proxy with local disk cache |
 | `GET` | `/api-docs/openapi.json` | OpenAPI specification |
 
-## Navitia Compatibility
+## Query Parameters
 
-The journey planning endpoints use query parameters compatible with the [Navitia](https://navitia.io/) API:
+The journey planning endpoints share a common set of query parameters:
 
 - `from` — Origin coordinates (`lon;lat`)
 - `to` — Destination coordinates (`lon;lat`)
 - `datetime` — Departure time (ISO 8601)
-
-This allows Glove to serve as a drop-in replacement for Navitia in existing applications.
 
 All journey endpoints accept an optional `maneuvers=true` query parameter. When enabled, responses include a `maneuver_type` field (Valhalla type number) in maneuver objects, enabling clients to display turn-by-turn navigation with indoor maneuver support. Maneuvers are disabled by default to reduce response size and skip transfer Valhalla enrichment.
 

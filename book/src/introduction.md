@@ -8,7 +8,7 @@ A fast **multi-modal journey planner** built in Rust with a React frontend.
 
 ![Glove screenshot](./images/screenshot.jpg)
 
-Glove loads [GTFS](https://gtfs.org/) data into memory, builds a [RAPTOR](https://www.microsoft.com/en-us/research/wp-content/uploads/2012/01/raptor_alenex.pdf) index, and exposes a **Navitia-compatible REST API** for journey planning. It supports public transit, walking, cycling, and driving via [Valhalla](https://github.com/valhalla/valhalla) integration.
+Glove loads [GTFS](https://gtfs.org/) data into memory, builds a [RAPTOR](https://www.microsoft.com/en-us/research/wp-content/uploads/2012/01/raptor_alenex.pdf) index, and exposes a **REST API** for journey planning. It supports public transit, walking, cycling, and driving via [Valhalla](https://github.com/valhalla/valhalla) integration.
 
 The React portal provides an interactive map-based interface with autocomplete, route visualization, and multilingual support (FR/EN).
 
@@ -46,7 +46,7 @@ Then open [http://localhost:8080](http://localhost:8080)
 - **Metrics panel** with live CPU, memory, and request stats
 
 ### Developer Experience
-- **Navitia-compatible API** for drop-in replacement
+- **REST API** documented with OpenAPI
 - **OpenAPI documentation** auto-generated
 - **Prometheus metrics** endpoint
 - **Benchmark tool** for load testing
