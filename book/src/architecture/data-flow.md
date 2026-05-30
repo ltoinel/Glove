@@ -2,51 +2,51 @@
 
 ## Startup Sequence
 
-<svg viewBox="0 0 560 520" xmlns="http://www.w3.org/2000/svg" style="max-width:560px;width:100%;font-family:'DM Sans',sans-serif;">
+<svg viewBox="0 0 560 470" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Glove startup sequence" style="max-width:560px;width:100%;font-family:'Inter',-apple-system,BlinkMacSystemFont,sans-serif;">
   <defs>
-    <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#8b89a0"/></marker>
-    <linearGradient id="cg" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#00e5ff" stop-opacity="0.12"/><stop offset="100%" stop-color="#00e5ff" stop-opacity="0.04"/></linearGradient>
-    <linearGradient id="ag" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#ffb800" stop-opacity="0.15"/><stop offset="100%" stop-color="#ffb800" stop-opacity="0.05"/></linearGradient>
-    <linearGradient id="gg" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#00e676" stop-opacity="0.12"/><stop offset="100%" stop-color="#00e676" stop-opacity="0.04"/></linearGradient>
+    <marker id="a1" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#62607a"/></marker>
+    <linearGradient id="cg" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#22d3ee" stop-opacity="0.16"/><stop offset="100%" stop-color="#818cf8" stop-opacity="0.06"/></linearGradient>
+    <linearGradient id="ag" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#fbbf24" stop-opacity="0.18"/><stop offset="100%" stop-color="#fbbf24" stop-opacity="0.05"/></linearGradient>
+    <linearGradient id="gg" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#34d399" stop-opacity="0.18"/><stop offset="100%" stop-color="#34d399" stop-opacity="0.05"/></linearGradient>
   </defs>
   <!-- config.yaml -->
-  <rect x="200" y="10" width="160" height="40" rx="8" fill="rgba(255,255,255,0.04)" stroke="rgba(255,255,255,0.12)" stroke-width="1"/>
-  <text x="280" y="35" text-anchor="middle" fill="#e4e2ec" font-size="12" font-weight="600">config.yaml</text>
-  <line x1="280" y1="50" x2="280" y2="75" stroke="#8b89a0" stroke-width="1.5" marker-end="url(#a1)"/>
+  <rect x="200" y="10" width="160" height="40" rx="9" fill="rgba(255,255,255,0.04)" stroke="rgba(255,255,255,0.14)"/>
+  <text x="280" y="35" text-anchor="middle" fill="#e7e7f0" font-size="12" font-weight="600">config.yaml</text>
+  <line x1="280" y1="50" x2="280" y2="76" stroke="#62607a" stroke-width="1.5" marker-end="url(#a1)"/>
   <!-- Load Config -->
-  <rect x="180" y="80" width="200" height="44" rx="8" fill="url(#cg)" stroke="#00e5ff" stroke-opacity="0.4" stroke-width="1"/>
-  <text x="280" y="107" text-anchor="middle" fill="#00e5ff" font-size="12" font-weight="600">Load Config → Check Cache</text>
-  <line x1="280" y1="124" x2="280" y2="150" stroke="#8b89a0" stroke-width="1.5" marker-end="url(#a1)"/>
+  <rect x="178" y="80" width="204" height="44" rx="9" fill="url(#cg)" stroke="#22d3ee" stroke-opacity="0.45"/>
+  <text x="280" y="107" text-anchor="middle" fill="#67e8f9" font-size="12" font-weight="700">Load config → check cache</text>
+  <line x1="280" y1="124" x2="280" y2="150" stroke="#62607a" stroke-width="1.5" marker-end="url(#a1)"/>
   <!-- Diamond: Cache valid? -->
-  <polygon points="280,155 340,185 280,215 220,185" fill="url(#ag)" stroke="#ffb800" stroke-opacity="0.5" stroke-width="1.5"/>
-  <text x="280" y="189" text-anchor="middle" fill="#ffb800" font-size="10" font-weight="600">Cache valid?</text>
+  <polygon points="280,153 344,186 280,219 216,186" fill="url(#ag)" stroke="#fbbf24" stroke-opacity="0.6"/>
+  <text x="280" y="190" text-anchor="middle" fill="#fbbf24" font-size="10" font-weight="700">cache valid?</text>
   <!-- Yes branch (left) -->
-  <line x1="220" y1="185" x2="120" y2="185" stroke="#8b89a0" stroke-width="1" marker-end="url(#a1)"/>
-  <text x="170" y="178" text-anchor="middle" fill="#00e676" font-size="9" font-weight="600">YES</text>
-  <rect x="20" y="165" width="100" height="44" rx="8" fill="url(#gg)" stroke="#00e676" stroke-opacity="0.4" stroke-width="1"/>
-  <text x="70" y="184" text-anchor="middle" fill="#00e676" font-size="10" font-weight="600">Load cache</text>
-  <text x="70" y="199" text-anchor="middle" fill="#56546a" font-size="9">sub-second</text>
+  <line x1="216" y1="186" x2="124" y2="186" stroke="#62607a" stroke-width="1" marker-end="url(#a1)"/>
+  <text x="170" y="178" text-anchor="middle" fill="#34d399" font-size="9" font-weight="700">YES</text>
+  <rect x="18" y="164" width="106" height="44" rx="9" fill="url(#gg)" stroke="#34d399" stroke-opacity="0.45"/>
+  <text x="71" y="183" text-anchor="middle" fill="#34d399" font-size="10.5" font-weight="700">Load cache</text>
+  <text x="71" y="198" text-anchor="middle" fill="#62607a" font-size="9">sub-second</text>
   <!-- No branch (right) -->
-  <line x1="340" y1="185" x2="440" y2="185" stroke="#8b89a0" stroke-width="1" marker-end="url(#a1)"/>
-  <text x="390" y="178" text-anchor="middle" fill="#ff5252" font-size="9" font-weight="600">NO</text>
-  <rect x="440" y="160" width="110" height="55" rx="8" fill="url(#ag)" stroke="#ffb800" stroke-opacity="0.4" stroke-width="1"/>
-  <text x="495" y="182" text-anchor="middle" fill="#ffb800" font-size="10" font-weight="600">Parse GTFS</text>
-  <text x="495" y="196" text-anchor="middle" fill="#8b89a0" font-size="9">Build RAPTOR</text>
-  <text x="495" y="209" text-anchor="middle" fill="#56546a" font-size="8">10-30 seconds</text>
+  <line x1="344" y1="186" x2="436" y2="186" stroke="#62607a" stroke-width="1" marker-end="url(#a1)"/>
+  <text x="390" y="178" text-anchor="middle" fill="#ff5252" font-size="9" font-weight="700">NO</text>
+  <rect x="436" y="160" width="116" height="56" rx="9" fill="url(#ag)" stroke="#fbbf24" stroke-opacity="0.45"/>
+  <text x="494" y="182" text-anchor="middle" fill="#fbbf24" font-size="10.5" font-weight="700">Parse GTFS</text>
+  <text x="494" y="197" text-anchor="middle" fill="#9b9ab2" font-size="9">build RAPTOR + cache</text>
+  <text x="494" y="210" text-anchor="middle" fill="#62607a" font-size="8">10-30 seconds</text>
   <!-- Merge -->
-  <line x1="70" y1="209" x2="70" y2="280" stroke="#8b89a0" stroke-width="1"/>
-  <line x1="495" y1="215" x2="495" y2="280" stroke="#8b89a0" stroke-width="1"/>
-  <line x1="70" y1="280" x2="495" y2="280" stroke="#8b89a0" stroke-width="1"/>
-  <line x1="280" y1="280" x2="280" y2="310" stroke="#8b89a0" stroke-width="1.5" marker-end="url(#a1)"/>
+  <line x1="71" y1="208" x2="71" y2="282" stroke="#62607a" stroke-width="1"/>
+  <line x1="494" y1="216" x2="494" y2="282" stroke="#62607a" stroke-width="1"/>
+  <line x1="71" y1="282" x2="494" y2="282" stroke="#62607a" stroke-width="1"/>
+  <line x1="280" y1="282" x2="280" y2="308" stroke="#62607a" stroke-width="1.5" marker-end="url(#a1)"/>
   <!-- BAN -->
-  <rect x="180" y="315" width="200" height="44" rx="8" fill="url(#cg)" stroke="#00e5ff" stroke-opacity="0.3" stroke-width="1"/>
-  <text x="280" y="335" text-anchor="middle" fill="#e4e2ec" font-size="12" font-weight="600">Load BAN data</text>
-  <text x="280" y="351" text-anchor="middle" fill="#56546a" font-size="10">addresses</text>
-  <line x1="280" y1="359" x2="280" y2="395" stroke="#8b89a0" stroke-width="1.5" marker-end="url(#a1)"/>
+  <rect x="178" y="312" width="204" height="44" rx="9" fill="url(#cg)" stroke="#818cf8" stroke-opacity="0.4"/>
+  <text x="280" y="332" text-anchor="middle" fill="#a5b4fc" font-size="12" font-weight="700">Load BAN data</text>
+  <text x="280" y="348" text-anchor="middle" fill="#62607a" font-size="10">address geocoding index</text>
+  <line x1="280" y1="356" x2="280" y2="382" stroke="#62607a" stroke-width="1.5" marker-end="url(#a1)"/>
   <!-- Actix -->
-  <rect x="150" y="400" width="260" height="50" rx="10" fill="url(#gg)" stroke="#00e676" stroke-opacity="0.4" stroke-width="1.5"/>
-  <text x="280" y="422" text-anchor="middle" fill="#00e676" font-size="13" font-weight="700">Start Actix-web</text>
-  <text x="280" y="440" text-anchor="middle" fill="#8b89a0" font-size="10">Serve REST API (port 8080)</text>
+  <rect x="148" y="386" width="264" height="52" rx="11" fill="url(#gg)" stroke="#34d399" stroke-opacity="0.5"/>
+  <text x="280" y="409" text-anchor="middle" fill="#34d399" font-size="13" font-weight="800">Start Actix-web</text>
+  <text x="280" y="427" text-anchor="middle" fill="#9b9ab2" font-size="10">serve REST API · :8080 (ArcSwap)</text>
 </svg>
 
 ## GTFS Data Model
@@ -161,7 +161,7 @@ The hot reload mechanism allows updating GTFS data without downtime:
 
 ## Transfer Enrichment
 
-When `maneuvers=true` is requested, transfer sections in public transport journeys are enriched with Valhalla walking routes. The enrichment logic depends on the transfer type:
+When `routing.maneuvers` is enabled in `config.yaml`, transfer sections in public transport journeys are enriched with Valhalla walking routes. The enrichment logic depends on the transfer type:
 
 - **Outdoor transfers** (stops with different `parent_station`): Valhalla is always called to obtain the actual walking route shape, which is displayed on the map as a polyline.
 - **Indoor transfers** (stops sharing the same `parent_station`): Valhalla is only called when indoor maneuvers (elevator, stairs, escalator) exist in OSM data for that station.

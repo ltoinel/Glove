@@ -27,7 +27,7 @@ The journey planning endpoints share a common set of query parameters:
 - `to` — Destination coordinates (`lon;lat`)
 - `datetime` — Departure time (ISO 8601)
 
-All journey endpoints accept an optional `maneuvers=true` query parameter. When enabled, responses include a `maneuver_type` field (Valhalla type number) in maneuver objects, enabling clients to display turn-by-turn navigation with indoor maneuver support. Maneuvers are disabled by default to reduce response size and skip transfer Valhalla enrichment.
+Turn-by-turn maneuvers are **server-controlled** via `routing.maneuvers` in `config.yaml` (disabled by default), not a request parameter. When enabled, responses include a `maneuver_type` field (Valhalla type number) in maneuver objects, enabling clients to display turn-by-turn navigation with indoor maneuver support. Disabling them reduces response size and skips transfer Valhalla enrichment.
 
 ## Authentication
 

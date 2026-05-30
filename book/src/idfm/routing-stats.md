@@ -8,17 +8,16 @@ After loading and pre-processing the GTFS data, Glove builds a RAPTOR index with
 
 | Metric | Value |
 |--------|------:|
-| Stops indexed | 54,011 |
-| Trips loaded | 495,345 |
-| Stop times | 10,933,796 |
-| Patterns (grouped trips) | ~15,000 |
-| Transfer pairs | 206,822 |
+| Stops indexed | 53,705 |
+| Trips loaded | 390,650 |
+| Stop times | 8,367,732 |
+| Patterns (grouped trips) | ~10,000 |
+| Transfer pairs | 201,582 |
 | Index build time | 10-30 seconds |
-| Index cache size | ~200 MB |
-| RAM usage (loaded) | ~500 MB |
+| RAM usage (resident) | ~265 MB |
 
 ```admonish info title="Pattern Grouping"
-Trips with identical stop sequences are grouped into **patterns**. For the IDFM dataset, ~495,000 trips are reduced to ~15,000 patterns — a **33x** reduction that directly speeds up the RAPTOR scan phase.
+Trips with identical stop sequences are grouped into **patterns**. For the IDFM dataset, ~391,000 trips are reduced to ~10,000 patterns — a **~39x** reduction that directly speeds up the RAPTOR scan phase.
 ```
 
 ## Query Performance

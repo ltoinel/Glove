@@ -46,8 +46,9 @@ The settings panel is organized into three titled sections, each with an icon:
 - **Walking Speed** (DirectionsWalk icon) — adjusts walking speed for transit journey calculations
 - **Transport Modes** (Commute icon) — select which transit modes to include
 - **Advanced Options** (Tune icon) — includes:
-  - **Show detailed instructions** switch — enables turn-by-turn maneuvers (`maneuvers=true`) in journey responses. Disabled by default
   - **Wheelchair accessible** switch — enables wheelchair-accessible routing. When active, walking speed is locked to 3.5 km/h, bike and car modes are hidden, and the `most_accessible` journey tag is displayed
+
+Turn-by-turn maneuvers are **server-controlled** (`routing.maneuvers` in `config.yaml`), so there is no client toggle for them.
 
 ### Search & Autocomplete
 The search form provides:

@@ -33,7 +33,7 @@ RUST_LOG=debug cargo run --release
 
 ```
 INFO  glove::main > Starting Glove on 0.0.0.0:8080
-INFO  glove::gtfs > Loaded 48000 stops, 320000 trips
+INFO  glove::gtfs > Loaded 53705 stops, 390650 trips
 INFO  glove::raptor > Built RAPTOR index in 12.3s
 DEBUG glove::api::journeys > RAPTOR query: 2.3522;48.8566 → 2.2945;48.8584 in 342ms
 ```

@@ -4,56 +4,79 @@ Glove is a monorepo with a Rust backend and React frontend.
 
 ## High-Level Architecture
 
-<svg viewBox="0 0 720 480" xmlns="http://www.w3.org/2000/svg" style="max-width:720px;width:100%;font-family:'DM Sans',sans-serif;">
+<svg viewBox="0 0 720 510" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Glove high-level architecture" style="max-width:720px;width:100%;font-family:'Inter',-apple-system,BlinkMacSystemFont,sans-serif;">
   <defs>
-    <filter id="glow"><feGaussianBlur stdDeviation="2" result="g"/><feMerge><feMergeNode in="g"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
-    <linearGradient id="cyan-grad" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#00e5ff" stop-opacity="0.15"/><stop offset="100%" stop-color="#00e5ff" stop-opacity="0.05"/></linearGradient>
-    <linearGradient id="amber-grad" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#ffb800" stop-opacity="0.15"/><stop offset="100%" stop-color="#ffb800" stop-opacity="0.05"/></linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#22d3ee" stop-opacity="0.20"/><stop offset="100%" stop-color="#818cf8" stop-opacity="0.12"/></linearGradient>
+    <linearGradient id="chip" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#22d3ee" stop-opacity="0.12"/><stop offset="100%" stop-color="#22d3ee" stop-opacity="0.05"/></linearGradient>
+    <linearGradient id="amber" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#fbbf24" stop-opacity="0.20"/><stop offset="100%" stop-color="#fbbf24" stop-opacity="0.05"/></linearGradient>
+    <linearGradient id="violet" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#818cf8" stop-opacity="0.18"/><stop offset="100%" stop-color="#818cf8" stop-opacity="0.05"/></linearGradient>
+    <linearGradient id="green" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#34d399" stop-opacity="0.18"/><stop offset="100%" stop-color="#34d399" stop-opacity="0.05"/></linearGradient>
+    <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#62607a"/></marker>
   </defs>
-  <!-- Frontend -->
-  <rect x="160" y="10" width="400" height="60" rx="10" fill="url(#cyan-grad)" stroke="#00e5ff" stroke-width="1.5"/>
-  <text x="360" y="35" text-anchor="middle" fill="#00e5ff" font-size="14" font-weight="700">Frontend (React)</text>
-  <text x="360" y="55" text-anchor="middle" fill="#8b89a0" font-size="11">Leaflet Map · MUI Sidebar · i18n</text>
-  <!-- Arrow -->
-  <line x1="360" y1="70" x2="360" y2="100" stroke="#8b89a0" stroke-width="1.5" marker-end="url(#arrow)"/>
-  <text x="380" y="90" fill="#56546a" font-size="9">HTTP / JSON</text>
-  <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#8b89a0"/></marker></defs>
-  <!-- Server box -->
-  <rect x="40" y="100" width="640" height="360" rx="12" fill="rgba(20,20,35,0.5)" stroke="rgba(255,255,255,0.09)" stroke-width="1.5"/>
-  <text x="360" y="125" text-anchor="middle" fill="#e4e2ec" font-size="13" font-weight="700">Actix-web Server</text>
-  <text x="360" y="142" text-anchor="middle" fill="#56546a" font-size="10">CORS · Rate Limiting · Metrics Middleware</text>
-  <!-- API endpoints row -->
-  <rect x="55" y="160" width="120" height="50" rx="8" fill="url(#cyan-grad)" stroke="#00e5ff" stroke-opacity="0.4" stroke-width="1"/>
-  <text x="115" y="182" text-anchor="middle" fill="#00e5ff" font-size="11" font-weight="600">/journeys</text>
-  <text x="115" y="198" text-anchor="middle" fill="#56546a" font-size="9">/walk /bike /car</text>
-  <rect x="185" y="160" width="100" height="50" rx="8" fill="url(#cyan-grad)" stroke="#00e5ff" stroke-opacity="0.4" stroke-width="1"/>
-  <text x="235" y="190" text-anchor="middle" fill="#00e5ff" font-size="11" font-weight="600">/places</text>
-  <rect x="295" y="160" width="100" height="50" rx="8" fill="url(#cyan-grad)" stroke="#00e5ff" stroke-opacity="0.4" stroke-width="1"/>
-  <text x="345" y="182" text-anchor="middle" fill="#00e5ff" font-size="11" font-weight="600">/status</text>
-  <text x="345" y="198" text-anchor="middle" fill="#56546a" font-size="9">/gtfs/*</text>
-  <rect x="405" y="160" width="100" height="50" rx="8" fill="url(#cyan-grad)" stroke="#00e5ff" stroke-opacity="0.4" stroke-width="1"/>
-  <text x="455" y="190" text-anchor="middle" fill="#00e5ff" font-size="11" font-weight="600">/metrics</text>
-  <rect x="515" y="160" width="110" height="50" rx="8" fill="url(#cyan-grad)" stroke="#00e5ff" stroke-opacity="0.4" stroke-width="1"/>
-  <text x="570" y="182" text-anchor="middle" fill="#00e5ff" font-size="11" font-weight="600">/tiles</text>
-  <text x="570" y="198" text-anchor="middle" fill="#56546a" font-size="9">cache proxy</text>
-  <!-- RAPTOR Index -->
-  <rect x="80" y="250" width="200" height="70" rx="10" fill="url(#amber-grad)" stroke="#ffb800" stroke-opacity="0.5" stroke-width="1.5"/>
-  <text x="180" y="280" text-anchor="middle" fill="#ffb800" font-size="13" font-weight="700">RAPTOR Index</text>
-  <text x="180" y="300" text-anchor="middle" fill="#8b89a0" font-size="10">ArcSwap · Lock-free</text>
-  <!-- BAN Index -->
-  <rect x="320" y="250" width="160" height="70" rx="10" fill="url(#cyan-grad)" stroke="#00e5ff" stroke-opacity="0.3" stroke-width="1"/>
-  <text x="400" y="280" text-anchor="middle" fill="#e4e2ec" font-size="12" font-weight="600">BAN Index</text>
-  <text x="400" y="298" text-anchor="middle" fill="#8b89a0" font-size="10">Addresses</text>
-  <!-- Arrow RAPTOR to GTFS -->
-  <line x1="180" y1="320" x2="180" y2="355" stroke="#8b89a0" stroke-width="1" marker-end="url(#arrow)"/>
-  <!-- GTFS Data -->
-  <rect x="80" y="360" width="200" height="60" rx="10" fill="rgba(255,255,255,0.03)" stroke="rgba(255,255,255,0.09)" stroke-width="1"/>
-  <text x="180" y="386" text-anchor="middle" fill="#e4e2ec" font-size="12" font-weight="600">GTFS Data</text>
-  <text x="180" y="404" text-anchor="middle" fill="#56546a" font-size="10">CSV files</text>
-  <!-- Valhalla -->
-  <rect x="440" y="360" width="200" height="60" rx="10" fill="rgba(0,230,118,0.08)" stroke="#00e676" stroke-opacity="0.4" stroke-width="1.5"/>
-  <text x="540" y="386" text-anchor="middle" fill="#00e676" font-size="12" font-weight="600">Valhalla</text>
-  <text x="540" y="404" text-anchor="middle" fill="#56546a" font-size="10">Docker · Walk / Bike / Car</text>
+
+  <!-- ===== Clients (two separate processes) ===== -->
+  <rect x="60" y="14" width="280" height="54" rx="12" fill="url(#accent)" stroke="#22d3ee" stroke-opacity="0.55"/>
+  <text x="200" y="38" text-anchor="middle" fill="#67e8f9" font-size="13" font-weight="700">Portal · React + MUI + Leaflet</text>
+  <text x="200" y="56" text-anchor="middle" fill="#9b9ab2" font-size="10.5">Vite dev / nginx · proxies /api → :8080</text>
+  <rect x="380" y="14" width="280" height="54" rx="12" fill="url(#violet)" stroke="#818cf8" stroke-opacity="0.55"/>
+  <text x="520" y="38" text-anchor="middle" fill="#a5b4fc" font-size="13" font-weight="700">REST / OpenAPI clients</text>
+  <text x="520" y="56" text-anchor="middle" fill="#9b9ab2" font-size="10.5">/api-docs/openapi.json</text>
+  <line x1="200" y1="68" x2="200" y2="98" stroke="#62607a" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="520" y1="68" x2="520" y2="98" stroke="#62607a" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="360" y="88" text-anchor="middle" fill="#62607a" font-size="10">HTTP · JSON · /api/*</text>
+
+  <!-- ===== Actix-web server ===== -->
+  <rect x="36" y="100" width="648" height="312" rx="14" fill="rgba(20,20,35,0.55)" stroke="rgba(255,255,255,0.12)"/>
+  <text x="360" y="128" text-anchor="middle" fill="#e7e7f0" font-size="14" font-weight="800">Actix-web Server · :8080</text>
+  <text x="360" y="146" text-anchor="middle" fill="#9b9ab2" font-size="10.5">CORS · rate limiting · metrics middleware</text>
+  <line x1="56" y1="158" x2="664" y2="158" stroke="rgba(255,255,255,0.10)" stroke-width="1"/>
+
+  <!-- endpoint chips: row 1 -->
+  <g font-size="11.5" font-weight="700">
+    <rect x="56"  y="170" width="188" height="40" rx="9" fill="url(#chip)" stroke="#22d3ee" stroke-opacity="0.4"/>
+    <text x="150" y="188" text-anchor="middle" fill="#67e8f9">/journeys/*</text>
+    <text x="150" y="202" text-anchor="middle" fill="#62607a" font-size="8.5" font-weight="400">public_transport · walk · bike · car</text>
+    <rect x="266" y="170" width="188" height="40" rx="9" fill="url(#chip)" stroke="#22d3ee" stroke-opacity="0.4"/>
+    <text x="360" y="188" text-anchor="middle" fill="#67e8f9">/places</text>
+    <text x="360" y="202" text-anchor="middle" fill="#62607a" font-size="8.5" font-weight="400">autocomplete · stops + BAN</text>
+    <rect x="476" y="170" width="188" height="40" rx="9" fill="url(#chip)" stroke="#22d3ee" stroke-opacity="0.4"/>
+    <text x="570" y="188" text-anchor="middle" fill="#67e8f9">/tiles</text>
+    <text x="570" y="202" text-anchor="middle" fill="#62607a" font-size="8.5" font-weight="400">cached map proxy</text>
+    <!-- row 2 -->
+    <rect x="56"  y="218" width="188" height="40" rx="9" fill="url(#chip)" stroke="#22d3ee" stroke-opacity="0.4"/>
+    <text x="150" y="236" text-anchor="middle" fill="#67e8f9">/status</text>
+    <text x="150" y="250" text-anchor="middle" fill="#62607a" font-size="8.5" font-weight="400">health · map defaults</text>
+    <rect x="266" y="218" width="188" height="40" rx="9" fill="url(#chip)" stroke="#22d3ee" stroke-opacity="0.4"/>
+    <text x="360" y="236" text-anchor="middle" fill="#67e8f9">/gtfs/*</text>
+    <text x="360" y="250" text-anchor="middle" fill="#62607a" font-size="8.5" font-weight="400">status · validate · reload</text>
+    <rect x="476" y="218" width="188" height="40" rx="9" fill="url(#chip)" stroke="#22d3ee" stroke-opacity="0.4"/>
+    <text x="570" y="236" text-anchor="middle" fill="#67e8f9">/metrics</text>
+    <text x="570" y="250" text-anchor="middle" fill="#62607a" font-size="8.5" font-weight="400">Prometheus</text>
+  </g>
+
+  <!-- in-memory index -->
+  <rect x="56" y="272" width="360" height="54" rx="11" fill="url(#amber)" stroke="#fbbf24" stroke-opacity="0.5"/>
+  <text x="236" y="296" text-anchor="middle" fill="#fbbf24" font-size="13" font-weight="700">RAPTOR Index</text>
+  <text x="236" y="314" text-anchor="middle" fill="#9b9ab2" font-size="9.5">ArcSwap · lock-free hot-reload · ~10k patterns</text>
+  <rect x="436" y="272" width="228" height="54" rx="11" fill="url(#violet)" stroke="#818cf8" stroke-opacity="0.45"/>
+  <text x="550" y="296" text-anchor="middle" fill="#a5b4fc" font-size="13" font-weight="700">BAN Index</text>
+  <text x="550" y="314" text-anchor="middle" fill="#9b9ab2" font-size="9.5">address geocoding</text>
+
+  <!-- sources inside the process -->
+  <line x1="236" y1="340" x2="236" y2="328" stroke="#62607a" stroke-width="1.2" marker-end="url(#arr)"/>
+  <rect x="56" y="340" width="360" height="54" rx="11" fill="rgba(255,255,255,0.035)" stroke="rgba(255,255,255,0.10)"/>
+  <text x="236" y="364" text-anchor="middle" fill="#e7e7f0" font-size="11.5" font-weight="600">GTFS data — CSV, in-memory (no DB)</text>
+  <text x="236" y="380" text-anchor="middle" fill="#62607a" font-size="9">stops · trips · stop_times · transfers · pathways</text>
+  <rect x="436" y="340" width="228" height="54" rx="11" fill="rgba(255,255,255,0.035)" stroke="rgba(255,255,255,0.10)"/>
+  <text x="550" y="364" text-anchor="middle" fill="#e7e7f0" font-size="11.5" font-weight="600">Tile cache</text>
+  <text x="550" y="380" text-anchor="middle" fill="#62607a" font-size="9">data/tiles/ on disk</text>
+
+  <!-- ===== Valhalla (separate container) ===== -->
+  <line x1="360" y1="412" x2="360" y2="438" stroke="#62607a" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="436" y="430" text-anchor="middle" fill="#62607a" font-size="9.5">routing + indoor transfers</text>
+  <rect x="190" y="440" width="340" height="56" rx="12" fill="url(#green)" stroke="#34d399" stroke-opacity="0.5"/>
+  <text x="360" y="465" text-anchor="middle" fill="#34d399" font-size="13" font-weight="700">Valhalla · Docker · :8002</text>
+  <text x="360" y="483" text-anchor="middle" fill="#9b9ab2" font-size="9.5">walk · bike · car · indoor transfer enrichment</text>
 </svg>
 
 ## Design Principles
@@ -71,7 +94,7 @@ Trips with identical stop sequences are grouped into **patterns**. This dramatic
 ```
 
 ```admonish example title="Indoor Routing"
-Valhalla supports indoor maneuvers such as elevators, stairs, escalators, and building enter/exit transitions. Transfers are classified by parent_station: outdoor transfers (different parent_station) always get a Valhalla walking route for the map polyline, while indoor transfers (same parent_station) are only enriched when indoor maneuvers exist in OSM. Transfer polylines use the Valhalla shape (actual walking route) when available, falling back to a straight line otherwise. This enrichment only runs when `maneuvers=true` is requested.
+Valhalla supports indoor maneuvers such as elevators, stairs, escalators, and building enter/exit transitions. Transfers are classified by parent_station: outdoor transfers (different parent_station) always get a Valhalla walking route for the map polyline, while indoor transfers (same parent_station) are only enriched when indoor maneuvers exist in OSM. Transfer polylines use the Valhalla shape (actual walking route) when available, falling back to a straight line otherwise. This enrichment only runs when `routing.maneuvers` is enabled in `config.yaml`.
 ```
 
 ## Technology Stack

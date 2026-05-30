@@ -15,21 +15,21 @@ All GTFS data is loaded into memory at startup. There is no database — the ent
 | File | Records | What it contains |
 |------|--------:|-----------------|
 | **agencies** | 61 | Transit operators (RATP, SNCF, local bus companies...) |
-| **routes** | 2,009 | Transit lines — each bus line, metro line, or RER line is a route |
-| **stops** | 54,011 | Physical locations where passengers board or alight |
-| **trips** | 495,345 | Individual vehicle runs — one bus doing its morning route is one trip |
-| **stop_times** | 10,933,796 | The schedule: what time each trip arrives/departs at each stop |
-| **transfers** | 206,822 | Walking connections between nearby stops (for changing lines) |
-| **calendars** | 1,169 | Service patterns: which days each schedule runs (weekdays, weekends...) |
-| **calendar_dates** | 2,937 | Exceptions to the calendar (holidays, strikes, special events...) |
+| **routes** | 2,011 | Transit lines — each bus line, metro line, or RER line is a route |
+| **stops** | 53,705 | Physical locations where passengers board or alight |
+| **trips** | 390,650 | Individual vehicle runs — one bus doing its morning route is one trip |
+| **stop_times** | 8,367,732 | The schedule: what time each trip arrives/departs at each stop |
+| **transfers** | 201,582 | Walking connections between nearby stops (for changing lines) |
+| **calendars** | 744 | Service patterns: which days each schedule runs (weekdays, weekends...) |
+| **calendar_dates** | 1,150 | Exceptions to the calendar (holidays, strikes, special events...) |
 
 ### Understanding the scale
 
 To put these numbers in perspective:
 
 - **10.9 million stop times** means the dataset contains nearly 11 million individual "a vehicle stops here at this time" records. This is the bulk of the data.
-- **495,345 trips** represent every individual vehicle departure across all lines, all day, all week. A single metro line might have hundreds of trips per day.
-- **206,822 transfers** define where passengers can walk between stops to change lines. For example, walking from a metro platform to a nearby bus stop.
+- **390,650 trips** represent every individual vehicle departure across all lines, all day, all week. A single metro line might have hundreds of trips per day.
+- **201,582 transfers** define where passengers can walk between stops to change lines. For example, walking from a metro platform to a nearby bus stop.
 
 ## Understanding GTFS Objects
 
@@ -47,9 +47,9 @@ A **route** is a transit line as passengers know it — "Metro line 4", "Bus 72"
 ### Stops
 
 A **stop** is a physical place where passengers board or leave a vehicle. GTFS has three levels:
-- **Stop points** (36,126) — the actual boarding location, like a specific platform or bus bay. "RER A, platform 1, Gare de Lyon" is a stop point.
-- **Stations** (15,369) — a group of stop points. "Gare de Lyon" is a station that contains stop points for RER A, RER D, metro 1, metro 14, and several bus lines.
-- **Entrances** (2,516) — physical entry/exit points to a station, like a specific stairway or elevator from street level.
+- **Stop points** (35,806) — the actual boarding location, like a specific platform or bus bay. "RER A, platform 1, Gare de Lyon" is a stop point.
+- **Stations** (15,381) — a group of stop points. "Gare de Lyon" is a station that contains stop points for RER A, RER D, metro 1, metro 14, and several bus lines.
+- **Entrances** (2,518) — physical entry/exit points to a station, like a specific stairway or elevator from street level.
 
 ### Trips
 
@@ -71,7 +71,7 @@ A **transfer** defines a walking connection between two stops, with a minimum tr
 
 | Mode | GTFS Type | Routes | Description |
 |------|----------:|-------:|-------------|
-| Bus | 3 | 1,950 | Urban and suburban bus lines |
+| Bus | 3 | 1,952 | Urban and suburban bus lines |
 | Rail | 2 | 24 | RER, Transilien, and TER regional trains |
 | Tramway | 0 | 17 | Tramway lines and automated shuttles |
 | Métro | 1 | 16 | Paris underground metro |
@@ -152,9 +152,9 @@ GTFS organizes stops in a three-level hierarchy:
 
 | Level | Count | What it represents |
 |-------|------:|-------------------|
-| **Stop points** | 36,126 | The exact spot where you board — a platform, a bus bay, a specific door |
-| **Stations** | 15,369 | A named place grouping multiple stop points — "Gare du Nord" contains platforms for metro 4, metro 5, RER B, RER D, RER E, Transilien H, and bus stops |
-| **Entrances** | 2,516 | Physical ways into a station — a stairway, an elevator, a specific street-level door |
+| **Stop points** | 35,806 | The exact spot where you board — a platform, a bus bay, a specific door |
+| **Stations** | 15,381 | A named place grouping multiple stop points — "Gare du Nord" contains platforms for metro 4, metro 5, RER B, RER D, RER E, Transilien H, and bus stops |
+| **Entrances** | 2,518 | Physical ways into a station — a stairway, an elevator, a specific street-level door |
 
 This hierarchy is important for routing: when you search for "Gare du Nord", Glove finds the station and then considers all its stop points to find the best boarding platform for your journey.
 

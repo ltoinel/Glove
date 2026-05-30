@@ -102,7 +102,7 @@ Each journey may have one or more tags:
 
 ### Maneuvers
 
-Maneuvers are **disabled by default**. To include them, pass `?maneuvers=true` on any endpoint. When enabled, street network sections and transfer sections include a `maneuvers` array with turn-by-turn directions. Each maneuver contains:
+Maneuvers are **server-controlled** via `routing.maneuvers` in `config.yaml` (disabled by default) — they are not a request parameter. When enabled, street network sections and transfer sections include a `maneuvers` array with turn-by-turn directions. Each maneuver contains:
 
 | Field | Description |
 |-------|-------------|
@@ -127,8 +127,9 @@ Uses Valhalla for pedestrian routing.
 |-----------|------|----------|-------------|
 | `from` | string | Yes | Origin (`lon;lat`) |
 | `to` | string | Yes | Destination (`lon;lat`) |
-| `maneuvers` | bool | No | Include turn-by-turn maneuvers (default: `false`) |
+| `walking_speed` | float | No | Walking speed in km/h (default ≈ 5) |
 | `wheelchair` | bool | No | Wheelchair-accessible routing: avoids stairs, limits slope to 6%, speed 3.5 km/h |
+| `language` | string | No | Language for maneuver instructions (e.g. `fr-FR`, `en-US`) |
 
 ## Cycling
 
@@ -136,14 +137,13 @@ Uses Valhalla for pedestrian routing.
 GET /api/journeys/bike
 ```
 
-Uses Valhalla with configurable bike profiles.
+Uses Valhalla. The response returns **three journeys** — one per bike profile (`city`, `ebike`, `road`) — computed server-side; there is no profile parameter.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `from` | string | Yes | Origin (`lon;lat`) |
 | `to` | string | Yes | Destination (`lon;lat`) |
-| `profile` | string | No | Bike profile: `city`, `ebike`, or `road` (default: `city`) |
-| `maneuvers` | bool | No | Include turn-by-turn maneuvers (default: `false`) |
+| `language` | string | No | Language for maneuver instructions (e.g. `fr-FR`, `en-US`) |
 
 ```admonish info title="Elevation Colors"
 The response includes elevation data and maneuver-by-maneuver directions. The frontend uses elevation data to color the route polyline (green = descent, red = climb).
@@ -161,7 +161,7 @@ Uses Valhalla for driving directions.
 |-----------|------|----------|-------------|
 | `from` | string | Yes | Origin (`lon;lat`) |
 | `to` | string | Yes | Destination (`lon;lat`) |
-| `maneuvers` | bool | No | Include turn-by-turn maneuvers (default: `false`) |
+| `language` | string | No | Language for maneuver instructions (e.g. `fr-FR`, `en-US`) |
 
 ## Wheelchair Accessible Routing
 
