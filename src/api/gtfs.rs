@@ -73,6 +73,33 @@ pub struct ReloadResponse {
     pub raptor: super::status::RaptorStats,
 }
 
+/// Response for `GET /api/gtfs/status`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct GtfsStatusResponse {
+    /// Last GTFS load timestamp (RFC 3339).
+    pub loaded_at: String,
+    pub gtfs: super::status::GtfsStats,
+    pub raptor: super::status::RaptorStats,
+}
+
+/// Return GTFS data statistics and the last load timestamp.
+///
+/// This is the GTFS-specific counterpart to `GET /api/status` (which only
+/// reports engine health and map defaults).
+#[utoipa::path(
+    get,
+    path = "/api/gtfs/status",
+    responses(
+        (status = 200, description = "GTFS data statistics", body = GtfsStatusResponse),
+    ),
+    tag = "GTFS"
+)]
+#[get("/api/gtfs/status")]
+pub async fn get_gtfs_status(shared: web::Data<ArcSwap<RaptorData>>) -> HttpResponse {
+    let raptor_data = shared.load();
+    HttpResponse::Ok().json(super::status::gtfs_status_payload(&raptor_data.stats))
+}
+
 // ---------------------------------------------------------------------------
 // Validation logic
 // ---------------------------------------------------------------------------
@@ -662,25 +689,8 @@ pub async fn post_reload(
 
     match result {
         Ok(Ok(new_data)) => {
-            let s = &new_data.stats;
-            let resp = serde_json::json!({
-                "status": "reloaded",
-                "loaded_at": s.loaded_at.to_rfc3339(),
-                "gtfs": {
-                    "agencies": s.agencies,
-                    "routes": s.routes,
-                    "stops": s.stops,
-                    "trips": s.trips,
-                    "stop_times": s.stop_times,
-                    "calendars": s.calendars,
-                    "calendar_dates": s.calendar_dates,
-                    "transfers": s.transfers,
-                },
-                "raptor": {
-                    "patterns": s.patterns,
-                    "services": s.services,
-                }
-            });
+            let mut resp = super::status::gtfs_status_payload(&new_data.stats);
+            resp["status"] = serde_json::json!("reloaded");
             shared.store(new_data);
             tracing::info!("GTFS data reloaded");
             HttpResponse::Ok().json(resp)
@@ -990,6 +1000,26 @@ mod tests {
             .to_request();
         let resp = actix_web::test::call_service(&app, req).await;
         assert_eq!(resp.status(), 403);
+    }
+
+    #[actix_web::test]
+    async fn gtfs_status_returns_stats() {
+        let data = Arc::new(crate::raptor::RaptorData::build(make_test_gtfs(), 120));
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(web::Data::new(ArcSwap::from(data)))
+                .service(get_gtfs_status),
+        )
+        .await;
+        let req = actix_web::test::TestRequest::get()
+            .uri("/api/gtfs/status")
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = actix_web::test::read_body_json(resp).await;
+        assert!(body["gtfs"]["stops"].as_u64().unwrap() > 0);
+        assert!(body["raptor"]["patterns"].as_u64().is_some());
+        assert!(body["loaded_at"].is_string());
     }
 
     #[actix_web::test]

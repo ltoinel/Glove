@@ -13,7 +13,10 @@ pub mod places;
 pub mod status;
 pub mod tiles;
 
-pub use gtfs::{__path_get_validate, __path_post_reload, get_validate, post_reload};
+pub use gtfs::{
+    __path_get_gtfs_status, __path_get_validate, __path_post_reload, get_gtfs_status, get_validate,
+    post_reload,
+};
 pub use journeys::{__path_get_bike, get_bike};
 pub use journeys::{__path_get_car, get_car};
 pub use journeys::{__path_get_journeys, get_journeys};

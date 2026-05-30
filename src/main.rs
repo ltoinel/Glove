@@ -120,6 +120,7 @@ fn load_or_build_ban(config: &config::AppConfig) -> Arc<ban::BanData> {
         api::get_places,
         api::get_status,
         api::get_metrics,
+        api::get_gtfs_status,
         api::get_validate,
         api::post_reload,
     ),
@@ -139,8 +140,11 @@ fn load_or_build_ban(config: &config::AppConfig) -> Arc<ban::BanData> {
         api::places::PlacesResponse,
         api::places::PlaceResult,
         api::status::StatusResponse,
+        api::status::Dependencies,
+        api::status::MapInfo,
         api::status::GtfsStats,
         api::status::RaptorStats,
+        api::gtfs::GtfsStatusResponse,
         api::gtfs::ValidateResponse,
         api::gtfs::ValidationSummary,
         api::gtfs::ValidationIssue,
@@ -249,6 +253,7 @@ async fn run_http_server(
                     .service(api::get_car)
                     .service(api::get_journeys)
                     .service(api::get_metrics)
+                    .service(api::get_gtfs_status)
                     .service(api::get_validate)
                     .service(api::post_reload),
             )

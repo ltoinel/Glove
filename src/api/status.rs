@@ -1,12 +1,10 @@
 //! Engine status and GTFS hot-reload endpoints.
 
 use actix_web::{HttpResponse, get, web};
-use arc_swap::ArcSwap;
 use serde::Serialize;
 use utoipa::ToSchema;
 
 use crate::config::AppConfig;
-use crate::raptor::RaptorData;
 
 /// Check Valhalla connectivity by hitting its /status endpoint.
 ///
@@ -54,38 +52,36 @@ pub struct RaptorStats {
     pub services: usize,
 }
 
-/// Response for `GET /api/status`.
+/// Dependency health.
 #[derive(Debug, Serialize, ToSchema)]
-pub struct StatusResponse {
-    pub status: String,
-    pub loaded_at: String,
-    pub gtfs: GtfsStats,
-    pub raptor: RaptorStats,
+pub struct Dependencies {
+    /// `"ok"` or `"unreachable"`.
+    pub valhalla: String,
 }
 
-/// Return engine status: GTFS data statistics and last load timestamp.
-#[utoipa::path(
-    get,
-    path = "/api/status",
-    responses(
-        (status = 200, description = "Engine status and GTFS statistics", body = StatusResponse),
-    ),
-    tag = "Status"
-)]
-#[get("/api/status")]
-pub async fn get_status(
-    shared: web::Data<ArcSwap<RaptorData>>,
-    config: web::Data<AppConfig>,
-) -> HttpResponse {
-    let raptor_data = shared.load();
-    let s = &raptor_data.stats;
-    let valhalla_ok = check_valhalla(&config).await;
-    HttpResponse::Ok().json(serde_json::json!({
-        "status": if valhalla_ok { "ok" } else { "degraded" },
+/// Map display defaults (from config, not GTFS).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MapInfo {
+    pub center: [f64; 2],
+    pub zoom: u8,
+    pub bounds: [[f64; 2]; 2],
+}
+
+/// Response for `GET /api/status` — engine health and map defaults only.
+/// GTFS statistics live at `GET /api/gtfs/status`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct StatusResponse {
+    /// `"ok"` when all dependencies are healthy, else `"degraded"`.
+    pub status: String,
+    pub dependencies: Dependencies,
+    pub map: MapInfo,
+}
+
+/// Build the GTFS + RAPTOR statistics payload, shared by `GET /api/gtfs/status`
+/// and `POST /api/gtfs/reload`.
+pub fn gtfs_status_payload(s: &crate::raptor::GtfsStats) -> serde_json::Value {
+    serde_json::json!({
         "loaded_at": s.loaded_at.to_rfc3339(),
-        "dependencies": {
-            "valhalla": if valhalla_ok { "ok" } else { "unreachable" },
-        },
         "gtfs": {
             "agencies": s.agencies,
             "routes": s.routes,
@@ -100,6 +96,27 @@ pub async fn get_status(
             "patterns": s.patterns,
             "services": s.services,
         },
+    })
+}
+
+/// Return engine health and map defaults. GTFS data is intentionally **not**
+/// included here — see `GET /api/gtfs/status`.
+#[utoipa::path(
+    get,
+    path = "/api/status",
+    responses(
+        (status = 200, description = "Engine health and map defaults", body = StatusResponse),
+    ),
+    tag = "Status"
+)]
+#[get("/api/status")]
+pub async fn get_status(config: web::Data<AppConfig>) -> HttpResponse {
+    let valhalla_ok = check_valhalla(&config).await;
+    HttpResponse::Ok().json(serde_json::json!({
+        "status": if valhalla_ok { "ok" } else { "degraded" },
+        "dependencies": {
+            "valhalla": if valhalla_ok { "ok" } else { "unreachable" },
+        },
         "map": {
             "center": [config.map.center_lat, config.map.center_lon],
             "zoom": config.map.zoom,
@@ -112,83 +129,7 @@ pub async fn get_status(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{config::AppConfig, gtfs, raptor};
-    use rustc_hash::FxHashMap;
-    use std::sync::Arc;
-
-    fn make_test_raptor() -> Arc<RaptorData> {
-        let mut stops = FxHashMap::default();
-        stops.insert(
-            "S1".into(),
-            gtfs::Stop {
-                stop_id: "S1".into(),
-                stop_name: "A".into(),
-                stop_lon: 2.0,
-                stop_lat: 48.0,
-                parent_station: String::new(),
-                wheelchair_boarding: 0,
-            },
-        );
-        let mut routes = FxHashMap::default();
-        routes.insert(
-            "R1".into(),
-            gtfs::Route {
-                route_id: "R1".into(),
-                agency_id: "A1".into(),
-                route_short_name: "1".into(),
-                route_long_name: "L".into(),
-                route_type: 1,
-                route_color: String::new(),
-                route_text_color: String::new(),
-            },
-        );
-        let mut trips = FxHashMap::default();
-        trips.insert(
-            "T1".into(),
-            gtfs::Trip {
-                route_id: "R1".into(),
-                service_id: "SVC1".into(),
-                trip_id: "T1".into(),
-                trip_headsign: "A".into(),
-                wheelchair_accessible: 0,
-            },
-        );
-        let stop_times = vec![gtfs::StopTime {
-            trip_id: "T1".into(),
-            arrival_time: "08:00:00".into(),
-            departure_time: "08:01:00".into(),
-            stop_id: "S1".into(),
-            stop_sequence: 0,
-        }];
-        let mut calendars = FxHashMap::default();
-        calendars.insert(
-            "SVC1".into(),
-            gtfs::Calendar {
-                service_id: "SVC1".into(),
-                monday: 1,
-                tuesday: 1,
-                wednesday: 1,
-                thursday: 1,
-                friday: 1,
-                saturday: 1,
-                sunday: 1,
-                start_date: "20260101".into(),
-                end_date: "20261231".into(),
-            },
-        );
-        let gtfs_data = gtfs::GtfsData {
-            agencies: vec![],
-            routes,
-            stops,
-            trips,
-            stop_times,
-            calendars,
-            calendar_dates: vec![],
-            transfers: vec![],
-            pathways: vec![],
-        };
-        Arc::new(raptor::RaptorData::build(gtfs_data, 120))
-    }
+    use crate::config::AppConfig;
 
     #[actix_web::test]
     async fn check_valhalla_rejects_empty_host() {
@@ -215,11 +156,9 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn status_returns_ok() {
-        let data = make_test_raptor();
+    async fn status_returns_health_and_map_only() {
         let app = actix_web::test::init_service(
             actix_web::App::new()
-                .app_data(web::Data::new(ArcSwap::from(data)))
                 .app_data(web::Data::new(AppConfig::default()))
                 .service(get_status),
         )
@@ -234,8 +173,10 @@ mod tests {
         let status = body["status"].as_str().unwrap();
         assert!(status == "ok" || status == "degraded");
         assert!(body["dependencies"]["valhalla"].is_string());
-        assert!(body["gtfs"]["stops"].as_u64().unwrap() > 0);
         assert!(body["map"]["center"].is_array());
         assert!(body["map"]["bounds"].is_array());
+        // GTFS data must NOT be in /api/status anymore.
+        assert!(body["gtfs"].is_null());
+        assert!(body["raptor"].is_null());
     }
 }

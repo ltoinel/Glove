@@ -6,28 +6,56 @@
 GET /api/status
 ```
 
-Returns GTFS data statistics and server information. No authentication required.
+Returns engine **health** and **map defaults** only — no GTFS data (those moved
+to `GET /api/gtfs/status`). No authentication required. Used as the Docker healthcheck.
 
 ### Response
 
 ```json
 {
   "status": "ok",
-  "gtfs": {
-    "agencies": 42,
-    "routes": 1850,
-    "stops": 48000,
-    "trips": 320000,
-    "stop_times": 8500000,
-    "calendars": 2500,
-    "calendar_dates": 15000,
-    "transfers": 95000
+  "dependencies": {
+    "valhalla": "ok"
   },
-  "last_load": "2024-03-15T08:00:00Z"
+  "map": {
+    "center": [48.8566, 2.3522],
+    "zoom": 11,
+    "bounds": [[48.1, 1.4], [49.3, 3.6]]
+  }
 }
 ```
 
-This endpoint is used as the Docker healthcheck.
+`status` is `"ok"` when all dependencies are healthy, `"degraded"` otherwise.
+
+## GTFS Status
+
+```
+GET /api/gtfs/status
+```
+
+Returns GTFS data statistics and the last load timestamp.
+
+### Response
+
+```json
+{
+  "loaded_at": "2026-03-15T08:00:00Z",
+  "gtfs": {
+    "agencies": 64,
+    "routes": 2011,
+    "stops": 53705,
+    "trips": 390650,
+    "stop_times": 8367732,
+    "calendars": 744,
+    "calendar_dates": 1150,
+    "transfers": 201582
+  },
+  "raptor": {
+    "patterns": 10061,
+    "services": 777
+  }
+}
+```
 
 ## GTFS Validation
 

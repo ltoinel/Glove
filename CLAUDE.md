@@ -56,7 +56,8 @@ Core of the application. Round-based public transit routing with:
 - `GET /api/journeys/bike` — Cycling directions via Valhalla (city, ebike, road profiles)
 - `GET /api/journeys/car` — Driving directions via Valhalla
 - `GET /api/places` — Stop autocomplete (fuzzy search)
-- `GET /api/status` — GTFS stats and last load timestamp
+- `GET /api/status` — engine health (dependencies) and map defaults only (no GTFS data)
+- `GET /api/gtfs/status` — GTFS data statistics and last load timestamp
 - `GET /api/gtfs/validate` — GTFS data quality validation (19 checks)
 - `POST /api/gtfs/reload` — Hot-reload GTFS data without downtime (atomic swap via ArcSwap)
 - `GET /api/metrics` — Prometheus-format metrics (HTTP counters, CPU, memory)

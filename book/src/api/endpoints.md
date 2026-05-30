@@ -11,7 +11,8 @@ Glove exposes a REST API on the configured port (default: 8080). All endpoints r
 | `GET` | `/api/journeys/bike` | Cycling directions (Valhalla, 3 profiles) |
 | `GET` | `/api/journeys/car` | Driving directions (Valhalla) |
 | `GET` | `/api/places` | Stop and address autocomplete |
-| `GET` | `/api/status` | GTFS stats and server status |
+| `GET` | `/api/status` | Engine health and map defaults (no GTFS data) |
+| `GET` | `/api/gtfs/status` | GTFS data statistics and last load timestamp |
 | `GET` | `/api/gtfs/validate` | GTFS data quality validation (19 checks) |
 | `POST` | `/api/gtfs/reload` | Hot-reload GTFS data |
 | `GET` | `/api/metrics` | Prometheus-format metrics |

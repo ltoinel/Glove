@@ -1502,7 +1502,14 @@ export default function App() {
   }
 
   const refreshStatus = useCallback(() => {
-    fetch('/api/status').then(r => r.json()).then(setStatus).catch(err => console.warn('Status fetch failed:', err.message))
+    // /api/status = engine health + map defaults; /api/gtfs/status = GTFS stats.
+    // Merge both so the rest of the UI keeps reading status.map / status.gtfs.
+    Promise.all([
+      fetch('/api/status').then(r => r.json()),
+      fetch('/api/gtfs/status').then(r => r.json()),
+    ])
+      .then(([health, gtfs]) => setStatus({ ...health, ...gtfs }))
+      .catch(err => console.warn('Status fetch failed:', err.message))
   }, [])
   useEffect(() => { refreshStatus() }, [refreshStatus])
 
