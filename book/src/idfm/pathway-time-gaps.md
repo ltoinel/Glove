@@ -67,60 +67,60 @@ Stations ranked by mean absolute gap — the highest rows are the stations whose
 
 ## Top 50 individual gaps (descending)
 
-Sorted by absolute gap. A large positive Δ usually points to incomplete indoor OSM connectivity (Valhalla detours); a large negative Δ suggests an over-cautious GTFS `traversal_time`.
+Sorted by absolute gap. `GTFS dist` is the declared pathway length; `Valh dist` is the distance Valhalla actually walked — a much larger `Valh dist` reveals an indoor detour (incomplete OSM connectivity), while a large negative Δ suggests an over-cautious GTFS `traversal_time`.
 
-| # | From → To | Length | GTFS | Valhalla | Δ |
-|---|-----------|-------:|-----:|---------:|--:|
-| 1 | Entrée / Sortie → Orly 1-2-3 | 146 m | 185 s | 960 s | **+775 s** |
-| 2 | Parking P3 / VTC - Taxis réservés 3 - Ride app Pick-up → Aéroport d'Orly | 93 m | 118 s | 723 s | **+605 s** |
-| 3 | av. du Chemin de Fer → Vernouillet - Verneuil | 97 m | 123 s | 707 s | **+584 s** |
-| 4 | Bus → Aéroport d'Orly | 117 m | 149 s | 732 s | **+583 s** |
-| 5 | Orly 1-2-3 → Aéroport d'Orly | 31 m | 38 s | 591 s | **+553 s** |
-| 6 | Orly 1-2-3 → Aéroport d'Orly | 36 m | 45 s | 593 s | **+548 s** |
-| 7 | bd des Provinces Françaises → Nanterre Université | 151 m | 192 s | 722 s | **+530 s** |
-| 8 | Orly 4 - T7 - Cœur d'Orly → Aéroport d'Orly | 48 m | 60 s | 546 s | **+486 s** |
-| 9 | Orly 4 - T7 - Cœur d'Orly → Aéroport d'Orly | 51 m | 64 s | 547 s | **+483 s** |
-| 10 | Parking (Nord) → Conflans Fin d'Oise | 105 m | 133 s | 468 s | **+335 s** |
-| 11 | cour de Rome → Saint-Lazare | 49 m | 62 s | 373 s | **+311 s** |
-| 12 | r. du Cotentin (Gare Vaugirard) → Gare Montparnasse | 35 m | 44 s | 338 s | **+294 s** |
-| 13 | av. de la Gare → Robinson | 28 m | 35 s | 320 s | **+285 s** |
-| 14 | r. de Maubeuge → Paris Gare du Nord | 67 m | 84 s | 362 s | **+278 s** |
-| 15 | pl. Gabriel Péri → Saint-Lazare | 34 m | 43 s | 318 s | **+275 s** |
-| 16 | Galerie des Marchands → Saint-Lazare | 79 m | 100 s | 343 s | **+243 s** |
-| 17 | r. de l'Arcade → Saint-Lazare | 72 m | 91 s | 327 s | **+236 s** |
-| 18 | Terre-plein → Gare de l'Est | 35 m | 44 s | 210 s | **+166 s** |
-| 19 | bd Diderot → Paris Gare de Lyon | 348 m | 442 s | 277 s | **-165 s** |
-| 20 | Terre-plein → Gare de l'Est | 14 m | 18 s | 182 s | **+164 s** |
-| 21 | bd de Denain → Paris Gare du Nord | 368 m | 468 s | 308 s | **-160 s** |
-| 22 | Parvis - Esplanade → La Défense (Grande Arche) | 177 m | 225 s | 383 s | **+158 s** |
-| 23 | bd de Denain → Paris Gare du Nord | 365 m | 464 s | 307 s | **-157 s** |
-| 24 | bd Diderot → Gare de Lyon | 355 m | 452 s | 296 s | **-156 s** |
-| 25 | Place des Fêtes → pl.des Fêtes | 21 m | 26 s | 182 s | **+156 s** |
-| 26 | Place des Fêtes → pl.des Fêtes | 21 m | 26 s | 182 s | **+156 s** |
-| 27 | Parking P3 / VTC - Taxis réservés 3 - Ride app Pick-up → Aéroport d'Orly | 88 m | 111 s | 258 s | **+147 s** |
-| 28 | Terre-plein → Gare de l'Est | 25 m | 32 s | 178 s | **+146 s** |
-| 29 | Terre-plein → Gare de l'Est | 38 m | 47 s | 192 s | **+145 s** |
-| 30 | r. de Dunkerque → Paris Gare du Nord | 358 m | 455 s | 311 s | **-144 s** |
-| 31 | bd de Denain → Paris Gare du Nord | 318 m | 404 s | 260 s | **-144 s** |
-| 32 | r. de Dunkerque → Paris Gare du Nord | 355 m | 452 s | 310 s | **-142 s** |
-| 33 | Terre-plein → Gare de l'Est | 46 m | 58 s | 199 s | **+141 s** |
-| 34 | r. Goscinny → Bibliothèque François Mitterrand | 87 m | 111 s | 251 s | **+140 s** |
-| 35 | bd Vaugirard → Gare Montparnasse | 381 m | 485 s | 345 s | **-140 s** |
-| 36 | r. de Londres → Paris Saint-Lazare | 95 m | 121 s | 261 s | **+140 s** |
-| 37 | bd Diderot → Paris Gare de Lyon | 355 m | 452 s | 312 s | **-140 s** |
-| 38 | pl. de la Liberté → Bondy | 32 m | 41 s | 180 s | **+139 s** |
-| 39 | bd de Denain → Paris Gare du Nord | 315 m | 401 s | 262 s | **-139 s** |
-| 40 | bd Diderot → Paris Gare de Lyon | 353 m | 449 s | 311 s | **-138 s** |
-| 41 | r. de Londres → Paris Saint-Lazare | 98 m | 125 s | 262 s | **+137 s** |
-| 42 | r. Saint-Lazare → Haussmann Saint-Lazare | 88 m | 111 s | 246 s | **+135 s** |
-| 43 | Entrée / Sortie → Paris Gare du Nord | 318 m | 405 s | 270 s | **-135 s** |
-| 44 | Opéra → av. de l'Opéra | 110 m | 139 s | 271 s | **+132 s** |
-| 45 | Entrée / Sortie → Paris Gare du Nord | 315 m | 401 s | 269 s | **-132 s** |
-| 46 | bd de Denain → Paris Gare du Nord | 269 m | 342 s | 210 s | **-132 s** |
-| 47 | pl. du Petit Prince → Villepreux - Les Clayes | 44 m | 55 s | 184 s | **+129 s** |
-| 48 | Haussmann Saint-Lazare → r. Saint-Lazare | 84 m | 106 s | 234 s | **+128 s** |
-| 49 | Terre-plein → Gare de l'Est | 35 m | 44 s | 172 s | **+128 s** |
-| 50 | bd de Denain → Paris Gare du Nord | 272 m | 345 s | 218 s | **-127 s** |
+| # | From → To | GTFS dist | Valh dist | GTFS | Valhalla | Δ |
+|---|-----------|----------:|----------:|-----:|---------:|--:|
+| 1 | Entrée / Sortie → Orly 1-2-3 | 146 m | 1356 m | 185 s | 960 s | **+775 s** |
+| 2 | Parking P3 / VTC - Taxis réservés 3 - Ride app Pick-up → Aéroport d'Orly | 93 m | 1039 m | 118 s | 723 s | **+605 s** |
+| 3 | av. du Chemin de Fer → Vernouillet - Verneuil | 97 m | 932 m | 123 s | 707 s | **+584 s** |
+| 4 | Bus → Aéroport d'Orly | 117 m | 1050 m | 149 s | 732 s | **+583 s** |
+| 5 | Orly 1-2-3 → Aéroport d'Orly | 31 m | 855 m | 38 s | 591 s | **+553 s** |
+| 6 | Orly 1-2-3 → Aéroport d'Orly | 36 m | 857 m | 45 s | 593 s | **+548 s** |
+| 7 | bd des Provinces Françaises → Nanterre Université | 151 m | 1015 m | 192 s | 722 s | **+530 s** |
+| 8 | Orly 4 - T7 - Cœur d'Orly → Aéroport d'Orly | 48 m | 785 m | 60 s | 546 s | **+486 s** |
+| 9 | Orly 4 - T7 - Cœur d'Orly → Aéroport d'Orly | 51 m | 786 m | 64 s | 547 s | **+483 s** |
+| 10 | Parking (Nord) → Conflans Fin d'Oise | 105 m | 603 m | 133 s | 468 s | **+335 s** |
+| 11 | cour de Rome → Saint-Lazare | 49 m | 504 m | 62 s | 373 s | **+311 s** |
+| 12 | r. du Cotentin (Gare Vaugirard) → Gare Montparnasse | 35 m | 392 m | 44 s | 338 s | **+294 s** |
+| 13 | av. de la Gare → Robinson | 28 m | 428 m | 35 s | 320 s | **+285 s** |
+| 14 | r. de Maubeuge → Paris Gare du Nord | 67 m | 489 m | 84 s | 362 s | **+278 s** |
+| 15 | pl. Gabriel Péri → Saint-Lazare | 34 m | 454 m | 43 s | 318 s | **+275 s** |
+| 16 | Galerie des Marchands → Saint-Lazare | 79 m | 466 m | 100 s | 343 s | **+243 s** |
+| 17 | r. de l'Arcade → Saint-Lazare | 72 m | 464 m | 91 s | 327 s | **+236 s** |
+| 18 | Terre-plein → Gare de l'Est | 35 m | 291 m | 44 s | 210 s | **+166 s** |
+| 19 | bd Diderot → Paris Gare de Lyon | 348 m | 399 m | 442 s | 277 s | **-165 s** |
+| 20 | Terre-plein → Gare de l'Est | 14 m | 251 m | 18 s | 182 s | **+164 s** |
+| 21 | bd de Denain → Paris Gare du Nord | 368 m | 448 m | 468 s | 308 s | **-160 s** |
+| 22 | Parvis - Esplanade → La Défense (Grande Arche) | 177 m | 447 m | 225 s | 383 s | **+158 s** |
+| 23 | bd de Denain → Paris Gare du Nord | 365 m | 448 m | 464 s | 307 s | **-157 s** |
+| 24 | bd Diderot → Gare de Lyon | 355 m | 415 m | 452 s | 296 s | **-156 s** |
+| 25 | Place des Fêtes → pl.des Fêtes | 21 m | 212 m | 26 s | 182 s | **+156 s** |
+| 26 | Place des Fêtes → pl.des Fêtes | 21 m | 212 m | 26 s | 182 s | **+156 s** |
+| 27 | Parking P3 / VTC - Taxis réservés 3 - Ride app Pick-up → Aéroport d'Orly | 88 m | 370 m | 111 s | 258 s | **+147 s** |
+| 28 | Terre-plein → Gare de l'Est | 25 m | 246 m | 32 s | 178 s | **+146 s** |
+| 29 | Terre-plein → Gare de l'Est | 38 m | 261 m | 47 s | 192 s | **+145 s** |
+| 30 | r. de Dunkerque → Paris Gare du Nord | 358 m | 453 m | 455 s | 311 s | **-144 s** |
+| 31 | bd de Denain → Paris Gare du Nord | 318 m | 385 m | 404 s | 260 s | **-144 s** |
+| 32 | r. de Dunkerque → Paris Gare du Nord | 355 m | 453 m | 452 s | 310 s | **-142 s** |
+| 33 | Terre-plein → Gare de l'Est | 46 m | 269 m | 58 s | 199 s | **+141 s** |
+| 34 | r. Goscinny → Bibliothèque François Mitterrand | 87 m | 338 m | 111 s | 251 s | **+140 s** |
+| 35 | bd Vaugirard → Gare Montparnasse | 381 m | 424 m | 485 s | 345 s | **-140 s** |
+| 36 | r. de Londres → Paris Saint-Lazare | 95 m | 371 m | 121 s | 261 s | **+140 s** |
+| 37 | bd Diderot → Paris Gare de Lyon | 355 m | 416 m | 452 s | 312 s | **-140 s** |
+| 38 | pl. de la Liberté → Bondy | 32 m | 254 m | 41 s | 180 s | **+139 s** |
+| 39 | bd de Denain → Paris Gare du Nord | 315 m | 389 m | 401 s | 262 s | **-139 s** |
+| 40 | bd Diderot → Paris Gare de Lyon | 353 m | 415 m | 449 s | 311 s | **-138 s** |
+| 41 | r. de Londres → Paris Saint-Lazare | 98 m | 371 m | 125 s | 262 s | **+137 s** |
+| 42 | r. Saint-Lazare → Haussmann Saint-Lazare | 88 m | 344 m | 111 s | 246 s | **+135 s** |
+| 43 | Entrée / Sortie → Paris Gare du Nord | 318 m | 396 m | 405 s | 270 s | **-135 s** |
+| 44 | Opéra → av. de l'Opéra | 110 m | 349 m | 139 s | 271 s | **+132 s** |
+| 45 | Entrée / Sortie → Paris Gare du Nord | 315 m | 396 m | 401 s | 269 s | **-132 s** |
+| 46 | bd de Denain → Paris Gare du Nord | 269 m | 311 m | 342 s | 210 s | **-132 s** |
+| 47 | pl. du Petit Prince → Villepreux - Les Clayes | 44 m | 267 m | 55 s | 184 s | **+129 s** |
+| 48 | Haussmann Saint-Lazare → r. Saint-Lazare | 84 m | 326 m | 106 s | 234 s | **+128 s** |
+| 49 | Terre-plein → Gare de l'Est | 35 m | 235 m | 44 s | 172 s | **+128 s** |
+| 50 | bd de Denain → Paris Gare du Nord | 272 m | 324 m | 345 s | 218 s | **-127 s** |
 
 ```admonish note
 The full ranking of all 820 indoor pathways (plus pathways with no indoor OSM data) is in `scripts/pathway_diff.csv`.

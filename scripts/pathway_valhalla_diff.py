@@ -73,7 +73,7 @@ def load_pathways(gtfs_dir, stops):
 
 
 def valhalla_route(base, a, b):
-    """Return (time_s, indoor_bool, n_maneuvers) or None on failure."""
+    """Return (time_s, distance_m, indoor_bool, n_maneuvers) or None on failure."""
     body = {
         "locations": [
             {"lon": a[0], "lat": a[1]},
@@ -100,8 +100,10 @@ def valhalla_route(base, a, b):
         return None
     maneuvers = legs[0].get("maneuvers", [])
     indoor = any(m.get("type") in INDOOR_MANEUVER_TYPES for m in maneuvers)
-    time_s = int(data["trip"]["summary"]["time"])
-    return (time_s, indoor, len(maneuvers))
+    summary = data["trip"]["summary"]
+    time_s = int(summary["time"])
+    distance_m = round(summary["length"] * 1000)  # Valhalla reports km
+    return (time_s, distance_m, indoor, len(maneuvers))
 
 
 def main():
@@ -134,10 +136,11 @@ def main():
             if res is None:
                 continue
             routed += 1
-            time_s, indoor, n_man = res
+            time_s, distance_m, indoor, n_man = res
             rows.append({
                 "pathway_id": p["id"], "from": p["from"], "to": p["to"],
-                "length_m": p["length"], "gtfs_traversal_s": p["traversal_time"],
+                "length_m": p["length"], "valhalla_m": distance_m,
+                "gtfs_traversal_s": p["traversal_time"],
                 "valhalla_s": time_s, "diff_s": time_s - p["traversal_time"],
                 "indoor": indoor, "n_maneuvers": n_man,
             })
@@ -171,7 +174,7 @@ def main():
     rows.sort(key=lambda r: abs(r["diff_s"]), reverse=True)
     with open(args.output, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0].keys()) if rows else
-                           ["pathway_id", "from", "to", "length_m",
+                           ["pathway_id", "from", "to", "length_m", "valhalla_m",
                             "gtfs_traversal_s", "valhalla_s", "diff_s", "indoor", "n_maneuvers"])
         w.writeheader()
         w.writerows(rows)
