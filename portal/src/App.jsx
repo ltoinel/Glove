@@ -1478,14 +1478,6 @@ export default function App() {
     localStorage.setItem('glove_walking_speed', String(v))
   }
 
-  const [showManeuvers, setShowManeuvers] = useState(() => {
-    return localStorage.getItem('glove_maneuvers') === 'true'
-  })
-  const handleManeuversChange = (checked) => {
-    setShowManeuvers(checked)
-    localStorage.setItem('glove_maneuvers', String(checked))
-  }
-
   const [wheelchair, setWheelchair] = useState(() => {
     return localStorage.getItem('glove_wheelchair') === 'true'
   })
@@ -1556,10 +1548,8 @@ export default function App() {
       const ptTo = toIsStop ? to.id : (toCoord ? `${toCoord.lon};${toCoord.lat}` : to.id)
       const ptParams = new URLSearchParams({ from: ptFrom, to: ptTo, datetime: toApiDatetime(effectiveDatetime) })
       if (walkingSpeed !== 5) ptParams.set('walking_speed', String(walkingSpeed))
-      if (showManeuvers) {
-        ptParams.set('maneuvers', 'true')
-        ptParams.set('language', lang === 'fr' ? 'fr-FR' : 'en-US')
-      }
+      // Language for maneuver instructions (maneuvers themselves are server-controlled via config).
+      ptParams.set('language', lang === 'fr' ? 'fr-FR' : 'en-US')
       if (wheelchair) ptParams.set('wheelchair', 'true')
       const forbidden = ['metro', 'rail', 'bus', 'tramway'].filter(m => !modes[m])
       if (forbidden.length > 0) ptParams.set('forbidden_modes', forbidden.join(','))
@@ -1580,7 +1570,7 @@ export default function App() {
         if (modes.walk) {
           const walkParams = new URLSearchParams(coordParams)
           if (walkingSpeed !== 5) walkParams.set('walking_speed', String(walkingSpeed))
-          if (showManeuvers) { walkParams.set('maneuvers', 'true'); walkParams.set('language', lang === 'fr' ? 'fr-FR' : 'en-US') }
+          walkParams.set('language', lang === 'fr' ? 'fr-FR' : 'en-US')
           if (wheelchair) walkParams.set('wheelchair', 'true')
           const walkT0 = performance.now()
           walkFetch = fetch(`/api/journeys/walk?${walkParams}`)
@@ -1591,7 +1581,7 @@ export default function App() {
         if (modes.bike && !wheelchair) {
           const bikeT0 = performance.now()
           const bikeParams = new URLSearchParams(coordParams)
-          if (showManeuvers) { bikeParams.set('maneuvers', 'true'); bikeParams.set('language', lang === 'fr' ? 'fr-FR' : 'en-US') }
+          bikeParams.set('language', lang === 'fr' ? 'fr-FR' : 'en-US')
           bikeFetch = fetch(`/api/journeys/bike?${bikeParams}`)
             .then(r => r.ok ? r.json() : null)
             .then(data => { setBikeTime(Math.round(performance.now() - bikeT0)); return data })
@@ -1600,7 +1590,7 @@ export default function App() {
         if (modes.car) {
           const carT0 = performance.now()
           const carParams = new URLSearchParams(coordParams)
-          if (showManeuvers) { carParams.set('maneuvers', 'true'); carParams.set('language', lang === 'fr' ? 'fr-FR' : 'en-US') }
+          carParams.set('language', lang === 'fr' ? 'fr-FR' : 'en-US')
           carFetch = fetch(`/api/journeys/car?${carParams}`)
             .then(r => r.ok ? r.json() : null)
             .then(data => { setCarTime(Math.round(performance.now() - carT0)); return data })
@@ -2004,22 +1994,6 @@ export default function App() {
                             {t('advancedOptions')}
                           </Typography>
                         </Box>
-
-                        <FormControlLabel
-                          control={
-                            <Switch
-                              checked={showManeuvers}
-                              onChange={(e) => handleManeuversChange(e.target.checked)}
-                              size="small"
-                              sx={{
-                                '& .MuiSwitch-switchBase.Mui-checked': { color: '#00e5ff' },
-                                '& .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track': { backgroundColor: '#00e5ff' },
-                              }}
-                            />
-                          }
-                          label={t('showManeuvers')}
-                          sx={{ mt: 1, ml: 0, '& .MuiFormControlLabel-label': { fontSize: 11, color: 'text.secondary' } }}
-                        />
 
                         <FormControlLabel
                           control={

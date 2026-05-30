@@ -25,6 +25,7 @@ routing:
   max_nearest_stop_distance: 1500  # meters (~20 min walk at 5 km/h)
   diverse_lines: false           # true = each alternative departs on a different line (line-level diversity)
   prefer_rail: true            # true = rail/metro/tram/train found first; bus only fills remaining slots
+  maneuvers: false             # true = include turn-by-turn directions (server-controlled, not per-request)
 
 valhalla:
   host: "localhost"

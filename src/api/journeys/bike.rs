@@ -25,8 +25,6 @@ pub struct BikeQuery {
     pub from: String,
     /// Destination as `lon;lat`.
     pub to: String,
-    /// Include turn-by-turn maneuvers in the response (default: false).
-    pub maneuvers: Option<bool>,
     /// Language for maneuver instructions (e.g. "fr-FR", "en-US").
     pub language: Option<String>,
 }
@@ -274,7 +272,7 @@ pub async fn get_bike(query: web::Query<BikeQuery>, config: web::Data<AppConfig>
     ];
 
     let client = reqwest::Client::new();
-    let include_maneuvers = query.maneuvers.unwrap_or(false);
+    let include_maneuvers = config.routing.maneuvers;
 
     let profiles = [
         (&config.bike.city, BIKE_PROFILES[0]),

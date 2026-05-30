@@ -217,6 +217,11 @@ pub struct RoutingConfig {
     /// remaining alternative slots. Default: `false`.
     #[serde(default = "default_prefer_rail")]
     pub prefer_rail: bool,
+
+    /// Include turn-by-turn maneuvers (Valhalla) in walk/bike/car and transfer
+    /// sections. Server-controlled only — not overridable per request. Default: `false`.
+    #[serde(default = "default_maneuvers")]
+    pub maneuvers: bool,
 }
 
 impl Default for RoutingConfig {
@@ -229,6 +234,7 @@ impl Default for RoutingConfig {
             max_nearest_stop_distance: default_max_nearest_stop_distance(),
             diverse_lines: default_diverse_lines(),
             prefer_rail: default_prefer_rail(),
+            maneuvers: default_maneuvers(),
         }
     }
 }
@@ -252,6 +258,9 @@ fn default_diverse_lines() -> bool {
     false
 }
 fn default_prefer_rail() -> bool {
+    false
+}
+fn default_maneuvers() -> bool {
     false
 }
 

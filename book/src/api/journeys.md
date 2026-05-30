@@ -10,26 +10,16 @@ GET /api/journeys/public_transport
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `from` | string | Yes | Origin coordinates (`lon;lat`) |
-| `to` | string | Yes | Destination coordinates (`lon;lat`) |
-| `datetime` | string | No | Departure time (ISO 8601, e.g. `20240315T083000`). Defaults to now |
-| `datetime_represents` | string | No | Whether `datetime` is `departure` (default) or `arrival` |
-| `maneuvers` | bool | No | Include turn-by-turn maneuvers in response (default: `false`). When absent, maneuvers are omitted and transfer Valhalla enrichment is skipped |
-| `wheelchair` | bool | No | Enable wheelchair-accessible routing (default: `false`). Avoids stairs, limits slope, prefers elevators. Adds `most_accessible` journey tag |
+| `from` | string | Yes | Origin: a `stop_id`, or `lon;lat` coordinates for an address |
+| `to` | string | Yes | Destination: a `stop_id`, or `lon;lat` coordinates for an address |
+| `datetime` | string | No | Departure time (ISO basic, e.g. `20240315T083000`). Defaults to now |
+| `max_duration` | int | No | Maximum journey duration in seconds. Falls back to `routing.max_duration` |
+| `walking_speed` | float | No | Walking speed in km/h for first/last-mile legs (default: 5) |
 | `forbidden_modes` | string | No | Comma-separated commercial modes to exclude (e.g. `metro,bus,rail`) |
-| `diverse_lines` | bool | No | Force each alternative to depart on a different line (overrides `routing.diverse_lines`). Default: config value |
-| `prefer_rail` | bool | No | Find rail/metro/tram/train journeys first; buses only fill remaining slots (overrides `routing.prefer_rail`). Default: config value |
-| `forbidden_uris[]` | string | No | Route IDs to exclude from routing |
-| `walking_speed` | float | No | Walking speed override in m/s (default: ~1.12 m/s = 4 km/h) |
-| `max_nb_transfers` | int | No | Maximum number of transfers allowed |
-| `min_nb_transfers` | int | No | Minimum number of transfers |
-| `max_duration` | int | No | Maximum journey duration in seconds |
-| `max_walking_duration_to_pt` | int | No | Maximum walking time to reach transit (seconds) |
-| `first_section_mode[]` | string | No | Modes allowed for the first leg (e.g. `walking`, `bike`, `car`) |
-| `last_section_mode[]` | string | No | Modes allowed for the last leg |
-| `direct_path` | string | No | Include direct non-transit path (`none`, `only`) |
-| `count` | int | No | Number of journeys requested |
-| `max_nb_journeys` | int | No | Maximum number of journeys in response |
+| `wheelchair` | bool | No | Enable wheelchair-accessible routing (default: `false`). Avoids stairs, limits slope, prefers elevators. Adds `most_accessible` journey tag |
+| `language` | string | No | Language for maneuver instructions (e.g. `fr-FR`, `en-US`) |
+
+> **Server-controlled settings.** The number of journeys (`routing.max_journeys`), transfers (`routing.max_transfers`), line diversity (`routing.diverse_lines`), rail preference (`routing.prefer_rail`) and turn-by-turn maneuvers (`routing.maneuvers`) are **not** request parameters — they are fixed in `config.yaml`. Maneuvers are likewise config-controlled on the `walk`, `bike` and `car` endpoints.
 
 ### Example
 

@@ -25,100 +25,27 @@ use crate::api::{Place, Section, StopDateTime, make_place, make_stop_point};
 ///
 /// Most fields are optional and fall back to values from [`AppConfig`].
 #[derive(Debug, Deserialize, IntoParams)]
-#[allow(dead_code)]
 pub struct JourneysQuery {
+    /// Origin: a `stop_id`, or `lon;lat` coordinates for an address.
     pub from: Option<String>,
+    /// Destination: a `stop_id`, or `lon;lat` coordinates for an address.
     pub to: Option<String>,
+    /// Departure date-time in ISO basic format `YYYYMMDDTHHmmss`. Defaults to now.
     pub datetime: Option<String>,
-    pub datetime_represents: Option<DatetimeRepresents>,
-
-    pub max_nb_transfers: Option<i32>,
-    pub min_nb_transfers: Option<i32>,
-
-    #[serde(rename = "first_section_mode[]", default)]
-    pub first_section_mode: Vec<String>,
-    #[serde(rename = "last_section_mode[]", default)]
-    pub last_section_mode: Vec<String>,
-
-    pub max_duration_to_pt: Option<i32>,
-    pub max_walking_duration_to_pt: Option<i32>,
-    pub max_bike_duration_to_pt: Option<i32>,
-    pub max_bss_duration_to_pt: Option<i32>,
-    pub max_car_duration_to_pt: Option<i32>,
-    pub max_ridesharing_duration_to_pt: Option<i32>,
-
-    pub walking_speed: Option<f64>,
-    pub bike_speed: Option<f64>,
-    pub bss_speed: Option<f64>,
-    pub car_speed: Option<f64>,
-    pub ridesharing_speed: Option<f64>,
-    pub taxi_speed: Option<f64>,
-
-    #[serde(rename = "forbidden_uris[]", default)]
-    pub forbidden_uris: Vec<String>,
-    #[serde(rename = "allowed_id[]", default)]
-    pub allowed_id: Vec<String>,
-
-    pub disruption_active: Option<bool>,
-    pub data_freshness: Option<DataFreshness>,
-
+    /// Maximum total journey duration in seconds. Falls back to `routing.max_duration`.
     pub max_duration: Option<i32>,
+    /// Walking speed in km/h for first/last-mile legs (default 5).
+    pub walking_speed: Option<f64>,
+    /// Enable wheelchair-accessible routing (avoid stairs, limit grade).
     pub wheelchair: Option<bool>,
-    pub traveler_type: Option<String>,
-    pub direct_path: Option<String>,
-
-    pub free_radius_from: Option<i32>,
-    pub free_radius_to: Option<i32>,
-
     /// Comma-separated commercial modes to exclude (e.g. "metro,bus,rail").
     pub forbidden_modes: Option<String>,
-
-    pub count: Option<i32>,
-    pub min_nb_journeys: Option<i32>,
-    pub max_nb_journeys: Option<i32>,
-
-    pub is_journey_schedules: Option<bool>,
-    pub timeframe_duration: Option<i32>,
-
-    pub max_taxi_direct_path_duration: Option<i32>,
-    pub max_walking_direct_path_duration: Option<i32>,
-    pub max_car_direct_path_duration: Option<i32>,
-    pub max_ridesharing_direct_path_duration: Option<i32>,
-    pub max_bss_direct_path_duration: Option<i32>,
-    pub max_bike_direct_path_duration: Option<i32>,
-
-    #[serde(rename = "add_poi_infos[]", default)]
-    pub add_poi_infos: Vec<String>,
-    pub bss_stands: Option<bool>,
-    pub equipment_details: Option<bool>,
+    /// Language for maneuver instructions (e.g. "fr-FR", "en-US").
     pub language: Option<String>,
-
-    /// Include turn-by-turn maneuvers in walking/transfer sections (default: false).
-    pub maneuvers: Option<bool>,
-
-    /// Override `routing.diverse_lines`: when `true`, force each alternative to
-    /// depart on a different line (line-level diversity). Defaults to the config value.
-    pub diverse_lines: Option<bool>,
-
-    /// Override `routing.prefer_rail`: when `true`, rail/metro/tram/train journeys
-    /// are found first and buses only fill remaining slots. Defaults to config.
-    pub prefer_rail: Option<bool>,
 }
-
-#[derive(Debug, Deserialize, Serialize, Clone, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum DatetimeRepresents {
-    Departure,
-    Arrival,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum DataFreshness {
-    BaseSchedule,
-    AdaptedSchedule,
-    Realtime,
-}
+// Note: number of journeys, transfers, line diversity, rail preference and
+// maneuvers are server-controlled via `routing.*` in config.yaml — intentionally
+// not exposed as request parameters.
 
 // ---------------------------------------------------------------------------
 // Response types
@@ -279,23 +206,17 @@ fn resolve_journey_query(
         effective_date,
         effective_departure,
         active,
-        max_transfers: query
-            .max_nb_transfers
-            .map(|n| n.max(0) as usize)
-            .unwrap_or(config.routing.max_transfers),
+        // Server-controlled via config only (not overridable per request).
+        max_transfers: config.routing.max_transfers,
         max_duration: query
             .max_duration
             .map(|n| n.max(0) as u32)
             .unwrap_or(config.routing.max_duration),
-        requested: query
-            .count
-            .or(query.max_nb_journeys)
-            .map(|n| (n.max(1) as usize).min(config.routing.max_journeys))
-            .unwrap_or(config.routing.max_journeys),
+        requested: config.routing.max_journeys,
         wheelchair: query.wheelchair.unwrap_or(false),
         mode_excluded,
-        diverse_lines: query.diverse_lines.unwrap_or(config.routing.diverse_lines),
-        prefer_rail: query.prefer_rail.unwrap_or(config.routing.prefer_rail),
+        diverse_lines: config.routing.diverse_lines,
+        prefer_rail: config.routing.prefer_rail,
     })
 }
 
@@ -483,7 +404,7 @@ async fn enrich_journeys(
         raptor_data,
         valhalla_base: &valhalla_base,
         walking_speed: query.walking_speed,
-        include_maneuvers: query.maneuvers.unwrap_or(false),
+        include_maneuvers: config.routing.maneuvers,
         language: query.language.as_deref(),
         wheelchair_config: if q.wheelchair {
             Some(&config.wheelchair)

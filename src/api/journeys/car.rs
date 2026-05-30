@@ -24,8 +24,6 @@ pub struct CarQuery {
     pub from: String,
     /// Destination as `lon;lat`.
     pub to: String,
-    /// Include turn-by-turn maneuvers in the response (default: false).
-    pub maneuvers: Option<bool>,
     /// Language for maneuver instructions (e.g. "fr-FR", "en-US").
     pub language: Option<String>,
 }
@@ -166,7 +164,7 @@ pub async fn get_car(query: web::Query<CarQuery>, config: web::Data<AppConfig>) 
         }
     };
 
-    let include_maneuvers = query.maneuvers.unwrap_or(false);
+    let include_maneuvers = config.routing.maneuvers;
     let maneuvers = if include_maneuvers {
         Some(convert_maneuvers(&leg.maneuvers))
     } else {

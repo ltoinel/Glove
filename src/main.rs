@@ -127,8 +127,6 @@ fn load_or_build_ban(config: &config::AppConfig) -> Arc<ban::BanData> {
         api::journeys::public_transport::JourneysResponse,
         api::journeys::public_transport::Journey,
         api::journeys::public_transport::DisplayInfo,
-        api::journeys::public_transport::DatetimeRepresents,
-        api::journeys::public_transport::DataFreshness,
         api::journeys::walk::WalkResponse,
         api::journeys::walk::WalkJourney,
         api::journeys::walk::Maneuver,
@@ -230,6 +228,16 @@ async fn run_http_server(
             .app_data(openapi_json.clone())
             // Tile proxy: no rate limiting (high request volume from map panning)
             .service(api::get_tile)
+            // OpenAPI spec: registered before the catch-all `scope("")` below,
+            // otherwise that empty-prefix scope shadows it and returns 404.
+            .route(
+                "/api-docs/openapi.json",
+                web::get().to(|spec: web::Data<String>| async move {
+                    actix_web::HttpResponse::Ok()
+                        .content_type("application/json")
+                        .body(spec.get_ref().clone())
+                }),
+            )
             // All other API endpoints: rate-limited
             .service(
                 web::scope("")
@@ -243,14 +251,6 @@ async fn run_http_server(
                     .service(api::get_metrics)
                     .service(api::get_validate)
                     .service(api::post_reload),
-            )
-            .route(
-                "/api-docs/openapi.json",
-                web::get().to(|spec: web::Data<String>| async move {
-                    actix_web::HttpResponse::Ok()
-                        .content_type("application/json")
-                        .body(spec.get_ref().clone())
-                }),
             )
     });
 

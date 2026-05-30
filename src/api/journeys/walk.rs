@@ -26,8 +26,6 @@ pub struct WalkQuery {
     pub to: String,
     /// Walking speed in km/h (Valhalla range: 0.5–25.5, default ≈ 5.1).
     pub walking_speed: Option<f64>,
-    /// Include turn-by-turn maneuvers in the response (default: false).
-    pub maneuvers: Option<bool>,
     /// Language for maneuver instructions (e.g. "fr-FR", "en-US").
     pub language: Option<String>,
     /// Enable wheelchair-accessible routing (avoid stairs, limit grade).
@@ -116,7 +114,7 @@ pub async fn get_walk(query: web::Query<WalkQuery>, config: web::Data<AppConfig>
         duration: trip.summary.time as u32,
         distance: (trip.summary.length * 1000.0) as u32,
         shape: leg.shape.clone(),
-        maneuvers: if query.maneuvers.unwrap_or(false) {
+        maneuvers: if config.routing.maneuvers {
             Some(convert_maneuvers(&leg.maneuvers))
         } else {
             None
@@ -279,7 +277,6 @@ mod tests {
             from: "2.3;48.8".into(),
             to: "2.4;48.9".into(),
             walking_speed: Some(4.5),
-            maneuvers: None,
             language: Some("fr-FR".into()),
             wheelchair: Some(false),
         };
@@ -300,7 +297,6 @@ mod tests {
             from: "2.3;48.8".into(),
             to: "2.4;48.9".into(),
             walking_speed: Some(8.0), // ignored when wheelchair is on
-            maneuvers: None,
             language: None,
             wheelchair: Some(true),
         };
@@ -356,6 +352,7 @@ mod tests {
         let mut cfg = unreachable_config();
         cfg.valhalla.host = host.into();
         cfg.valhalla.port = port_str.parse().unwrap();
+        cfg.routing.maneuvers = true; // maneuvers are now config-controlled
 
         let app = actix_web::test::init_service(
             actix_web::App::new()
@@ -364,7 +361,7 @@ mod tests {
         )
         .await;
         let req = actix_web::test::TestRequest::get()
-            .uri("/api/journeys/walk?from=2.3;48.8&to=2.4;48.9&maneuvers=true")
+            .uri("/api/journeys/walk?from=2.3;48.8&to=2.4;48.9")
             .to_request();
         let resp = actix_web::test::call_service(&app, req).await;
         assert_eq!(resp.status(), 200);
@@ -396,7 +393,6 @@ mod tests {
             from: "2.3;48.8".into(),
             to: "2.4;48.9".into(),
             walking_speed: Some(99.0), // outside Valhalla range
-            maneuvers: None,
             language: None,
             wheelchair: None,
         };
