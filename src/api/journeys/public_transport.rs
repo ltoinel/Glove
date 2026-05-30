@@ -95,6 +95,14 @@ pub struct JourneysQuery {
 
     /// Include turn-by-turn maneuvers in walking/transfer sections (default: false).
     pub maneuvers: Option<bool>,
+
+    /// Override `routing.diverse_lines`: when `true`, force each alternative to
+    /// depart on a different line (line-level diversity). Defaults to the config value.
+    pub diverse_lines: Option<bool>,
+
+    /// Override `routing.prefer_rail`: when `true`, rail/metro/tram/train journeys
+    /// are found first and buses only fill remaining slots. Defaults to config.
+    pub prefer_rail: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, ToSchema)]
@@ -178,11 +186,14 @@ pub async fn get_journeys(
     };
 
     let mut journeys = run_iterative_search(&raptor_data, &resolved);
-    journeys.sort_by_key(|j| j.duration);
 
     if !journeys.is_empty() {
         enrich_journeys(&mut journeys, &query, &config, &raptor_data, &resolved).await;
     }
+
+    // Sort by total duration AFTER enrichment: Valhalla first/last-mile walking
+    // adjusts each journey's duration, so sorting earlier leaves a stale order.
+    journeys.sort_by_key(|j| j.duration);
 
     tag_journeys(&mut journeys, resolved.wheelchair);
 
@@ -205,6 +216,8 @@ struct ResolvedQuery {
     requested: usize,
     wheelchair: bool,
     mode_excluded: rustc_hash::FxHashSet<usize>,
+    diverse_lines: bool,
+    prefer_rail: bool,
 }
 
 fn bad_request(id: &str, message: String) -> HttpResponse {
@@ -281,6 +294,8 @@ fn resolve_journey_query(
             .unwrap_or(config.routing.max_journeys),
         wheelchair: query.wheelchair.unwrap_or(false),
         mode_excluded,
+        diverse_lines: query.diverse_lines.unwrap_or(config.routing.diverse_lines),
+        prefer_rail: query.prefer_rail.unwrap_or(config.routing.prefer_rail),
     })
 }
 
@@ -321,17 +336,71 @@ fn shift_to_previous_day_if_early(date: String, departure_time: u32) -> (String,
 
 /// Iterative RAPTOR search with pattern exclusion for route diversity.
 ///
-/// Each iteration runs RAPTOR with the union of previously-used patterns
-/// excluded; this produces alternative routes rather than dominated copies
-/// of the same fastest path.
+/// Produces alternative routes rather than dominated copies of the fastest
+/// path. When `prefer_rail` is set, runs a first tier with buses forbidden so
+/// rail/metro/tram/train journeys are found first; buses then only fill the
+/// remaining slots (the final list is still sorted by duration by the caller).
 fn run_iterative_search(raptor_data: &RaptorData, q: &ResolvedQuery) -> Vec<Journey> {
     let mut journeys: Vec<Journey> = Vec::new();
     let mut excluded_patterns = q.mode_excluded.clone();
 
-    for _ in 0..q.requested {
-        if journeys.len() >= q.requested {
-            break;
-        }
+    // Line-level diversity: precompute route_id -> patterns so we can exclude a
+    // whole head line at once (see exclude_head_line). Only built when enabled.
+    let route_patterns = q
+        .diverse_lines
+        .then(|| build_route_pattern_index(raptor_data));
+    let route_patterns = route_patterns.as_ref();
+
+    if q.prefer_rail {
+        // Tier 1: rail only — forbid bus boarding so non-bus journeys are found
+        // first. The bus exclusion is per-query (not recorded for diversity), so
+        // the final tier below can re-allow buses.
+        let bus_patterns = compute_mode_exclusions(raptor_data, "bus");
+        collect_alternatives(
+            raptor_data,
+            q,
+            &bus_patterns,
+            route_patterns,
+            &mut journeys,
+            &mut excluded_patterns,
+        );
+    }
+
+    // Final tier: all modes allowed. Fills the remaining slots after the rail
+    // tier (or everything when prefer_rail is off). Diversity exclusions carry over.
+    let no_extra = rustc_hash::FxHashSet::default();
+    collect_alternatives(
+        raptor_data,
+        q,
+        &no_extra,
+        route_patterns,
+        &mut journeys,
+        &mut excluded_patterns,
+    );
+
+    journeys
+}
+
+/// Run RAPTOR iterations, accumulating diverse journeys until `q.requested` is
+/// reached or no new journey appears. `extra_forbidden` is unioned into each
+/// query's exclusion set *without* being recorded in `excluded_patterns`, so a
+/// later tier can re-allow those patterns while keeping diversity exclusions.
+fn collect_alternatives(
+    raptor_data: &RaptorData,
+    q: &ResolvedQuery,
+    extra_forbidden: &rustc_hash::FxHashSet<usize>,
+    route_patterns: Option<&rustc_hash::FxHashMap<&str, Vec<usize>>>,
+    journeys: &mut Vec<Journey>,
+    excluded_patterns: &mut rustc_hash::FxHashSet<usize>,
+) {
+    while journeys.len() < q.requested {
+        let query_excluded = if extra_forbidden.is_empty() {
+            excluded_patterns.clone()
+        } else {
+            let mut set = excluded_patterns.clone();
+            set.extend(extra_forbidden.iter().copied());
+            set
+        };
 
         let result = raptor::raptor_query(
             raptor_data,
@@ -339,7 +408,7 @@ fn run_iterative_search(raptor_data: &RaptorData, q: &ResolvedQuery) -> Vec<Jour
             q.effective_departure,
             &q.active,
             q.max_transfers,
-            &excluded_patterns,
+            &query_excluded,
             q.wheelchair,
         );
 
@@ -361,15 +430,44 @@ fn run_iterative_search(raptor_data: &RaptorData, q: &ResolvedQuery) -> Vec<Jour
                 journeys.push(journey);
             }
             excluded_patterns.extend(raptor::used_patterns(sections));
+            if let Some(route_patterns) = route_patterns {
+                exclude_head_line(raptor_data, sections, route_patterns, excluded_patterns);
+            }
         }
 
-        // Early termination: no new journeys found in this iteration
+        // Early termination: no new journeys found in this iteration.
         if journeys.len() == prev_count {
             break;
         }
     }
+}
 
-    journeys
+/// Map each GTFS `route_id` to all the pattern indices belonging to that line.
+/// A single line owns several patterns (branches, directions, short-turns), so
+/// this lets line-level diversity exclude the whole line in one step.
+fn build_route_pattern_index(data: &RaptorData) -> rustc_hash::FxHashMap<&str, Vec<usize>> {
+    let mut map: rustc_hash::FxHashMap<&str, Vec<usize>> = rustc_hash::FxHashMap::default();
+    for (idx, pattern) in data.patterns.iter().enumerate() {
+        map.entry(pattern.route_id.as_str()).or_default().push(idx);
+    }
+    map
+}
+
+/// Exclude every pattern of the journey's first public-transport line, so the
+/// next iteration is forced to depart on a different line.
+fn exclude_head_line(
+    data: &RaptorData,
+    sections: &[raptor::JourneySection],
+    route_patterns: &rustc_hash::FxHashMap<&str, Vec<usize>>,
+    excluded_patterns: &mut rustc_hash::FxHashSet<usize>,
+) {
+    let Some(head_pattern) = sections.iter().find_map(|s| s.pattern_idx) else {
+        return;
+    };
+    let route_id = data.patterns[head_pattern].route_id.as_str();
+    if let Some(patterns) = route_patterns.get(route_id) {
+        excluded_patterns.extend(patterns.iter().copied());
+    }
 }
 
 /// Run Valhalla enrichment passes (first/last mile, transfer shapes).
@@ -1170,7 +1268,8 @@ fn make_transfer_section(
 
 /// Compute quality tags for a sorted list of journeys.
 ///
-/// Tags: `fastest`, `least_transfers`, `least_walking`.
+/// Tags: `fastest`, `least_transfers`, `least_walking`, `least_waiting` (the
+/// journey with the least total platform waiting time).
 /// When `wheelchair` is true, also adds `most_accessible` to the journey
 /// with the best accessibility score (least walking + fewest transfers).
 /// If all journeys share a tag, only the first keeps it.
@@ -1194,6 +1293,18 @@ fn tag_journeys(journeys: &mut [Journey], wheelchair: bool) {
         .collect();
     let min_walking = walking_times.iter().copied().min().unwrap_or(0);
 
+    // Total platform waiting time = end-to-end duration minus the time spent in
+    // every section (vehicles + walking/transfers). The remainder is the time
+    // spent waiting at stops between sections.
+    let waiting_times: Vec<u32> = journeys
+        .iter()
+        .map(|j| {
+            let sections_total: u32 = j.sections.iter().map(|s| s.duration).sum();
+            j.duration.saturating_sub(sections_total)
+        })
+        .collect();
+    let min_waiting = waiting_times.iter().copied().min().unwrap_or(0);
+
     for (i, journey) in journeys.iter_mut().enumerate() {
         if journey.duration == min_duration {
             journey.tags.push("fastest".to_string());
@@ -1203,6 +1314,9 @@ fn tag_journeys(journeys: &mut [Journey], wheelchair: bool) {
         }
         if walking_times[i] == min_walking {
             journey.tags.push("least_walking".to_string());
+        }
+        if waiting_times[i] == min_waiting {
+            journey.tags.push("least_waiting".to_string());
         }
     }
 
@@ -1230,9 +1344,15 @@ fn tag_journeys(journeys: &mut [Journey], wheelchair: bool) {
             "least_transfers",
             "least_walking",
             "most_accessible",
+            "least_waiting",
         ]
     } else {
-        &["fastest", "least_transfers", "least_walking"]
+        &[
+            "fastest",
+            "least_transfers",
+            "least_walking",
+            "least_waiting",
+        ]
     };
     for tag in all_tags {
         let count = journeys
@@ -1349,6 +1469,62 @@ mod tests {
         Arc::new(raptor::RaptorData::build(gtfs_data, 120))
     }
 
+    fn pt_section(pattern_idx: Option<usize>) -> raptor::JourneySection {
+        raptor::JourneySection {
+            section_type: if pattern_idx.is_some() {
+                SectionType::PublicTransport
+            } else {
+                SectionType::Transfer
+            },
+            from_stop: 0,
+            to_stop: 1,
+            departure_time: 100,
+            arrival_time: 200,
+            pattern_idx,
+            trip_idx: pattern_idx.map(|_| 0),
+            board_pos: pattern_idx.map(|_| 0),
+            alight_pos: pattern_idx.map(|_| 1),
+        }
+    }
+
+    #[test]
+    fn build_route_pattern_index_groups_patterns_by_route() {
+        let data = make_test_raptor_data();
+        let index = build_route_pattern_index(&data);
+        // Every pattern must be reachable through its route_id.
+        let total: usize = index.values().map(|v| v.len()).sum();
+        assert_eq!(total, data.patterns.len());
+        let route_id = data.patterns[0].route_id.as_str();
+        assert!(index.get(route_id).unwrap().contains(&0));
+    }
+
+    #[test]
+    fn exclude_head_line_excludes_every_pattern_of_the_head_route() {
+        let data = make_test_raptor_data();
+        let index = build_route_pattern_index(&data);
+        let route_id = data.patterns[0].route_id.as_str();
+        let expected = index.get(route_id).unwrap().clone();
+
+        // A journey: transfer (no pattern) then a PT leg on pattern 0.
+        let sections = vec![pt_section(None), pt_section(Some(0))];
+        let mut excluded = rustc_hash::FxHashSet::default();
+        exclude_head_line(&data, &sections, &index, &mut excluded);
+
+        for p in expected {
+            assert!(excluded.contains(&p), "pattern {p} should be excluded");
+        }
+    }
+
+    #[test]
+    fn exclude_head_line_is_noop_without_a_pt_section() {
+        let data = make_test_raptor_data();
+        let index = build_route_pattern_index(&data);
+        let sections = vec![pt_section(None)]; // transfer only
+        let mut excluded = rustc_hash::FxHashSet::default();
+        exclude_head_line(&data, &sections, &index, &mut excluded);
+        assert!(excluded.is_empty());
+    }
+
     fn make_test_config() -> AppConfig {
         AppConfig::default()
     }
@@ -1423,6 +1599,47 @@ mod tests {
         assert!(journeys[0].tags.contains(&"fastest".to_string()));
         assert!(journeys[1].tags.contains(&"least_transfers".to_string()));
         assert!(journeys[1].tags.contains(&"least_walking".to_string()));
+    }
+
+    #[test]
+    fn tag_journeys_least_waiting() {
+        // Two journeys of equal total duration: the first spends all its time in
+        // sections (no platform wait), so it has the least waiting → "least_waiting".
+        let section = |dur: u32| Section {
+            section_type: "public_transport".into(),
+            from: make_place("S1"),
+            to: make_place("S3"),
+            departure_date_time: "20260406T081000".into(),
+            arrival_date_time: "20260406T082000".into(),
+            duration: dur,
+            display_informations: None,
+            stop_date_times: None,
+            shape: None,
+            distance: None,
+            maneuvers: None,
+            transfer_type: None,
+        };
+        let mut journeys = vec![
+            Journey {
+                departure_date_time: "20260406T080000".into(),
+                arrival_date_time: "20260406T082000".into(),
+                duration: 1200,
+                nb_transfers: 1,
+                tags: vec![],
+                sections: vec![section(1200)], // wait = 0
+            },
+            Journey {
+                departure_date_time: "20260406T080000".into(),
+                arrival_date_time: "20260406T082000".into(),
+                duration: 1200,
+                nb_transfers: 1,
+                tags: vec![],
+                sections: vec![section(700)], // wait = 500
+            },
+        ];
+        tag_journeys(&mut journeys, false);
+        assert!(journeys[0].tags.contains(&"least_waiting".to_string()));
+        assert!(!journeys[1].tags.contains(&"least_waiting".to_string()));
     }
 
     // -----------------------------------------------------------------------

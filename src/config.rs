@@ -204,6 +204,19 @@ pub struct RoutingConfig {
     /// Default: 1500 m (~20 min at 5 km/h).
     #[serde(default = "default_max_nearest_stop_distance")]
     pub max_nearest_stop_distance: u32,
+
+    /// Line-level diversity for alternatives. When `true`, the iterative search
+    /// excludes the whole head line (all patterns of its route) after each
+    /// journey, so successive alternatives depart on different lines instead of
+    /// re-using the fastest corridor. Default: `false` (pattern-level diversity).
+    #[serde(default = "default_diverse_lines")]
+    pub diverse_lines: bool,
+
+    /// Prefer rail over bus. When `true`, the search first finds journeys using
+    /// only rail/metro/tram/train (buses forbidden); buses then only fill the
+    /// remaining alternative slots. Default: `false`.
+    #[serde(default = "default_prefer_rail")]
+    pub prefer_rail: bool,
 }
 
 impl Default for RoutingConfig {
@@ -214,6 +227,8 @@ impl Default for RoutingConfig {
             default_transfer_time: default_transfer_time(),
             max_duration: default_max_duration(),
             max_nearest_stop_distance: default_max_nearest_stop_distance(),
+            diverse_lines: default_diverse_lines(),
+            prefer_rail: default_prefer_rail(),
         }
     }
 }
@@ -232,6 +247,12 @@ fn default_max_duration() -> u32 {
 }
 fn default_max_nearest_stop_distance() -> u32 {
     1500
+}
+fn default_diverse_lines() -> bool {
+    false
+}
+fn default_prefer_rail() -> bool {
+    false
 }
 
 // ---------------------------------------------------------------------------

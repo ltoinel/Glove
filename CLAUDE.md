@@ -70,7 +70,7 @@ Single-page app: vertical nav rail (56px) + sidebar (450px) + Leaflet map. Dark 
 - **All in-memory**: no database, GTFS loaded from CSV at startup
 - **Lock-free hot-reload**: `ArcSwap` swaps entire RAPTOR index atomically
 - **Pattern grouping**: trips with identical stop sequences share a pattern (memory + speed)
-- **Iterative diverse search**: runs RAPTOR multiple times with pattern exclusion for varied alternatives
+- **Iterative diverse search**: runs RAPTOR multiple times with pattern exclusion for varied alternatives. Optional `routing.diverse_lines` (or `?diverse_lines=true`) additionally excludes the whole head line between iterations so each alternative departs on a different line. Optional `routing.prefer_rail` (or `?prefer_rail=true`) runs a first tier with buses forbidden so rail journeys are found first, buses filling only remaining slots (`collect_alternatives` tiers in `run_iterative_search`)
 - **Tile caching proxy**: map tiles fetched from upstream once, cached to `data/tiles/` on disk
 - **Indoor-aware transfers**: Valhalla pedestrian routing with zero step/elevator penalties for intra-station walks
 - **After-midnight routing**: queries before 4h use previous day's GTFS services with +86400s offset

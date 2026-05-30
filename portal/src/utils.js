@@ -12,6 +12,29 @@ export function formatDuration(seconds) {
   return `${m} min`
 }
 
+// Parse an API datetime ("YYYYMMDDTHHmmss") into epoch milliseconds (UTC).
+// UTC keeps the value DST-agnostic, which is what we want for plain durations.
+export function parseApiDateTime(dt) {
+  if (!dt || dt.length < 15) return null
+  const y = +dt.slice(0, 4)
+  const mo = +dt.slice(4, 6)
+  const d = +dt.slice(6, 8)
+  const h = +dt.slice(9, 11)
+  const mi = +dt.slice(11, 13)
+  const s = +dt.slice(13, 15)
+  if ([y, mo, d, h, mi, s].some(Number.isNaN)) return null
+  return Date.UTC(y, mo - 1, d, h, mi, s)
+}
+
+// Seconds elapsed from `fromDt` to `toDt` (both "YYYYMMDDTHHmmss"), or null.
+// Used to surface platform waiting time before boarding a vehicle.
+export function secondsBetween(fromDt, toDt) {
+  const a = parseApiDateTime(fromDt)
+  const b = parseApiDateTime(toDt)
+  if (a == null || b == null) return null
+  return Math.round((b - a) / 1000)
+}
+
 export function toApiDatetime(val) {
   const clean = val.replace(/[-:]/g, '')
   const tIdx = clean.indexOf('T')

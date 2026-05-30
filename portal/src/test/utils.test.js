@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { formatTime, formatDuration, toApiDatetime, decodePolyline, modeColor } from '../utils.js'
+import { formatTime, formatDuration, secondsBetween, parseApiDateTime, toApiDatetime, decodePolyline, modeColor } from '../utils.js'
 
 describe('formatTime', () => {
   it('formats a valid datetime string', () => {
@@ -13,6 +13,30 @@ describe('formatTime', () => {
   })
   it('returns --:-- for undefined', () => {
     expect(formatTime(undefined)).toBe('--:--')
+  })
+})
+
+describe('parseApiDateTime', () => {
+  it('parses a valid datetime to UTC epoch ms', () => {
+    expect(parseApiDateTime('20260530T180300')).toBe(Date.UTC(2026, 4, 30, 18, 3, 0))
+  })
+  it('returns null for short or null input', () => {
+    expect(parseApiDateTime('20260530')).toBeNull()
+    expect(parseApiDateTime(null)).toBeNull()
+  })
+})
+
+describe('secondsBetween', () => {
+  it('computes a positive platform wait', () => {
+    // arrival 18:03:00 → next departure 18:07:49 = 289 s
+    expect(secondsBetween('20260530T180300', '20260530T180749')).toBe(289)
+  })
+  it('returns 0 for contiguous sections', () => {
+    expect(secondsBetween('20260530T180300', '20260530T180300')).toBe(0)
+  })
+  it('returns null when either timestamp is invalid', () => {
+    expect(secondsBetween('bad', '20260530T180300')).toBeNull()
+    expect(secondsBetween('20260530T180300', null)).toBeNull()
   })
 })
 

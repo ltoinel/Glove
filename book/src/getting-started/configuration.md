@@ -59,6 +59,8 @@ routing:
   default_transfer_time: 120    # seconds
   max_duration: 10800           # 3 hours in seconds
   max_nearest_stop_distance: 1500  # meters (~20 min walk at 5 km/h)
+  diverse_lines: false          # one line per alternative (line-level diversity)
+  prefer_rail: false            # rail found first, bus only fills remaining slots
 ```
 
 | Setting | Description | Default |
@@ -68,6 +70,8 @@ routing:
 | `default_transfer_time` | Default walking time between stops (seconds) | `120` |
 | `max_duration` | Maximum total journey duration (seconds) | `10800` (3h) |
 | `max_nearest_stop_distance` | Maximum distance to nearest stops (meters) | `1500` |
+| `diverse_lines` | Force each alternative to depart on a **different line** (excludes the whole head line between iterations, not just the used pattern). Surfaces slower-but-distinct lines instead of variants of the same fast corridor. Can be overridden per request with `?diverse_lines=true`. | `false` |
+| `prefer_rail` | Find rail/metro/tram/train journeys **first** (buses forbidden in a first search tier); buses then only fill the remaining alternative slots. The final list is still sorted by duration. Can be overridden per request with `?prefer_rail=true`. | `false` |
 
 ## Valhalla
 

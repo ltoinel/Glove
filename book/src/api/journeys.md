@@ -17,6 +17,8 @@ GET /api/journeys/public_transport
 | `maneuvers` | bool | No | Include turn-by-turn maneuvers in response (default: `false`). When absent, maneuvers are omitted and transfer Valhalla enrichment is skipped |
 | `wheelchair` | bool | No | Enable wheelchair-accessible routing (default: `false`). Avoids stairs, limits slope, prefers elevators. Adds `most_accessible` journey tag |
 | `forbidden_modes` | string | No | Comma-separated commercial modes to exclude (e.g. `metro,bus,rail`) |
+| `diverse_lines` | bool | No | Force each alternative to depart on a different line (overrides `routing.diverse_lines`). Default: config value |
+| `prefer_rail` | bool | No | Find rail/metro/tram/train journeys first; buses only fill remaining slots (overrides `routing.prefer_rail`). Default: config value |
 | `forbidden_uris[]` | string | No | Route IDs to exclude from routing |
 | `walking_speed` | float | No | Walking speed override in m/s (default: ~1.12 m/s = 4 km/h) |
 | `max_nb_transfers` | int | No | Maximum number of transfers allowed |
@@ -105,6 +107,7 @@ Each journey may have one or more tags:
 - `fastest` — Shortest total duration
 - `least_transfers` — Fewest number of transfers
 - `least_walking` — Least total walking time, including both street_network sections (first/last mile) and transfer durations
+- `least_waiting` — Least total platform waiting time (end-to-end duration minus time spent in sections)
 - `most_accessible` — *(wheelchair mode only)* Least walking + fewest transfers, best for wheelchair users
 
 ### Maneuvers

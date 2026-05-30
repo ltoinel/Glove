@@ -1,8 +1,9 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, Fragment } from 'react'
 import {
   Typography, Paper, TextField, Button, Slider, Checkbox, FormControlLabel, Switch,
   Box, Card, CardContent, CardActionArea, Chip, Collapse, Alert, LinearProgress,
   CircularProgress, Divider, Stack, IconButton, Tooltip, Autocomplete, alpha,
+  Menu, MenuItem, ListItemIcon, ListItemText,
 } from '@mui/material'
 import {
   Search, SwapVert, DirectionsBus, Train, Tram, Subway,
@@ -17,7 +18,7 @@ import {
 } from '@mui/icons-material'
 import SwaggerUI from 'swagger-ui-react'
 import 'swagger-ui-react/swagger-ui.css'
-import { MapContainer, TileLayer, Polyline, CircleMarker, Marker, Tooltip as LTooltip, useMap } from 'react-leaflet'
+import { MapContainer, TileLayer, Polyline, CircleMarker, Marker, Tooltip as LTooltip, useMap, useMapEvents } from 'react-leaflet'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import { LocalizationProvider } from '@mui/x-date-pickers/LocalizationProvider'
@@ -27,7 +28,7 @@ import { TimePicker } from '@mui/x-date-pickers/TimePicker'
 import dayjs from 'dayjs'
 import 'dayjs/locale/fr'
 import { useI18n } from './i18n.jsx'
-import { formatTime, formatDuration, toApiDatetime, decodePolyline, modeColor } from './utils.js'
+import { formatTime, formatDuration, secondsBetween, toApiDatetime, decodePolyline, modeColor } from './utils.js'
 
 // Origin marker — pulsing radar dot
 const originIcon = L.divIcon({
@@ -307,17 +308,60 @@ function PlaceAutocomplete({ label, value, onChange, icon, placeholder }) {
 
 function FitBounds({ bounds }) {
   const map = useMap()
+  // `bounds` is a fresh array on every parent render. Guard on its content so we
+  // only refit when it actually changes — otherwise unrelated re-renders (e.g.
+  // opening the map context menu) would re-zoom the map.
+  const lastKey = useRef(null)
   useEffect(() => {
-    if (bounds && bounds.length >= 2) map.fitBounds(bounds, { padding: [60, 60], maxZoom: 15 })
+    if (!bounds || bounds.length < 2) return
+    const key = `${bounds.length}|${bounds[0]}|${bounds[bounds.length - 1]}`
+    if (key === lastKey.current) return
+    lastKey.current = key
+    map.fitBounds(bounds, { padding: [60, 60], maxZoom: 15 })
   }, [map, bounds])
   return null
 }
 
 function FlyToPoint({ point }) {
   const map = useMap()
+  // Same guard as FitBounds: only fly when the target coordinates change, not on
+  // every re-render (the `point` array reference changes each render).
+  const lastKey = useRef(null)
   useEffect(() => {
-    if (point) map.flyTo(point, 14, { duration: 0.8 })
+    if (!point) return
+    const key = `${point[0]}|${point[1]}`
+    if (key === lastKey.current) return
+    lastKey.current = key
+    map.flyTo(point, 14, { duration: 0.8 })
   }, [map, point])
+  return null
+}
+
+// Build a place object from raw map coordinates, matching the shape returned by
+// /api/places (id "lon;lat", coord) so it flows through search and markers.
+function mapPointPlace(lat, lon) {
+  return {
+    id: `${lon};${lat}`,
+    name: `${lat.toFixed(5)}, ${lon.toFixed(5)}`,
+    type: 'coordinate',
+    coord: { lat, lon },
+  }
+}
+
+// Captures right-click (contextmenu) on the map and reports the screen position
+// + geo coordinates so the parent can open a "start/arrive here" menu.
+function MapContextMenu({ onOpen }) {
+  useMapEvents({
+    contextmenu(e) {
+      e.originalEvent.preventDefault()
+      onOpen({
+        x: e.originalEvent.clientX,
+        y: e.originalEvent.clientY,
+        lat: e.latlng.lat,
+        lon: e.latlng.lng,
+      })
+    },
+  })
   return null
 }
 
@@ -340,13 +384,13 @@ function extractMapData(journey) {
       collectIndoorMarkers(section, coords, indoorMarkers)
       continue
     }
-    // Transfer walking legs — all green, indoor dashed, outdoor solid
+    // Transfer walking legs — drawn solid green (color distinguishes them from
+    // the transit lines; no dashes so the route reads as one continuous trace).
     if (section.type === 'transfer') {
-      const isIndoor = section.transfer_type === 'indoor'
       const transferColor = '#4caf50'
       if (section.shape) {
         const coords = decodePolyline(section.shape)
-        if (coords.length >= 2) lines.push({ coords, color: transferColor, dashed: isIndoor })
+        if (coords.length >= 2) lines.push({ coords, color: transferColor, dashed: false })
         collectIndoorMarkers(section, coords, indoorMarkers)
       } else {
         const fromCoord = section.from?.stop_point?.coord
@@ -354,7 +398,7 @@ function extractMapData(journey) {
         if (fromCoord && toCoord) {
           lines.push({
             coords: [[fromCoord.lat, fromCoord.lon], [toCoord.lat, toCoord.lon]],
-            color: '#1a1a2e', dashed: true,
+            color: transferColor, dashed: false,
           })
         }
       }
@@ -421,6 +465,7 @@ const TAG_COLORS = {
   least_transfers: '#ffb800',
   least_walking: '#b388ff',
   most_accessible: '#4caf50',
+  least_waiting: '#26a69a',
 }
 
 function JourneyCard({ journey, selected, onSelect, animDelay }) {
@@ -539,8 +584,22 @@ function JourneyCard({ journey, selected, onSelect, animDelay }) {
             const lineColor = isPt
               ? modeColor(di?.commercial_mode, di?.color)
               : isTransfer ? '#4caf50' : '#90a4ae'
+            // Platform wait before boarding = vehicle departure − arrival at the
+            // stop (end of the previous walk/transfer/leg). Only meaningful for PT.
+            const prevArrival = journey.sections[i - 1]?.arrival_date_time ?? journey.departure_date_time
+            const waitSecs = isPt ? secondsBetween(prevArrival, s.departure_date_time) : null
+            const showWait = waitSecs != null && waitSecs >= 60
             return (
-              <Box key={i} sx={{
+              <Fragment key={i}>
+              {showWait && (
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, pl: '52px', py: 0.25 }}>
+                  <AccessTime sx={{ fontSize: 12, color: 'text.disabled' }} />
+                  <Typography variant="caption" sx={{ fontSize: 11, color: 'text.disabled', fontStyle: 'italic' }}>
+                    {t('waiting')} {formatDuration(waitSecs)}
+                  </Typography>
+                </Box>
+              )}
+              <Box sx={{
                 display: 'flex', gap: 1.5, py: 1,
                 borderBottom: i < journey.sections.length - 1 ? '1px solid' : 'none',
                 borderColor: 'rgba(255,255,255,0.04)',
@@ -583,6 +642,7 @@ function JourneyCard({ journey, selected, onSelect, animDelay }) {
                   {formatDuration(s.duration)}
                 </Typography>
               </Box>
+              </Fragment>
             )
           })}
         </Box>
@@ -1459,6 +1519,18 @@ export default function App() {
   const handleToChange = useCallback((v) => { setTo(v); clearResults() }, [clearResults])
   const swap = useCallback(() => { const tmp = from; setFrom(to); setTo(tmp); clearResults() }, [from, to, clearResults])
 
+  // Right-click map context menu: { x, y, lat, lon } | null
+  const [mapMenu, setMapMenu] = useState(null)
+  const closeMapMenu = useCallback(() => setMapMenu(null), [])
+  const pickMapOrigin = useCallback(() => {
+    if (mapMenu) { setFrom(mapPointPlace(mapMenu.lat, mapMenu.lon)); clearResults() }
+    setMapMenu(null)
+  }, [mapMenu, clearResults])
+  const pickMapDestination = useCallback(() => {
+    if (mapMenu) { setTo(mapPointPlace(mapMenu.lat, mapMenu.lon)); clearResults() }
+    setMapMenu(null)
+  }, [mapMenu, clearResults])
+
   const search = async (e) => {
     e.preventDefault()
     if (!from || !to) return
@@ -2007,7 +2079,7 @@ export default function App() {
                   <Box sx={{ display: 'flex', gap: 0.75, mb: 1.5 }}>
                     {[
                       { key: 'pt', icon: <DirectionsBus sx={{ fontSize: 18 }} />, label: t('tabPublicTransport'),
-                        duration: journeys?.[0]?.duration, disabled: false },
+                        duration: journeys?.length ? Math.min(...journeys.map(j => j.duration)) : undefined, disabled: false },
                       { key: 'walk', icon: <DirectionsWalk sx={{ fontSize: 18 }} />, label: t('tabWalk'),
                         duration: walkJourney?.duration, disabled: false },
                       { key: 'bike', icon: <DirectionsBike sx={{ fontSize: 18 }} />, label: t('tabBike'),
@@ -2129,6 +2201,7 @@ export default function App() {
 
           {fitBounds && <FitBounds bounds={fitBounds} />}
           {flyTo && <FlyToPoint point={flyTo} />}
+          <MapContextMenu onOpen={setMapMenu} />
 
           {fromPos && toPos && !hasResults && (
             <Polyline positions={[fromPos, toPos]}
@@ -2206,6 +2279,23 @@ export default function App() {
             </Marker>
           )}
         </MapContainer>
+
+        {/* Right-click menu: set this point as origin or destination */}
+        <Menu
+          open={Boolean(mapMenu)}
+          onClose={closeMapMenu}
+          anchorReference="anchorPosition"
+          anchorPosition={mapMenu ? { top: mapMenu.y, left: mapMenu.x } : undefined}
+        >
+          <MenuItem onClick={pickMapOrigin}>
+            <ListItemIcon><PlayArrow sx={{ fontSize: 18, color: '#00e676' }} /></ListItemIcon>
+            <ListItemText>{t('startFromHere')}</ListItemText>
+          </MenuItem>
+          <MenuItem onClick={pickMapDestination}>
+            <ListItemIcon><Place sx={{ fontSize: 18, color: '#ff5252' }} /></ListItemIcon>
+            <ListItemText>{t('arriveHere')}</ListItemText>
+          </MenuItem>
+        </Menu>
       </Box>
     </Box>
     </LocalizationProvider>
