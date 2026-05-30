@@ -836,6 +836,10 @@ struct RaptorBuffers {
     route_earliest: Vec<usize>,
     active_routes: Vec<usize>,
     trip_improved: Vec<usize>,
+    /// Upper bound on useful arrival times: `min(departure + max_duration,
+    /// best arrival at any target)`. Relaxations at or beyond it are skipped
+    /// (target + max-duration pruning). `INFINITY` disables pruning.
+    cutoff: u32,
 }
 
 impl RaptorBuffers {
@@ -849,6 +853,7 @@ impl RaptorBuffers {
             route_earliest: vec![usize::MAX; num_patterns],
             active_routes: Vec::with_capacity(num_patterns),
             trip_improved: Vec::new(),
+            cutoff: INFINITY,
         }
     }
 }
@@ -863,6 +868,9 @@ impl RaptorBuffers {
 /// - `max_transfers`: maximum number of vehicle changes allowed
 /// - `excluded_patterns`: patterns to skip (used for diverse route alternatives)
 /// - `wheelchair`: when `true`, skip stops with `wheelchair_boarding == 2`
+/// Unbounded RAPTOR query (no target / max-duration pruning). Only used by
+/// tests; production goes through [`raptor_query_bounded`].
+#[cfg(test)]
 pub fn raptor_query(
     data: &RaptorData,
     sources: &[(usize, u32)],
@@ -872,10 +880,52 @@ pub fn raptor_query(
     excluded_patterns: &FxHashSet<usize>,
     wheelchair: bool,
 ) -> RaptorResult {
+    // Unbounded variant: explore the full Pareto frontier (no target / duration
+    // pruning). Kept for callers that need every reachable stop.
+    raptor_query_bounded(
+        data,
+        sources,
+        departure_time,
+        active,
+        max_transfers,
+        excluded_patterns,
+        wheelchair,
+        &[],
+        INFINITY,
+    )
+}
+
+/// Like [`raptor_query`], but prunes the search to arrivals that could still
+/// improve the journey to one of `targets` within `max_duration` seconds.
+///
+/// `targets` are `(stop_idx, walking_time_to_destination)` pairs; the bound is
+/// `min(departure + max_duration, best target arrival + its walk)`. Because
+/// arrival times along a pattern are monotonic, scanning a pattern stops as
+/// soon as it passes the bound. Pass `targets = &[]` and `max_duration =
+/// INFINITY` to disable pruning entirely.
+#[allow(clippy::too_many_arguments)]
+pub fn raptor_query_bounded(
+    data: &RaptorData,
+    sources: &[(usize, u32)],
+    departure_time: u32,
+    active: &[bool],
+    max_transfers: usize,
+    excluded_patterns: &FxHashSet<usize>,
+    wheelchair: bool,
+    targets: &[(usize, u32)],
+    max_duration: u32,
+) -> RaptorResult {
     let n = data.stops.len();
     let rounds = max_transfers.min(MAX_ROUNDS - 1) + 1;
 
+    // Inclusive horizon: a journey arriving exactly at departure + max_duration
+    // is still valid (the post-filter keeps `duration <= max_duration`).
+    let horizon = departure_time
+        .saturating_add(max_duration)
+        .saturating_add(1);
+
     let mut buf = RaptorBuffers::new(n, data.patterns.len(), rounds);
+    buf.cutoff = horizon;
     init_source_stops(data, sources, departure_time, &mut buf);
 
     for k in 1..=rounds {
@@ -885,6 +935,10 @@ pub fn raptor_query(
 
         scan_active_routes(data, k, active, wheelchair, &mut buf);
         apply_transfers_after_trips(data, k, &mut buf);
+
+        // Tighten the bound: once a target is reached, no relaxation arriving
+        // later than the best target arrival can ever improve the result.
+        buf.cutoff = target_cutoff(targets, horizon, &buf.best);
 
         std::mem::swap(&mut buf.marked, &mut buf.new_marked);
         if !buf.marked.iter().any(|&m| m) {
@@ -898,6 +952,18 @@ pub fn raptor_query(
         labels: buf.labels,
         sources: source_set,
     }
+}
+
+/// Smallest of `horizon` and the best arrival at any target (plus its walk).
+fn target_cutoff(targets: &[(usize, u32)], horizon: u32, best: &[u32]) -> u32 {
+    let mut bound = horizon;
+    for &(stop, walk) in targets {
+        let arr = best[stop].saturating_add(walk);
+        if arr < bound {
+            bound = arr;
+        }
+    }
+    bound
 }
 
 /// Initialize source stops with their walking-time offset and apply initial
@@ -1021,7 +1087,11 @@ fn scan_pattern(
             continue;
         }
         let arr = pattern.trips[trip_idx].stop_times[pos].0;
-        if arr < buf.best[stop_idx] {
+        // Target / max-duration pruning: skip stops that can no longer improve
+        // the journey to a target. We must NOT `break` here — a later stop may
+        // re-board an earlier trip and bring the arrival back under the bound —
+        // so we only skip the relaxation (and thus the marking + transfers).
+        if arr < buf.best[stop_idx] && arr < buf.cutoff {
             buf.tau[k][stop_idx] = arr;
             buf.best[stop_idx] = arr;
             buf.labels[k][stop_idx] = Some(Label::Trip {
@@ -1043,7 +1113,7 @@ fn apply_transfers_after_trips(data: &RaptorData, k: usize, buf: &mut RaptorBuff
         let stop_idx = buf.trip_improved[i];
         for &(to_stop, duration) in &data.stop_transfers[stop_idx] {
             let arr = buf.tau[k][stop_idx].saturating_add(duration);
-            if arr < buf.best[to_stop] {
+            if arr < buf.best[to_stop] && arr < buf.cutoff {
                 buf.tau[k][to_stop] = arr;
                 buf.best[to_stop] = arr;
                 buf.labels[k][to_stop] = Some(Label::Transfer {

@@ -323,7 +323,7 @@ fn collect_alternatives(
             set
         };
 
-        let result = raptor::raptor_query(
+        let result = raptor::raptor_query_bounded(
             raptor_data,
             &q.sources,
             q.effective_departure,
@@ -331,6 +331,8 @@ fn collect_alternatives(
             q.max_transfers,
             &query_excluded,
             q.wheelchair,
+            &q.targets,
+            q.max_duration,
         );
 
         let section_sets = raptor::reconstruct_journeys(raptor_data, &result, &q.targets);
