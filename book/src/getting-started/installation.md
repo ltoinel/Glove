@@ -40,11 +40,18 @@ This creates a Docker container named `valhalla` that builds routing tiles from 
 
 ### Production Mode
 
+Build and run are separated so restarts are instant:
+
 ```bash
-bin/start.sh
+bin/build.sh    # Build the release backend binary + portal SPA (run after code changes)
+bin/start.sh    # Run only — auto-runs build.sh on the first launch if artifacts are missing
 ```
 
-This builds the Rust backend in release mode, builds the React frontend, and starts the server on port **8080**.
+`start.sh` launches **two separate processes**: the Actix API on port **8080** and the frontend (`vite preview`) on port **3000**. The frontend proxies `/api` requests to the backend, so you access the app at **http://localhost:3000**.
+
+```admonish note
+`vite preview` is fine for local/self-hosted use, but it is not a hardened production web server. For real production, use the [Docker](./docker.md) setup (nginx-served portal) behind a TLS reverse proxy.
+```
 
 ### Development Mode
 
@@ -70,7 +77,6 @@ cd portal && npm install && npm run dev
 
 | Service | URL |
 |---------|-----|
-| Portal (production) | [http://localhost:8080](http://localhost:8080) |
-| Portal (dev mode) | [http://localhost:3000](http://localhost:3000) |
+| Portal (production & dev) | [http://localhost:3000](http://localhost:3000) |
 | API | [http://localhost:8080/api](http://localhost:8080/api) |
 | OpenAPI spec | [http://localhost:8080/api-docs/openapi.json](http://localhost:8080/api-docs/openapi.json) |

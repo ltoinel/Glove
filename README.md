@@ -44,12 +44,13 @@ Glove loads GTFS data into memory, builds a RAPTOR index, and exposes a REST API
 ```bash
 bin/download.sh all      # Download GTFS, OSM and BAN data
 bin/valhalla.sh          # Start Valhalla (optional, for walk/bike/car)
-bin/start.sh             # Production: builds and starts everything
+bin/build.sh             # Build release artifacts (backend + portal)
+bin/start.sh             # Production: run (auto-builds on first run)
 bin/start.sh --dev       # Dev: cargo-watch + Vite HMR
 ```
 
-- **Portal**: [http://localhost:8080](http://localhost:8080) (production) / [http://localhost:3000](http://localhost:3000) (dev)
-- **API**: [http://localhost:8080/api](http://localhost:8080/api)
+- **Portal**: [http://localhost:3000](http://localhost:3000) (served by the frontend process in both production and dev)
+- **API**: [http://localhost:8080/api](http://localhost:8080/api) (Actix backend; the portal proxies `/api` to it)
 
 ## Documentation
 

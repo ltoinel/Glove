@@ -78,24 +78,25 @@ else
     # --- PROD MODE ---
     log "Starting in PROD mode..."
 
-    # Build backend
-    log "Building backend..."
-    cargo build --release --quiet
-    ok "Backend built."
-
-    # Install & build frontend
-    log "Building frontend..."
-    (cd "$ROOT/portal" && npm install --silent && npx vite build --outDir "$ROOT/target/portal" --emptyOutDir)
-    ok "Frontend built."
+    # Artifacts are produced by bin/build.sh. Build once if they are missing so
+    # the first run works out of the box; otherwise start is instant.
+    if [ ! -x "$ROOT/target/release/glove" ] || [ ! -f "$ROOT/target/portal/index.html" ]; then
+        log "Build artifacts missing — running bin/build.sh..."
+        "$ROOT/bin/build.sh"
+    else
+        ok "Using existing build artifacts (run bin/build.sh to rebuild)."
+    fi
 
     # Start backend
     log "Starting backend..."
     "$ROOT/target/release/glove" &
     BACKEND_PID=$!
 
-    # Start frontend static server
+    # Start frontend static server. We use `vite preview` (not a plain static
+    # server) so that /api requests are proxied to the backend, exactly like the
+    # dev server. Otherwise the static server would answer /api with index.html.
     log "Starting frontend..."
-    npx serve "$ROOT/target/portal" -l 3000 -s &
+    (cd "$ROOT/portal" && npx vite preview --outDir "$ROOT/target/portal" --port 3000 --host) &
     FRONTEND_PID=$!
 
     # Wait for backend to be ready

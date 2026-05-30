@@ -1,32 +1,45 @@
 # Docker
 
-Glove provides a multi-stage Dockerfile for containerized deployment.
+Glove ships **two separate images** — the backend (REST API) and the frontend (portal) — mirroring the two-process design used by `bin/start.sh`. The portal serves the static SPA with nginx and proxies `/api` requests to the backend, so the two stay fully decoupled.
 
-## Build the Image
+| Image | Dockerfile | Serves | Port |
+|-------|-----------|--------|------|
+| Backend (API) | `docker/Dockerfile` | Actix REST API | 8080 |
+| Portal | `docker/Dockerfile.portal` | React SPA + `/api` proxy (nginx) | 80 |
+
+## Build the Images
 
 ```bash
-docker build -f docker/Dockerfile -t glove .
+docker build -f docker/Dockerfile        -t glove-api    .
+docker build -f docker/Dockerfile.portal -t glove-portal .
 ```
 
-The build uses three stages:
+The backend image builds the Rust binary on `rust:1.87` and runs it on a minimal `debian:bookworm-slim` runtime. The portal image builds the SPA on `node:20-alpine` and serves it with `nginx:1.27-alpine`.
 
-1. **Node.js** (node:20-alpine) — builds the React frontend with Vite
-2. **Rust** (rust:1.87) — compiles the backend in release mode
-3. **Runtime** (debian:bookworm-slim) — minimal image with just the binary and static files
+```admonish note
+Both processes are separate. The backend exposes **only** the API on port 8080 — it does not serve any static files. The portal (port 80) is what users open in their browser, and it forwards `/api` to the backend.
+```
 
 ## Run
 
+The portal needs to reach the backend by name, so run both on a shared Docker network (Compose does this for you — see below). Manually:
+
 ```bash
-docker run -d \
-  --name glove \
+docker network create glove-net
+
+docker run -d --name api --network glove-net \
   -p 8080:8080 \
   -v $(pwd)/data:/app/data \
   -v $(pwd)/config.yaml:/app/config.yaml \
-  glove
+  glove-api
+
+docker run -d --name portal --network glove-net \
+  -p 3000:80 \
+  glove-portal
 ```
 
-The container:
-- Exposes port **8080**
+Then open **http://localhost:3000**. The backend:
+- Exposes port **8080** (API only)
 - Needs the `data/` directory mounted with GTFS data
 - Needs `config.yaml` mounted for configuration
 - Includes a healthcheck on `GET /api/status`
@@ -60,9 +73,8 @@ valhalla:
 ## Docker Compose (Example)
 
 ```yaml
-version: "3.8"
 services:
-  glove:
+  api:
     build:
       context: .
       dockerfile: docker/Dockerfile
@@ -74,6 +86,15 @@ services:
     depends_on:
       - valhalla
 
+  portal:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.portal
+    ports:
+      - "3000:80"
+    depends_on:
+      - api
+
   valhalla:
     image: ghcr.io/valhalla/valhalla:latest
     ports:
@@ -81,6 +102,8 @@ services:
     volumes:
       - ./data/osm:/custom_files
 ```
+
+The portal's nginx config (`docker/nginx.conf`) proxies `/api` to the `api` service over the Compose network. Open **http://localhost:3000** to use the app.
 
 ```admonish warning
 Adjust `valhalla.host` in `config.yaml` to `valhalla` (the service name) when using Docker Compose networking.

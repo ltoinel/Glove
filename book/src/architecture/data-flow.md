@@ -46,7 +46,7 @@
   <!-- Actix -->
   <rect x="150" y="400" width="260" height="50" rx="10" fill="url(#gg)" stroke="#00e676" stroke-opacity="0.4" stroke-width="1.5"/>
   <text x="280" y="422" text-anchor="middle" fill="#00e676" font-size="13" font-weight="700">Start Actix-web</text>
-  <text x="280" y="440" text-anchor="middle" fill="#8b89a0" font-size="10">Serve API + SPA</text>
+  <text x="280" y="440" text-anchor="middle" fill="#8b89a0" font-size="10">Serve REST API (port 8080)</text>
 </svg>
 
 ## GTFS Data Model

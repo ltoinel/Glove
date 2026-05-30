@@ -31,7 +31,8 @@ npx eslint src/              # Lint (CI enforced)
 ```bash
 bin/download.sh              # Download GTFS + OSM data (reads config.yaml)
 bin/valhalla.sh              # Start Valhalla Docker container (port 8002)
-bin/start.sh                 # Production: builds and starts everything
+bin/build.sh                 # Build release artifacts: backend binary + portal SPA
+bin/start.sh                 # Production: run only (auto-runs build.sh if artifacts missing)
 bin/start.sh --dev           # Dev: cargo-watch + Vite HMR
 ```
 
@@ -47,7 +48,7 @@ Core of the application. Round-based public transit routing with:
 ### Data Flow
 1. `src/main.rs` loads config (`src/config.rs`) and GTFS CSVs (`src/gtfs.rs`)
 2. Builds `RaptorData` index, wraps in `ArcSwap` for lock-free hot-reload
-3. Actix-web serves API + static frontend files
+3. Actix-web serves the REST API only (port 8080). The React portal runs as a **separate process** — Vite dev server in dev, `vite preview` in prod (port 3000) — and proxies `/api` to the backend (`portal/vite.config.js`)
 
 ### API Endpoints
 - `GET /api/journeys/public_transport` — RAPTOR journey planning

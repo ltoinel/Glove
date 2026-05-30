@@ -1,25 +1,20 @@
-# Stage 1: Build frontend
-FROM node:20-alpine AS frontend
-WORKDIR /app/portal
-COPY portal/package.json portal/package-lock.json* ./
-RUN npm ci --silent
-COPY portal/ ./
-RUN npx vite build --outDir /app/portal-dist --emptyOutDir
+# Glove backend (REST API) image.
+# The React portal is built and served by a SEPARATE image (docker/Dockerfile.portal),
+# which proxies /api requests to this backend. The two processes stay fully decoupled.
 
-# Stage 2: Build backend
+# Stage 1: Build backend
 FROM rust:1.87-bookworm AS backend
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src/ src/
 RUN cargo build --release
 
-# Stage 3: Runtime
+# Stage 2: Runtime
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY --from=backend /app/target/release/glove /app/glove
-COPY --from=frontend /app/portal-dist /app/target/portal
 COPY config.yaml /app/config.yaml
 
 EXPOSE 8080

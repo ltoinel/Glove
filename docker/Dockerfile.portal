@@ -1,0 +1,21 @@
+# Glove frontend (portal) image.
+# Builds the React SPA with Vite and serves it with nginx, proxying /api to the
+# backend container. This keeps the frontend a separate process from the API.
+
+# Stage 1: Build the SPA
+FROM node:20-alpine AS build
+WORKDIR /app/portal
+COPY portal/package.json portal/package-lock.json* ./
+RUN npm ci --silent
+COPY portal/ ./
+RUN npx vite build --outDir /app/portal-dist --emptyOutDir
+
+# Stage 2: Serve with nginx
+FROM nginx:1.27-alpine
+COPY docker/nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=build /app/portal-dist /usr/share/nginx/html
+
+EXPOSE 80
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget -q -O /dev/null http://localhost/ || exit 1
