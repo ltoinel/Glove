@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, Fragment } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo, lazy, Suspense, Fragment } from 'react'
 import {
   Typography, Paper, TextField, Button, Slider, Checkbox, FormControlLabel, Switch,
   Box, Card, CardContent, CardActionArea, Chip, Collapse, Alert, LinearProgress,
@@ -15,9 +15,8 @@ import {
   RoundaboutLeft, Flag, MyLocation, ForkLeft, ForkRight, MergeType,
   Commute, Tune, CheckCircle, Error as ErrorIcon, Warning as WarningIcon,
   Info as InfoIcon, ArrowBack, PlayArrow, FilterList, FactCheck, Accessible,
+  Traffic,
 } from '@mui/icons-material'
-import SwaggerUI from 'swagger-ui-react'
-import 'swagger-ui-react/swagger-ui.css'
 import { MapContainer, TileLayer, Polyline, CircleMarker, Marker, Tooltip as LTooltip, useMap, useMapEvents } from 'react-leaflet'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
@@ -363,6 +362,138 @@ function MapContextMenu({ onOpen }) {
     },
   })
   return null
+}
+
+// --- Road traffic overlay (GET /api/traffic) ---
+
+// The backend polls the upstream feed every minute; matching that here keeps the
+// overlay fresh without hammering the API.
+const TRAFFIC_REFRESH_MS = 60000
+
+const TRAFFIC_STATE_COLORS = { fluid: '#2e7d32', jam: '#ff5252', closed: '#ab47bc' }
+const TRAFFIC_STATE_LABELS = { fluid: 'trafficFluid', jam: 'trafficJam', closed: 'trafficClosed' }
+const TRAFFIC_EVENT_COLORS = {
+  roadwork: '#ffb800', accident: '#ff5252', jam: '#ff8a65', weather: '#4fc3f7', event: '#b0bec5',
+}
+const TRAFFIC_EVENT_LABELS = {
+  roadwork: 'trafficEventRoadwork', accident: 'trafficEventAccident', jam: 'trafficEventJam',
+  weather: 'trafficEventWeather', event: 'trafficEventEvent',
+}
+
+// Fetch the traffic data while `active`: the road geometry once (it never
+// changes and the browser caches it for a day), then the states on a timer.
+// Returns `null` fields until the first responses land.
+function useTrafficData(active) {
+  const [geometry, setGeometry] = useState(null)
+  const [snapshot, setSnapshot] = useState(null)
+
+  // Geometry: fetched on first activation only, then kept for the session.
+  useEffect(() => {
+    if (!active || geometry) return
+    let cancelled = false
+    fetch('/api/traffic/geometry')
+      .then(r => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then(data => { if (!cancelled) setGeometry(data.segments || {}) })
+      .catch(e => {
+        console.warn('Traffic geometry fetch failed:', e)
+        if (!cancelled) setGeometry({})
+      })
+    return () => { cancelled = true }
+  }, [active, geometry])
+
+  // States: refreshed while the overlay is displayed.
+  useEffect(() => {
+    if (!active) return
+    let cancelled = false
+    const load = () => {
+      fetch('/api/traffic/states')
+        .then(r => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+        .then(data => { if (!cancelled) setSnapshot(data) })
+        .catch(e => {
+          console.warn('Traffic states fetch failed:', e)
+          if (!cancelled) setSnapshot({ enabled: false, states: {}, events: [] })
+        })
+    }
+    load()
+    const timer = setInterval(load, TRAFFIC_REFRESH_MS)
+    return () => { cancelled = true; clearInterval(timer) }
+  }, [active])
+
+  return { geometry, snapshot }
+}
+
+// Draw order: congestion on top of free-flowing traffic.
+const TRAFFIC_STATE_ORDER = ['fluid', 'jam', 'closed']
+
+// Leaflet's own screen-space simplification. Above the default of 1, it drops
+// vertices that land within `smoothFactor` pixels of each other — cheaper than
+// pre-simplifying the data, and naturally adaptive to the zoom level.
+const TRAFFIC_SMOOTH_FACTOR = 2
+
+// Draws the overlay by joining the live states with the cached geometry: one
+// multi-polyline per state, one dot per event.
+//
+// The network is ~9 000 segments of only ~4 vertices each, so the cost is the
+// number of objects, not their geometry. Grouping by state collapses those
+// 9 000 layers into 3, which React and Leaflet both handle without breaking a
+// sweat; the canvas renderer then keeps panning smooth.
+function TrafficLayer({ geometry, snapshot }) {
+  const { t } = useI18n()
+  const renderer = useMemo(() => L.canvas({ padding: 0.5 }), [])
+
+  // Segments whose geometry is missing are skipped rather than dropped
+  // silently at fetch time: geometry and states are two independent requests.
+  const byState = useMemo(() => {
+    const groups = { fluid: [], jam: [], closed: [] }
+    if (!geometry || !snapshot?.enabled) return groups
+    for (const [id, state] of Object.entries(snapshot.states || {})) {
+      const coords = geometry[id]
+      if (coords && groups[state]) groups[state].push(coords)
+    }
+    return groups
+  }, [geometry, snapshot])
+
+  if (!snapshot?.enabled) return null
+
+  return (
+    <>
+      {TRAFFIC_STATE_ORDER.map(state => byState[state].length > 0 && (
+        <Polyline key={`traffic-${state}`} positions={byState[state]}
+          pathOptions={{
+            renderer, color: TRAFFIC_STATE_COLORS[state],
+            weight: state === 'fluid' ? 3 : 5, opacity: state === 'fluid' ? 0.5 : 0.85,
+            smoothFactor: TRAFFIC_SMOOTH_FACTOR, lineCap: 'round', lineJoin: 'round',
+          }}>
+          <LTooltip sticky>
+            <span style={{ fontSize: 12 }}>{t(TRAFFIC_STATE_LABELS[state])}</span>
+          </LTooltip>
+        </Polyline>
+      ))}
+
+      {snapshot.events.map((ev, i) => (
+        <CircleMarker key={`traffic-ev-${i}`} center={ev.pos} radius={5}
+          pathOptions={{
+            renderer, color: '#0a0a12', fillColor: TRAFFIC_EVENT_COLORS[ev.category] || '#b0bec5',
+            fillOpacity: 1, weight: 2,
+          }}>
+          <LTooltip direction="top" offset={[0, -6]}>
+            <span style={{ fontSize: 12 }}>
+              <b>{t(TRAFFIC_EVENT_LABELS[ev.category] || 'trafficEventEvent')}</b>
+              {ev.label ? ` — ${ev.label}` : ''}
+              {ev.end ? ` (${t('trafficEventUntil', { date: formatTrafficDate(ev.end) })})` : ''}
+            </span>
+          </LTooltip>
+        </CircleMarker>
+      ))}
+    </>
+  )
+}
+
+// Format a feed timestamp ("2026-09-04T07:45:17") for a tooltip, falling back to
+// the raw string when the feed sends something unparseable.
+function formatTrafficDate(value) {
+  const d = dayjs(value)
+  return d.isValid() ? d.format('DD/MM HH:mm') : value
 }
 
 // Indoor maneuver types: 39=elevator, 40=stairs, 41=escalator
@@ -1311,45 +1442,8 @@ function GtfsValidationPanel() {
 
 // --- Swagger panel ---
 
-function SwaggerPanel() {
-  return (
-    <Box sx={{
-      flex: 1, overflow: 'auto',
-      '& .swagger-ui': {
-        fontFamily: '"Figtree", sans-serif',
-      },
-      '& .swagger-ui .topbar': { display: 'none' },
-      '& .swagger-ui .info': { margin: '12px 0' },
-      '& .swagger-ui .info .title': {
-        fontFamily: '"Syne", sans-serif',
-        color: '#e8e6f0',
-      },
-      '& .swagger-ui .info p, & .swagger-ui .info li': { color: '#8b89a0' },
-      '& .swagger-ui .scheme-container': { background: 'transparent', boxShadow: 'none', padding: 0 },
-      '& .swagger-ui .opblock-tag': { color: '#e8e6f0', borderColor: 'rgba(255,255,255,0.06)' },
-      '& .swagger-ui .opblock': { borderColor: 'rgba(255,255,255,0.06)', background: 'rgba(255,255,255,0.02)' },
-      '& .swagger-ui .opblock .opblock-summary-method': { borderRadius: '6px', fontFamily: '"Syne", sans-serif' },
-      '& .swagger-ui .opblock .opblock-summary-description': { color: '#8b89a0' },
-      '& .swagger-ui .opblock .opblock-summary-path': { color: '#e8e6f0' },
-      '& .swagger-ui .opblock-body pre': { background: 'rgba(0,0,0,0.3)', color: '#e8e6f0' },
-      '& .swagger-ui .model-box, & .swagger-ui .model': { color: '#8b89a0' },
-      '& .swagger-ui table thead tr th': { color: '#8b89a0', borderColor: 'rgba(255,255,255,0.06)' },
-      '& .swagger-ui table tbody tr td': { color: '#e8e6f0', borderColor: 'rgba(255,255,255,0.06)' },
-      '& .swagger-ui .parameter__name': { color: '#00e5ff' },
-      '& .swagger-ui .parameter__type': { color: '#8b89a0' },
-      '& .swagger-ui .responses-inner h4, & .swagger-ui .responses-inner h5': { color: '#e8e6f0' },
-      '& .swagger-ui .response-col_status': { color: '#00e676' },
-      '& .swagger-ui .btn': { borderColor: 'rgba(255,255,255,0.1)', color: '#8b89a0' },
-      '& .swagger-ui select': { background: 'rgba(20,20,35,0.8)', color: '#e8e6f0', borderColor: 'rgba(255,255,255,0.1)' },
-      '& .swagger-ui input[type=text]': { background: 'rgba(20,20,35,0.8)', color: '#e8e6f0', borderColor: 'rgba(255,255,255,0.1)' },
-      '& .swagger-ui .opblock-tag:hover': { color: '#00e5ff' },
-      '& .swagger-ui .opblock.opblock-get .opblock-summary-method': { bgcolor: '#00e5ff', color: '#0a0a12' },
-      '& .swagger-ui .opblock.opblock-post .opblock-summary-method': { bgcolor: '#ffb800', color: '#0a0a12' },
-    }}>
-      <SwaggerUI url="/api-docs/openapi.json" docExpansion="list" defaultModelsExpandDepth={-1} />
-    </Box>
-  )
-}
+// Loaded on demand: swagger-ui-react is more than half of the bundle.
+const SwaggerPanel = lazy(() => import('./SwaggerPanel.jsx'))
 
 // --- Metrics panel ---
 
@@ -1517,6 +1611,20 @@ export default function App() {
   const handleFromChange = useCallback((v) => { setFrom(v); clearResults() }, [clearResults])
   const handleToChange = useCallback((v) => { setTo(v); clearResults() }, [clearResults])
   const swap = useCallback(() => { const tmp = from; setFrom(to); setTo(tmp); clearResults() }, [from, to, clearResults])
+
+  // Road traffic overlay: off by default, polled only while displayed.
+  const [trafficOn, setTrafficOn] = useState(false)
+  const { geometry: trafficGeometry, snapshot: trafficSnapshot } = useTrafficData(trafficOn)
+  const toggleTraffic = useCallback(() => setTrafficOn(v => !v), [])
+  // The server answers `enabled: false` when the overlay is off in config.
+  const trafficUnavailable = trafficOn && trafficSnapshot?.enabled === false
+  const trafficTooltip = !trafficOn
+    ? t('trafficShow')
+    : trafficUnavailable
+      ? t('trafficUnavailable')
+      : trafficSnapshot?.updated_at
+        ? t('trafficUpdated', { time: dayjs(trafficSnapshot.updated_at).format('HH:mm') })
+        : t('trafficLoading')
 
   // Right-click map context menu: { x, y, lat, lon } | null
   const [mapMenu, setMapMenu] = useState(null)
@@ -1773,7 +1881,9 @@ export default function App() {
         </Box>
 
         {view === 'swagger' ? (
-          <SwaggerPanel />
+          <Suspense fallback={<Box sx={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><CircularProgress size={28} /></Box>}>
+            <SwaggerPanel />
+          </Suspense>
         ) : view === 'metrics' ? (
           <MetricsPanel />
         ) : view === 'gtfs' ? (
@@ -2170,6 +2280,24 @@ export default function App() {
           background: 'linear-gradient(90deg, rgba(10, 10, 18, 0.4) 0%, transparent 100%)',
           pointerEvents: 'none',
         }} />
+
+        {/* Road traffic overlay toggle */}
+        <Tooltip title={trafficTooltip} placement="left">
+          <IconButton
+            aria-label={trafficOn ? t('trafficHide') : t('trafficShow')}
+            onClick={toggleTraffic}
+            sx={{
+              position: 'absolute', top: 16, right: 16, zIndex: 600,
+              bgcolor: 'rgba(20, 20, 32, 0.85)', border: '1px solid rgba(255,255,255,0.12)',
+              '&:hover': { bgcolor: 'rgba(30, 30, 46, 0.95)' },
+            }}
+          >
+            <Traffic sx={{
+              fontSize: 20,
+              color: trafficUnavailable ? 'text.disabled' : (trafficOn ? '#ff5252' : 'text.secondary'),
+            }} />
+          </IconButton>
+        </Tooltip>
         <MapContainer center={status?.map?.center || DEFAULT_CENTER} zoom={status?.map?.zoom || DEFAULT_ZOOM}
           minZoom={status?.map?.zoom || DEFAULT_ZOOM}
           maxBounds={status?.map?.bounds || [[48.1, 1.4], [49.3, 3.6]]}
@@ -2179,6 +2307,9 @@ export default function App() {
             attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; <a href="https://carto.com/">CARTO</a>'
             url="/api/tiles/{z}/{x}/{y}.png"
           />
+
+          {/* Drawn before the journey lines so those stay on top */}
+          {trafficOn && <TrafficLayer geometry={trafficGeometry} snapshot={trafficSnapshot} />}
 
           {fitBounds && <FitBounds bounds={fitBounds} />}
           {flyTo && <FlyToPoint point={flyTo} />}

@@ -5,6 +5,7 @@
 //! - [`places`]   — `GET /api/places` (stop name autocomplete)
 //! - [`status`]   — `GET /api/status` (engine health)
 //! - [`gtfs`]     — `GET /api/gtfs/validate` + `POST /api/gtfs/reload` (GTFS management)
+//! - [`traffic`]  — `GET /api/traffic/{geometry,states}` (real-time road traffic overlay)
 
 pub mod gtfs;
 pub mod journeys;
@@ -12,6 +13,7 @@ pub mod metrics;
 pub mod places;
 pub mod status;
 pub mod tiles;
+pub mod traffic;
 
 pub use gtfs::{
     __path_get_gtfs_status, __path_get_validate, __path_post_reload, get_gtfs_status, get_validate,
@@ -25,6 +27,10 @@ pub use metrics::{__path_get_metrics, get_metrics};
 pub use places::{__path_get_places, get_places};
 pub use status::{__path_get_status, get_status};
 pub use tiles::get_tile;
+pub use traffic::{
+    __path_get_traffic_geometry, __path_get_traffic_states, get_traffic_geometry,
+    get_traffic_states,
+};
 
 use serde::Serialize;
 use utoipa::ToSchema;

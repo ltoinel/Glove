@@ -29,7 +29,7 @@ npx eslint src/              # Lint (CI enforced)
 
 ### Full Stack
 ```bash
-bin/download.sh              # Download GTFS + OSM data (reads config.yaml)
+bin/download.sh              # Download GTFS + OSM + BAN + traffic data (reads config.yaml)
 bin/valhalla.sh              # Start Valhalla Docker container (port 8002)
 bin/build.sh                 # Build release artifacts: backend binary + portal SPA
 bin/start.sh                 # Production: run only (auto-runs build.sh if artifacts missing)
@@ -61,6 +61,8 @@ Core of the application. Round-based public transit routing with:
 - `GET /api/gtfs/validate` — GTFS data quality validation (19 checks)
 - `POST /api/gtfs/reload` — Hot-reload GTFS data without downtime (atomic swap via ArcSwap)
 - `GET /api/metrics` — Prometheus-format metrics (HTTP counters, CPU, memory)
+- `GET /api/traffic/geometry` — Road-network polylines for the traffic overlay (static, cacheable 24 h)
+- `GET /api/traffic/states` — Live segment states + events, no coordinates (joined client-side on segment id)
 - `GET /api/tiles/{z}/{x}/{y}.png` — Map tile proxy with local disk cache
 - `GET /api-docs/openapi.json` — Auto-generated OpenAPI specification
 
@@ -75,12 +77,13 @@ Single-page app: vertical nav rail (56px) + sidebar (450px) + Leaflet map. Dark 
 - **Server-controlled routing settings**: number of journeys (`max_journeys`), transfers (`max_transfers`), `diverse_lines`, `prefer_rail` and `maneuvers` are config-only (`config.yaml`), intentionally NOT overridable via request parameters
 - **Tile caching proxy**: map tiles fetched from upstream once, cached to `data/tiles/` on disk
 - **Indoor-aware transfers**: Valhalla pedestrian routing with zero step/elevator penalties for intra-station walks
+- **Traffic overlay, split by lifetime**: the Sytadin MIF/MID geometry is parsed once at startup (Lambert II étendu → WGS84, `src/traffic.rs`) and served as an immutable ~860 kB body cached 24 h by the browser; only the states (~175 kB, no coordinates) are polled and re-published via `ArcSwapOption` (`src/api/traffic.rs`). Both bodies are serialized once, never per request. Disabled by default, degrades to `enabled: false` when the geometry is missing
 - **After-midnight routing**: queries before 4h use previous day's GTFS services with +86400s offset
 - **Station-aware stop resolution**: stop IDs resolve to the stop itself + child stops sharing the same parent_station
 
 ## Configuration
 
-`config.yaml` at repo root. Key settings: `data_dir` (GTFS path), `valhalla_host`/`valhalla_port` (walking router), `max_journeys`, `max_transfers`, `default_transfer_time` (seconds), `max_duration` (seconds), `workers` (0 = auto), `map.tile_url` (upstream tile server URL template with `{s}`, `{z}`, `{x}`, `{y}`, `{r}` placeholders).
+`config.yaml` at repo root. Key settings: `data_dir` (GTFS path), `valhalla_host`/`valhalla_port` (walking router), `max_journeys`, `max_transfers`, `default_transfer_time` (seconds), `max_duration` (seconds), `workers` (0 = auto), `map.tile_url` (upstream tile server URL template with `{s}`, `{z}`, `{x}`, `{y}`, `{r}` placeholders), `traffic.enabled`/`traffic.base_url`/`traffic.refresh_secs` (Sytadin road traffic overlay).
 
 ## Clean Code Principles
 

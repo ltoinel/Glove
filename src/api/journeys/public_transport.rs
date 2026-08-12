@@ -694,7 +694,7 @@ async fn enrich_first_last_mile(
         };
 
         let ((fm_idx, first_mile), (lm_idx, last_mile)) =
-            futures::future::join(first_mile_fut, last_mile_fut).await;
+            futures_util::future::join(first_mile_fut, last_mile_fut).await;
 
         if endpoints.from.is_some() && first_stop_idx.is_some() {
             first_mile_cache.insert(fm_idx, first_mile.clone());
@@ -797,7 +797,7 @@ async fn enrich_transfers(journeys: &mut [Journey], ctx: &EnrichmentCtx<'_>) {
             )
         })
         .collect();
-    let results = futures::future::join_all(futs).await;
+    let results = futures_util::future::join_all(futs).await;
 
     for ((j_idx, s_idx, _, _, is_outdoor), walk) in transfer_requests.iter().zip(results) {
         let section = &mut journeys[*j_idx].sections[*s_idx];

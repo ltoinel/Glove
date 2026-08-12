@@ -1,6 +1,6 @@
 [package]
 name = "glove"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
 [dependencies]
@@ -16,12 +16,22 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde_yaml = "0.9"
 arc-swap = "1"
 utoipa = { version = "5", features = ["actix_extras"] }
-reqwest = { version = "0.12", features = ["json"] }
+# rustls rather than the default native-tls: no OpenSSL system dependency, so
+# the binary builds and cross-compiles without C toolchain setup.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rustc-hash = "2"
-futures = "0.3"
+# Only `future::join`/`join_all` are needed — the `futures` facade would also
+# pull futures-executor, futures-sink and futures-channel.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 actix-cors = "0.7"
 actix-governor = "0.7"
-governor = "0.8"
+quick-xml = "0.36"
+proj4rs = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

@@ -12,6 +12,7 @@ mod config;
 mod gtfs;
 mod raptor;
 mod text;
+mod traffic;
 mod util;
 
 use actix_cors::Cors;
@@ -123,6 +124,8 @@ fn load_or_build_ban(config: &config::AppConfig) -> Arc<ban::BanData> {
         api::get_gtfs_status,
         api::get_validate,
         api::post_reload,
+        api::get_traffic_geometry,
+        api::get_traffic_states,
     ),
     components(schemas(
         api::journeys::public_transport::JourneysResponse,
@@ -151,6 +154,9 @@ fn load_or_build_ban(config: &config::AppConfig) -> Arc<ban::BanData> {
         api::gtfs::Severity,
         api::gtfs::Category,
         api::gtfs::ReloadResponse,
+        api::traffic::TrafficGeometryResponse,
+        api::traffic::TrafficStatesResponse,
+        traffic::TrafficEvent,
         api::Section,
         api::Place,
         api::StopPointRef,
@@ -162,6 +168,7 @@ fn load_or_build_ban(config: &config::AppConfig) -> Arc<ban::BanData> {
         (name = "Places", description = "Stop autocomplete search"),
         (name = "Status", description = "Engine status"),
         (name = "GTFS", description = "GTFS data validation and management"),
+        (name = "Traffic", description = "Real-time road traffic overlay"),
     )
 )]
 struct ApiDoc;
@@ -210,6 +217,10 @@ async fn run_http_server(
     let cors_origins = config.server.cors_origins.clone();
     let rate_limit = config.server.rate_limit;
 
+    // Loads the road geometry and starts the polling loop when enabled;
+    // degrades to a disabled overlay otherwise.
+    let traffic = api::traffic::start(&config.traffic, Path::new(&config.data.sytadin_dir()));
+
     let shared_data = web::Data::new(ArcSwap::from(raptor_data));
     let shared_ban = web::Data::new(ban_data);
     let config = web::Data::new(config);
@@ -229,6 +240,7 @@ async fn run_http_server(
             .app_data(shared_data.clone())
             .app_data(shared_ban.clone())
             .app_data(config.clone())
+            .app_data(traffic.clone())
             .app_data(openapi_json.clone())
             // Tile proxy: no rate limiting (high request volume from map panning)
             .service(api::get_tile)
@@ -255,7 +267,9 @@ async fn run_http_server(
                     .service(api::get_metrics)
                     .service(api::get_gtfs_status)
                     .service(api::get_validate)
-                    .service(api::post_reload),
+                    .service(api::post_reload)
+                    .service(api::get_traffic_geometry)
+                    .service(api::get_traffic_states),
             )
     });
 

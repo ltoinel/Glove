@@ -42,6 +42,10 @@ pub struct AppConfig {
     /// Wheelchair accessibility routing options.
     #[serde(default)]
     pub wheelchair: WheelchairConfig,
+
+    /// Real-time road traffic overlay (Sytadin / DiRIF).
+    #[serde(default)]
+    pub traffic: TrafficConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -159,6 +163,9 @@ impl DataConfig {
     }
     pub fn tiles_dir(&self) -> String {
         format!("{}/tiles", self.dir)
+    }
+    pub fn sytadin_dir(&self) -> String {
+        format!("{}/sytadin", self.dir)
     }
 }
 
@@ -522,6 +529,52 @@ fn default_wheelchair_elevator_penalty() -> f64 {
 }
 fn default_wheelchair_walking_speed() -> f64 {
     3.5
+}
+
+// ---------------------------------------------------------------------------
+// Traffic (Sytadin real-time road overlay)
+// ---------------------------------------------------------------------------
+
+/// Real-time road traffic overlay, sourced from the Sytadin (DiRIF) open
+/// diffusion feed. Segment geometry is loaded once from local MIF/MID files
+/// under `{data.dir}/sytadin`; dynamic states and events are polled from
+/// `base_url` every `refresh_secs`.
+#[derive(Debug, Deserialize)]
+pub struct TrafficConfig {
+    /// Enable the traffic overlay. When `false`, no geometry is loaded, no
+    /// polling happens, and `GET /api/traffic` reports `enabled: false`.
+    #[serde(default = "default_traffic_enabled")]
+    pub enabled: bool,
+
+    /// Base URL of the Sytadin diffusion feed (no trailing slash). Dynamic
+    /// files are read from `{base_url}/xml/segments_dyn.xml` and
+    /// `{base_url}/xml/evenements.xml`.
+    #[serde(default = "default_traffic_base_url")]
+    pub base_url: String,
+
+    /// Interval, in seconds, between dynamic-data refreshes (feed updates ~1 min).
+    #[serde(default = "default_traffic_refresh_secs")]
+    pub refresh_secs: u64,
+}
+
+impl Default for TrafficConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_traffic_enabled(),
+            base_url: default_traffic_base_url(),
+            refresh_secs: default_traffic_refresh_secs(),
+        }
+    }
+}
+
+fn default_traffic_enabled() -> bool {
+    false
+}
+fn default_traffic_base_url() -> String {
+    "https://www.sytadin.fr/diffusion".to_string()
+}
+fn default_traffic_refresh_secs() -> u64 {
+    60
 }
 
 // ---------------------------------------------------------------------------

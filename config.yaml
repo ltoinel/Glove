@@ -23,13 +23,20 @@ routing:
   default_transfer_time: 120    # seconds
   max_duration: 10800           # 3 hours in seconds
   max_nearest_stop_distance: 1500  # meters (~20 min walk at 5 km/h)
-  diverse_lines: false           # true = each alternative departs on a different line (line-level diversity)
+  diverse_lines: false          # true = each alternative departs on a different line (line-level diversity)
   prefer_rail: true            # true = rail/metro/tram/train found first; bus only fills remaining slots
   maneuvers: false             # true = include turn-by-turn directions (server-controlled, not per-request)
 
 valhalla:
   host: "localhost"
   port: 8002
+
+traffic:                        # Real-time road traffic overlay (Sytadin / DiRIF)
+  enabled: true                # true = load segment geometry + poll live states/events
+  base_url: "https://www.sytadin.fr/diffusion"  # diffusion feed root (no trailing slash)
+  refresh_secs: 600             # dynamic-data refresh interval (feed updates ~1 min)
+  # Data © Ministère chargé des transports / DiRIF — Sytadin®, subject to usage
+  # conditions. Geometry (Segment.mif/.mid) is loaded from data/sytadin/.
 
 map:
   zoom: 11

@@ -6,10 +6,11 @@
 # then fetches GTFS, OSM and BAN data into the configured data directory.
 #
 # Usage:
-#   bin/download.sh all    # Download everything
-#   bin/download.sh gtfs   # GTFS transit schedules only
-#   bin/download.sh osm    # OpenStreetMap extract only
-#   bin/download.sh ban    # BAN address database only
+#   bin/download.sh all      # Download everything
+#   bin/download.sh gtfs     # GTFS transit schedules only
+#   bin/download.sh osm      # OpenStreetMap extract only
+#   bin/download.sh ban      # BAN address database only
+#   bin/download.sh traffic  # Sytadin road-network geometry only
 #
 # Each download is idempotent: if the target file already exists, the user
 # is prompted before overwriting.
@@ -39,12 +40,13 @@ confirm() {
 
 # Print usage and exit.
 usage() {
-    echo "Usage: $0 <all|osm|gtfs|ban>"
+    echo "Usage: $0 <all|osm|gtfs|ban|traffic>"
     echo ""
-    echo "  all    Download OSM, GTFS and BAN data"
-    echo "  osm    Download OSM data only"
-    echo "  gtfs   Download GTFS data only"
-    echo "  ban    Download BAN address data only"
+    echo "  all      Download OSM, GTFS, BAN and traffic data"
+    echo "  osm      Download OSM data only"
+    echo "  gtfs     Download GTFS data only"
+    echo "  ban      Download BAN address data only"
+    echo "  traffic  Download Sytadin road-network geometry only"
     exit 1
 }
 
@@ -96,6 +98,9 @@ GTFS_ZIP="$GTFS_DIR/gtfs-idfm.zip"
 
 BAN_DIR="$DATA_DIR/ban"
 BAN_BASE_URL="$(yaml_val data.ban_url)"
+
+SYTADIN_DIR="$DATA_DIR/sytadin"
+TRAFFIC_BASE_URL="$(yaml_val traffic.base_url)"
 # Parse the departments array from the nested "data:" section.
 DEPARTMENTS=$(sed -n '/^data:/,/^[^ ]/{s/^  *departments:[[:space:]]*\[//p;}' "$CONFIG" \
     | sed 's/\].*//;s/,/ /g;s/  */ /g;s/^ //;s/ $//')
@@ -180,6 +185,27 @@ download_ban() {
     done
 }
 
+# Download the Sytadin road-network geometry (MIF/MID) used to draw the
+# real-time traffic overlay. The dynamic states/events are fetched at runtime
+# by the backend, so only the static geometry is downloaded here.
+#
+# Data © Ministère chargé des transports / DiRIF — Sytadin®, subject to usage
+# conditions. Not redistributed: fetched on demand into the local data dir.
+download_traffic() {
+    mkdir -p "$SYTADIN_DIR"
+    local base="${TRAFFIC_BASE_URL}/mifmid/modelisation"
+    for ext in mif mid; do
+        local file="$SYTADIN_DIR/Segment.${ext}"
+        if [ -f "$file" ] && ! confirm "Sytadin Segment.${ext} exists. Replace it?"; then
+            log "Skipping Segment.${ext}."
+            continue
+        fi
+        log "Downloading Sytadin Segment.${ext}..."
+        wget -O "$file" "${base}/Segment.${ext}"
+        ok "Saved $file"
+    done
+}
+
 # ---------------------------------------------------------------------------
 # Main — dispatch on the first argument
 # ---------------------------------------------------------------------------
@@ -188,6 +214,7 @@ case "$1" in
         download_osm
         download_gtfs
         download_ban
+        download_traffic
         ;;
     osm)
         download_osm
@@ -197,6 +224,9 @@ case "$1" in
         ;;
     ban)
         download_ban
+        ;;
+    traffic)
+        download_traffic
         ;;
     *)
         usage
