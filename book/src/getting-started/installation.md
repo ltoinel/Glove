@@ -13,13 +13,14 @@
 Glove needs GTFS transit data to operate. The download script reads `config.yaml` for data URLs.
 
 ```bash
-# Download everything (GTFS + OSM + BAN addresses)
+# Download everything (GTFS + OSM + BAN addresses + traffic geometry)
 bin/download.sh all
 
 # Or download individually
 bin/download.sh gtfs     # GTFS transit schedules
 bin/download.sh osm      # OpenStreetMap data (for Valhalla)
 bin/download.sh ban      # BAN French addresses (for autocomplete)
+bin/download.sh traffic  # Sytadin road geometry (for the traffic overlay)
 ```
 
 ```admonish note

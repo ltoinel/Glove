@@ -10,7 +10,9 @@ The Glove frontend is a single-page React application with an interactive map.
 | Vite | - | Build tool with HMR |
 | MUI (Material-UI) | 7 | Component library |
 | Leaflet + react-leaflet | - | Interactive map |
-| Swagger UI React | - | API documentation viewer |
+| Swagger UI React | - | API documentation viewer (lazy-loaded) |
+
+Swagger UI accounts for more than half the compiled bundle, for a view that is rarely opened. It lives in its own module (`portal/src/SwaggerPanel.jsx`) behind `React.lazy`, so the initial load carries 979 kB of JS instead of 2 270 kB, and 15 kB of CSS instead of 198 kB.
 
 ## Layout
 
@@ -62,6 +64,13 @@ The search form provides:
 - Stop markers with popups showing stop names and departure/arrival times
 - Origin (green) and destination (red) bubbles
 - Bike routes colored by elevation gradient (green = descent, red = climb)
+
+### Road Traffic Overlay
+A toggle above the map displays live road traffic (see [Road Traffic](../api/traffic.md)). The geometry is fetched once per session and the states are refreshed on a timer, then joined by segment id.
+
+The network holds around 9 000 segments of roughly 4 vertices each, so the rendering cost lies in the number of objects rather than their geometry. Segments are therefore grouped into **one multi-polyline per state** — three Leaflet layers instead of nine thousand — drawn on a canvas renderer, with congestion painted above free-flowing traffic. Simplifying the polylines themselves would gain nothing; Leaflet's own `smoothFactor` handles screen-space reduction.
+
+The overlay is drawn beneath journey polylines, which stay on top.
 
 ### Dark Theme
 The app uses a dark theme by default with:

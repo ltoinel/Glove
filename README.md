@@ -27,9 +27,10 @@ Glove loads GTFS data into memory, builds a RAPTOR index, and exposes a REST API
 - **GTFS validation** — 19 automated data quality checks (referential integrity, calendars, coordinates, transfers, pathways, display)
 - **Hot reload** — Update GTFS data via API without downtime (lock-free with ArcSwap)
 - **Tile caching proxy** — Map tiles fetched from configurable upstream server, cached locally on disk
+- **Real-time road traffic** — Optional Île-de-France overlay from the Sytadin (DiRIF) feed: colored segments, roadworks and incidents. Static road geometry and live states are served separately so refreshes stay small
 
 ### Frontend
-- **Interactive map** — Leaflet with route polylines, elevation-colored bike routes, indoor/outdoor transfer distinction, dark theme
+- **Interactive map** — Leaflet with route polylines, elevation-colored bike routes, indoor/outdoor transfer distinction, live traffic overlay, dark theme
 - **Vertical nav rail** — Quick access to search, GTFS validation, dataset info, API docs, metrics
 - **Multilingual** — French and English (i18n)
 
@@ -37,12 +38,12 @@ Glove loads GTFS data into memory, builds a RAPTOR index, and exposes a REST API
 - **REST API** — Documented with OpenAPI
 - **Prometheus metrics** — Built-in monitoring endpoint (CPU, memory, HTTP counters)
 - **Rate limiting** — Configurable per-IP rate limiting (tile proxy excluded)
-- **Clean Code** — Rust backend with 179 tests, React frontend with 21 vitest tests
+- **Clean Code** — Rust backend with 338 tests, React frontend with 26 vitest tests
 
 ## Quick Start
 
 ```bash
-bin/download.sh all      # Download GTFS, OSM and BAN data
+bin/download.sh all      # Download GTFS, OSM, BAN and road traffic data
 bin/valhalla.sh          # Start Valhalla (optional, for walk/bike/car)
 bin/build.sh             # Build release artifacts (backend + portal)
 bin/start.sh             # Production: run (auto-builds on first run)

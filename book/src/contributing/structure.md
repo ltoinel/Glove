@@ -9,6 +9,7 @@ Glove/
 │   ├── raptor.rs                # RAPTOR algorithm & index building
 │   ├── ban.rs                   # BAN address geocoding
 │   ├── text.rs                  # Text normalization (diacritics)
+│   ├── traffic.rs               # Sytadin geometry & live feed parsing
 │   └── api/
 │       ├── mod.rs               # Shared response types
 │       ├── journeys/
@@ -22,11 +23,13 @@ Glove/
 │       ├── gtfs.rs              # GTFS validation & reload endpoints
 │       ├── tiles.rs             # Map tile proxy with disk cache
 │       ├── metrics.rs           # Prometheus metrics endpoint
+│       ├── traffic.rs           # Road traffic endpoints & refresh loop
 │       └── status.rs            # Status endpoint
 │
 ├── portal/                      # React frontend
 │   ├── src/
 │   │   ├── App.jsx              # Main SPA (search, results, map, metrics)
+│   │   ├── SwaggerPanel.jsx     # API docs view, lazy-loaded
 │   │   ├── i18n.jsx             # Internationalization (FR/EN)
 │   │   ├── main.jsx             # Entry point with MUI theme
 │   │   ├── index.css            # Styling
@@ -38,7 +41,7 @@ Glove/
 │
 ├── bin/                         # Utility scripts
 │   ├── start.sh                 # Start script (production & dev)
-│   ├── download.sh              # Data download (GTFS, OSM, BAN)
+│   ├── download.sh              # Data download (GTFS, OSM, BAN, traffic)
 │   └── valhalla.sh              # Valhalla Docker setup
 │
 ├── scripts/                     # Analysis & benchmarking
@@ -59,6 +62,7 @@ Glove/
 │   ├── raptor/                  # Serialized RAPTOR index cache
 │   ├── ban/                     # French address data
 │   ├── tiles/                   # Cached map tiles (auto-populated)
+│   ├── sytadin/                 # Road network geometry (traffic overlay)
 │   └── valhalla/                # Valhalla routing tiles
 │
 ├── config.yaml                  # Application configuration
@@ -73,13 +77,15 @@ Glove/
 
 | File | Lines | Description |
 |------|-------|-------------|
-| `src/raptor.rs` | ~2,200 | RAPTOR algorithm, the core of the application |
-| `portal/src/App.jsx` | ~2,200 | Entire frontend SPA in one file |
-| `src/api/journeys/public_transport.rs` | ~1,450 | Journey planning endpoint and response formatting |
-| `src/api/gtfs.rs` | ~830 | GTFS validation (19 checks) & reload endpoint |
-| `src/config.rs` | ~750 | Configuration with defaults (server, routing, map, bike, wheelchair) |
+| `src/raptor.rs` | ~2,400 | RAPTOR algorithm, the core of the application |
+| `portal/src/App.jsx` | ~2,400 | Entire frontend SPA in one file |
+| `src/api/journeys/public_transport.rs` | ~2,800 | Journey planning endpoint and response formatting |
+| `src/api/gtfs.rs` | ~1,180 | GTFS validation (19 checks) & reload endpoint |
+| `src/config.rs` | ~840 | Configuration with defaults (server, routing, map, bike, wheelchair, traffic) |
 | `src/ban.rs` | ~630 | BAN address geocoding with number interpolation |
 | `src/gtfs.rs` | ~570 | GTFS CSV parsing and data model |
-| `src/api/places.rs` | ~340 | Fuzzy search with ranking |
+| `src/api/places.rs` | ~410 | Fuzzy search with ranking |
 | `src/api/metrics.rs` | ~370 | Prometheus metrics collection |
-| `src/api/tiles.rs` | ~110 | Map tile proxy with disk cache |
+| `src/api/tiles.rs` | ~360 | Map tile proxy with disk cache |
+| `src/traffic.rs` | ~670 | Sytadin road geometry (MIF/MID, reprojection) and live feed parsing |
+| `src/api/traffic.rs` | ~510 | Traffic geometry/states endpoints and background refresh loop |

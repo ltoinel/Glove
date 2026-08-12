@@ -15,6 +15,8 @@ Glove exposes a REST API on the configured port (default: 8080). All endpoints r
 | `GET` | `/api/gtfs/status` | GTFS data statistics and last load timestamp |
 | `GET` | `/api/gtfs/validate` | GTFS data quality validation (19 checks) |
 | `POST` | `/api/gtfs/reload` | Hot-reload GTFS data |
+| `GET` | `/api/traffic/geometry` | Road network polylines for the traffic overlay (static, cacheable) |
+| `GET` | `/api/traffic/states` | Live road traffic states and events |
 | `GET` | `/api/metrics` | Prometheus-format metrics |
 | `GET` | `/api/tiles/{z}/{x}/{y}.png` | Map tile proxy with local disk cache |
 | `GET` | `/api-docs/openapi.json` | OpenAPI specification |

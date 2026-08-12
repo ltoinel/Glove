@@ -20,6 +20,7 @@
 - [Journey Planning](./api/journeys.md)
 - [Places & Autocomplete](./api/places.md)
 - [Status & Reload](./api/status.md)
+- [Road Traffic](./api/traffic.md)
 - [Metrics](./api/metrics.md)
 
 # Operations
@@ -38,3 +39,7 @@
 - [Routing Statistics](./idfm/routing-stats.md)
 - [Indoor Routing Coverage](./idfm/indoor-coverage.md)
 - [Pathway Time Gaps](./idfm/pathway-time-gaps.md)
+
+# Sytadin
+
+- [Data Integration](./sytadin/integration.md)

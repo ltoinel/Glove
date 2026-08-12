@@ -97,6 +97,10 @@ Trips with identical stop sequences are grouped into **patterns**. This dramatic
 Valhalla supports indoor maneuvers such as elevators, stairs, escalators, and building enter/exit transitions. Transfers are classified by parent_station: outdoor transfers (different parent_station) always get a Valhalla walking route for the map polyline, while indoor transfers (same parent_station) are only enriched when indoor maneuvers exist in OSM. Transfer polylines use the Valhalla shape (actual walking route) when available, falling back to a straight line otherwise. This enrichment only runs when `routing.maneuvers` is enabled in `config.yaml`.
 ```
 
+```admonish example title="Traffic Split by Lifetime"
+The road traffic overlay separates what changes from what does not. The Sytadin road geometry is parsed once at startup and served as an immutable body the browser caches for a day; only the segment states are polled and re-published, through the same `ArcSwap` mechanism as the RAPTOR index. Both bodies are serialized once — at startup and at each refresh — never per request, because a snapshot spans several thousand segments.
+```
+
 ## Technology Stack
 
 | Component | Technology |
@@ -107,6 +111,7 @@ Valhalla supports indoor maneuvers such as elevators, stairs, escalators, and bu
 | Frontend | React 19, Vite, MUI 7, Leaflet |
 | Data format | GTFS (General Transit Feed Specification) |
 | Address search | BAN (Base Adresse Nationale) |
+| Road traffic | Sytadin / DiRIF diffusion feed (MIF/MID + XML) |
 | Serialization | serde (JSON + YAML + CSV) |
 | API docs | utoipa (OpenAPI auto-generation) |
 | Monitoring | Custom Prometheus metrics |

@@ -85,6 +85,31 @@ valhalla:
 
 The Valhalla routing engine is used for walking, cycling, and driving directions. It runs as a separate Docker container. When OSM data includes indoor information, Valhalla provides indoor maneuvers (elevator, stairs, escalator, enter/exit building) in transfer and walking sections.
 
+## Traffic
+
+```yaml
+traffic:
+  enabled: false
+  base_url: "https://www.sytadin.fr/diffusion"
+  refresh_secs: 60
+```
+
+Real-time road traffic overlay for Île-de-France, sourced from the Sytadin (DiRIF) diffusion feed. Disabled by default.
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `enabled` | Load the road geometry at startup and poll the live feed. When `false`, nothing is loaded, nothing is polled, and the traffic endpoints report `enabled: false` | `false` |
+| `base_url` | Root of the diffusion feed, without a trailing slash. States are read from `{base_url}/xml/segments_dyn.xml`, events from `{base_url}/xml/evenements.xml` | Sytadin |
+| `refresh_secs` | Interval between live-data refreshes. The upstream feed updates about once a minute | `60` |
+
+The static road geometry is **not** downloaded by the server: run `bin/download.sh traffic` to fetch `Segment.mif`/`Segment.mid` into `{data.dir}/sytadin`. A missing or unreadable geometry disables the overlay with a warning instead of preventing startup.
+
+See [Road Traffic](../api/traffic.md) for the endpoints and payloads.
+
+```admonish info title="Data licence"
+Data © Ministère chargé des transports / DiRIF — Sytadin®, subject to usage conditions.
+```
+
 ## Map
 
 ```yaml
