@@ -4,7 +4,7 @@
 
 ```admonish info title="Requirements"
 - [Rust](https://rustup.rs/) 1.85+
-- [Node.js](https://nodejs.org/) 18+
+- [Node.js](https://nodejs.org/) 22+ (required by `swagger-client`, a transitive dependency of the API docs viewer)
 - [Docker](https://www.docker.com/) (optional, for Valhalla walk/bike/car routing)
 ```
 

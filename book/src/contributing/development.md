@@ -3,7 +3,7 @@
 ## Prerequisites
 
 - [Rust](https://rustup.rs/) 1.85+ (with `cargo-watch` for dev mode)
-- [Node.js](https://nodejs.org/) 18+ with npm
+- [Node.js](https://nodejs.org/) 22+ with npm (required by `swagger-client`, a transitive dependency of the API docs viewer)
 - [Docker](https://www.docker.com/) (optional, for Valhalla)
 
 ## Quick Start

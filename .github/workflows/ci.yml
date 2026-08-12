@@ -97,7 +97,8 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v5
         with:
-          node-version: 20
+          # 22+ is required by swagger-client, pulled in by swagger-ui-react.
+          node-version: 22
           cache: npm
           cache-dependency-path: portal/package-lock.json
 
