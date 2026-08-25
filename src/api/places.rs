@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use utoipa::{IntoParams, ToSchema};
 
-use crate::ban::BanData;
-use crate::raptor::RaptorData;
+use crate::geocoding::ban::BanData;
+use crate::transit::raptor::RaptorData;
 
 /// Query parameters for `GET /api/places`.
 #[derive(Debug, Deserialize, IntoParams)]
@@ -121,7 +121,8 @@ pub async fn get_places(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ban, config, gtfs, raptor};
+    use crate::geocoding::ban;
+    use crate::transit::{gtfs, raptor};
     use rustc_hash::FxHashMap;
 
     fn make_test_data() -> (Arc<RaptorData>, Arc<BanData>) {
@@ -219,7 +220,7 @@ mod tests {
         let ban_data = Arc::new(ban::BanData {
             entries: vec![ban::BanEntry {
                 label: "Rue de Rivoli, 75001 Paris".into(),
-                name_lower: crate::text::normalize("Rue de Rivoli, 75001 Paris"),
+                name_lower: crate::shared::text::normalize("Rue de Rivoli, 75001 Paris"),
                 lon: 2.3387,
                 lat: 48.8606,
                 points: vec![

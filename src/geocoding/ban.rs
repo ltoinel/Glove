@@ -8,7 +8,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-use crate::text::normalize;
+use crate::shared::text::normalize;
 
 // ---------------------------------------------------------------------------
 // Data structures
@@ -254,7 +254,7 @@ impl BanData {
 
     /// Compute a SHA-256 fingerprint of the BAN directory based on file sizes.
     pub fn fingerprint(ban_dir: &Path) -> String {
-        crate::util::dir_fingerprint_glob(ban_dir, "adresses-", ".csv")
+        crate::shared::util::dir_fingerprint_glob(ban_dir, "adresses-", ".csv")
     }
 
     /// Save the BAN index to a binary cache file.

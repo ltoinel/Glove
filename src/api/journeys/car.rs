@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
 use super::valhalla::{DirectionsOptions, Location, RawManeuver, RouteRequest, RouteResponse};
-use crate::config::AppConfig;
-use crate::util::parse_from_to;
+use crate::shared::config::AppConfig;
+use crate::shared::util::parse_from_to;
 
 // ---------------------------------------------------------------------------
 // Query parameters

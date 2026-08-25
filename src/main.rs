@@ -7,13 +7,17 @@
 //! GTFS files via `POST /api/gtfs/reload` without restarting the server.
 
 mod api;
-mod ban;
-mod config;
-mod gtfs;
-mod raptor;
-mod text;
+mod geocoding;
+mod shared;
 mod traffic;
-mod util;
+mod transit;
+
+// Domain entry points used throughout the bootstrap, aliased so the wiring
+// below reads by concept rather than by module path.
+use geocoding::ban;
+use shared::config;
+use traffic::sytadin;
+use transit::{gtfs, raptor, realtime};
 
 use actix_cors::Cors;
 use actix_governor::{Governor, GovernorConfigBuilder};
@@ -126,6 +130,7 @@ fn load_or_build_ban(config: &config::AppConfig) -> Arc<ban::BanData> {
         api::post_reload,
         api::get_traffic_geometry,
         api::get_traffic_states,
+        api::get_realtime_status,
     ),
     components(schemas(
         api::journeys::public_transport::JourneysResponse,
@@ -156,7 +161,10 @@ fn load_or_build_ban(config: &config::AppConfig) -> Arc<ban::BanData> {
         api::gtfs::ReloadResponse,
         api::traffic::TrafficGeometryResponse,
         api::traffic::TrafficStatesResponse,
-        traffic::TrafficEvent,
+        api::realtime::RealtimeStatusResponse,
+        realtime::service::FeedHealth,
+        realtime::index::MatchStats,
+        sytadin::TrafficEvent,
         api::Section,
         api::Place,
         api::StopPointRef,
@@ -169,6 +177,7 @@ fn load_or_build_ban(config: &config::AppConfig) -> Arc<ban::BanData> {
         (name = "Status", description = "Engine status"),
         (name = "GTFS", description = "GTFS data validation and management"),
         (name = "Traffic", description = "Real-time road traffic overlay"),
+        (name = "Realtime", description = "Real-time transit feeds (GTFS-RT, SIRI)"),
     )
 )]
 struct ApiDoc;
@@ -222,6 +231,11 @@ async fn run_http_server(
     let traffic = api::traffic::start(&config.traffic, Path::new(&config.data.sytadin_dir()));
 
     let shared_data = web::Data::new(ArcSwap::from(raptor_data));
+
+    // Polls every configured transit feed and republishes the routing overlay.
+    // Holds the same ArcSwap the handlers read, so a GTFS hot-reload rebuilds
+    // the trip lookup on the next refresh.
+    let realtime = realtime::service::start(&config.realtime, shared_data.clone().into_inner());
     let shared_ban = web::Data::new(ban_data);
     let config = web::Data::new(config);
 
@@ -241,6 +255,7 @@ async fn run_http_server(
             .app_data(shared_ban.clone())
             .app_data(config.clone())
             .app_data(traffic.clone())
+            .app_data(realtime.clone())
             .app_data(openapi_json.clone())
             // Tile proxy: no rate limiting (high request volume from map panning)
             .service(api::get_tile)
@@ -265,6 +280,7 @@ async fn run_http_server(
                     .service(api::get_car)
                     .service(api::get_journeys)
                     .service(api::get_metrics)
+                    .service(api::get_realtime_status)
                     .service(api::get_gtfs_status)
                     .service(api::get_validate)
                     .service(api::post_reload)

@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
 use super::valhalla::{DirectionsOptions, Location, RawManeuver, RouteRequest, RouteResponse};
-use crate::config::AppConfig;
-use crate::util::parse_from_to;
+use crate::shared::config::AppConfig;
+use crate::shared::util::parse_from_to;
 
 // ---------------------------------------------------------------------------
 // Query parameters
@@ -161,7 +161,7 @@ fn compute_elevation(heights: &[f64]) -> (u32, u32) {
 }
 
 /// Build Valhalla bicycle costing_options from a bike profile.
-fn bike_costing_options(profile: &crate::config::BikeProfile) -> serde_json::Value {
+fn bike_costing_options(profile: &crate::shared::config::BikeProfile) -> serde_json::Value {
     serde_json::json!({
         "bicycle": {
             "cycling_speed": profile.cycling_speed,
@@ -363,7 +363,7 @@ async fn process_response(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::BikeProfile;
+    use crate::shared::config::BikeProfile;
 
     #[test]
     fn compute_elevation_handles_empty_input() {

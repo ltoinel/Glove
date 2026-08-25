@@ -46,6 +46,10 @@ pub struct AppConfig {
     /// Real-time road traffic overlay (Sytadin / DiRIF).
     #[serde(default)]
     pub traffic: TrafficConfig,
+
+    /// Real-time transit feeds (GTFS-Realtime, SIRI).
+    #[serde(default)]
+    pub realtime: RealtimeConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -575,6 +579,90 @@ fn default_traffic_base_url() -> String {
 }
 fn default_traffic_refresh_secs() -> u64 {
     60
+}
+
+// ---------------------------------------------------------------------------
+// Real-time transit data
+// ---------------------------------------------------------------------------
+
+/// Real-time transit feeds (GTFS-Realtime today, SIRI once its connector
+/// lands). Each feed is polled on its own interval; the resulting delays and
+/// cancellations are merged into a single overlay consulted by the router.
+#[derive(Debug, Deserialize, Default)]
+pub struct RealtimeConfig {
+    /// Enable real-time routing. When `false` nothing is polled and the
+    /// router runs on the published schedule alone.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Feeds to poll, in precedence order: on conflict, the last one wins.
+    #[serde(default)]
+    pub feeds: Vec<FeedConfig>,
+}
+
+/// The wire format a feed speaks.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FeedKind {
+    /// GTFS-Realtime protobuf (`FeedMessage`).
+    GtfsRt,
+}
+
+impl std::fmt::Display for FeedKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::GtfsRt => write!(f, "gtfs-rt"),
+        }
+    }
+}
+
+/// One pollable real-time endpoint.
+#[derive(Deserialize, Clone)]
+pub struct FeedConfig {
+    /// Identifier shown in logs and on `GET /api/realtime/status`.
+    pub name: String,
+
+    /// Wire format. Configured as `type:` in YAML.
+    #[serde(rename = "type")]
+    pub kind: FeedKind,
+
+    /// Endpoint to poll.
+    pub url: String,
+
+    /// Seconds between two polls.
+    #[serde(default = "default_feed_refresh_secs")]
+    pub refresh_secs: u64,
+
+    /// Per-request timeout in seconds. Kept below `refresh_secs` so a stalled
+    /// upstream cannot pile requests up.
+    #[serde(default = "default_feed_timeout_secs")]
+    pub timeout_secs: u64,
+
+    /// Extra request headers, typically the provider's API key.
+    #[serde(default)]
+    pub headers: std::collections::BTreeMap<String, String>,
+}
+
+/// Hand-written so that `info!(?config)` at startup cannot print API keys:
+/// header *names* are useful when debugging, their values never are.
+impl std::fmt::Debug for FeedConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FeedConfig")
+            .field("name", &self.name)
+            .field("kind", &self.kind)
+            .field("url", &crate::shared::util::redact_query(&self.url))
+            .field("refresh_secs", &self.refresh_secs)
+            .field("timeout_secs", &self.timeout_secs)
+            .field("headers", &self.headers.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
+fn default_feed_refresh_secs() -> u64 {
+    30
+}
+fn default_feed_timeout_secs() -> u64 {
+    10
 }
 
 // ---------------------------------------------------------------------------

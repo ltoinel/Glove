@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
 use super::valhalla::{DirectionsOptions, Location, RouteRequest, RouteResponse};
-use crate::config::AppConfig;
-use crate::util::parse_from_to;
+use crate::shared::config::AppConfig;
+use crate::shared::util::parse_from_to;
 
 // ---------------------------------------------------------------------------
 // Query parameters
@@ -231,7 +231,7 @@ fn convert_maneuvers(src: &[super::valhalla::RawManeuver]) -> Vec<Maneuver> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AppConfig;
+    use crate::shared::config::AppConfig;
     use std::path::Path;
 
     fn make_config(wc_speed: f64, step_penalty: f64) -> AppConfig {

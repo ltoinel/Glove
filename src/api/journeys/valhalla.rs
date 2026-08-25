@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::config::WheelchairConfig;
+use crate::shared::config::WheelchairConfig;
 
 // ---------------------------------------------------------------------------
 // Valhalla request / response types
@@ -303,7 +303,7 @@ pub mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AppConfig;
+    use crate::shared::config::AppConfig;
 
     // All four flag combinations of pedestrian_route reach the request-build
     // stage, exercising the three costing_options branches and the speed

@@ -25,7 +25,8 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tracing::info;
 
-use crate::gtfs::{self, GtfsData};
+use crate::transit::gtfs::{self, GtfsData};
+use crate::transit::realtime::index::{PatternDeltas, RealtimeIndex};
 
 /// Sentinel value representing an unreachable stop.
 const INFINITY: u32 = u32::MAX;
@@ -778,7 +779,7 @@ impl RaptorData {
     }
 }
 
-use crate::text::normalize;
+use crate::shared::text::normalize;
 
 /// Approximate squared distance between two points (sufficient for ranking).
 fn haversine_approx(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
@@ -858,16 +859,55 @@ impl RaptorBuffers {
     }
 }
 
-/// Run the RAPTOR algorithm to find earliest-arrival journeys.
+/// Everything that shapes a RAPTOR search other than where and when it starts.
 ///
-/// # Arguments
-/// - `data`: pre-built RAPTOR data
-/// - `sources`: source stop indices paired with walking-time offsets
-/// - `departure_time`: seconds since midnight
-/// - `active`: pre-computed active services bitmap (from [`RaptorData::active_services`])
-/// - `max_transfers`: maximum number of vehicle changes allowed
-/// - `excluded_patterns`: patterns to skip (used for diverse route alternatives)
-/// - `wheelchair`: when `true`, skip stops with `wheelchair_boarding == 2`
+/// Bundled rather than passed one by one: the search already took nine
+/// arguments, and every helper below needs most of them.
+pub struct QueryOptions<'a> {
+    /// Pre-computed active services bitmap (from [`RaptorData::active_services`]).
+    pub active: &'a [bool],
+    /// Maximum number of vehicle changes allowed.
+    pub max_transfers: usize,
+    /// Patterns to skip (used for diverse route alternatives).
+    pub excluded_patterns: &'a FxHashSet<usize>,
+    /// When `true`, skip stops with `wheelchair_boarding == 2`.
+    pub wheelchair: bool,
+    /// `(stop_idx, walking_time_to_destination)` pairs used to prune the search.
+    /// Empty disables target pruning.
+    pub targets: &'a [(usize, u32)],
+    /// Upper bound on journey duration in seconds; [`INFINITY`] disables it.
+    pub max_duration: u32,
+    /// Real-time overlay. `None` searches the published schedule alone.
+    pub realtime: Option<&'a RealtimeIndex>,
+}
+
+impl<'a> QueryOptions<'a> {
+    /// Options for an unbounded search over the published schedule. Only used
+    /// by tests; production builds the struct with its pruning fields set.
+    #[cfg(test)]
+    pub fn new(
+        active: &'a [bool],
+        max_transfers: usize,
+        excluded_patterns: &'a FxHashSet<usize>,
+        wheelchair: bool,
+    ) -> Self {
+        Self {
+            active,
+            max_transfers,
+            excluded_patterns,
+            wheelchair,
+            targets: &[],
+            max_duration: INFINITY,
+            realtime: None,
+        }
+    }
+
+    /// Real-time adjustments for one pattern, if any are published.
+    fn pattern_deltas(&self, pattern_idx: usize) -> Option<&'a PatternDeltas> {
+        self.realtime?.pattern(pattern_idx)
+    }
+}
+
 /// Unbounded RAPTOR query (no target / max-duration pruning). Only used by
 /// tests; production goes through [`raptor_query_bounded`].
 #[cfg(test)]
@@ -886,42 +926,30 @@ pub fn raptor_query(
         data,
         sources,
         departure_time,
-        active,
-        max_transfers,
-        excluded_patterns,
-        wheelchair,
-        &[],
-        INFINITY,
+        &QueryOptions::new(active, max_transfers, excluded_patterns, wheelchair),
     )
 }
 
 /// Like [`raptor_query`], but prunes the search to arrivals that could still
-/// improve the journey to one of `targets` within `max_duration` seconds.
+/// improve the journey to one of [`QueryOptions::targets`] within
+/// [`QueryOptions::max_duration`] seconds.
 ///
-/// `targets` are `(stop_idx, walking_time_to_destination)` pairs; the bound is
-/// `min(departure + max_duration, best target arrival + its walk)`. Because
-/// arrival times along a pattern are monotonic, scanning a pattern stops as
-/// soon as it passes the bound. Pass `targets = &[]` and `max_duration =
-/// INFINITY` to disable pruning entirely.
-#[allow(clippy::too_many_arguments)]
+/// The bound is `min(departure + max_duration, best target arrival + its
+/// walk)`. Because arrival times along a pattern are monotonic, scanning a
+/// pattern stops as soon as it passes the bound.
 pub fn raptor_query_bounded(
     data: &RaptorData,
     sources: &[(usize, u32)],
     departure_time: u32,
-    active: &[bool],
-    max_transfers: usize,
-    excluded_patterns: &FxHashSet<usize>,
-    wheelchair: bool,
-    targets: &[(usize, u32)],
-    max_duration: u32,
+    options: &QueryOptions<'_>,
 ) -> RaptorResult {
     let n = data.stops.len();
-    let rounds = max_transfers.min(MAX_ROUNDS - 1) + 1;
+    let rounds = options.max_transfers.min(MAX_ROUNDS - 1) + 1;
 
     // Inclusive horizon: a journey arriving exactly at departure + max_duration
     // is still valid (the post-filter keeps `duration <= max_duration`).
     let horizon = departure_time
-        .saturating_add(max_duration)
+        .saturating_add(options.max_duration)
         .saturating_add(1);
 
     let mut buf = RaptorBuffers::new(n, data.patterns.len(), rounds);
@@ -929,16 +957,16 @@ pub fn raptor_query_bounded(
     init_source_stops(data, sources, departure_time, &mut buf);
 
     for k in 1..=rounds {
-        collect_active_routes(data, excluded_patterns, &mut buf);
+        collect_active_routes(data, options.excluded_patterns, &mut buf);
         buf.new_marked.fill(false);
         buf.trip_improved.clear();
 
-        scan_active_routes(data, k, active, wheelchair, &mut buf);
+        scan_active_routes(data, k, options, &mut buf);
         apply_transfers_after_trips(data, k, &mut buf);
 
         // Tighten the bound: once a target is reached, no relaxation arriving
         // later than the best target arrival can ever improve the result.
-        buf.cutoff = target_cutoff(targets, horizon, &buf.best);
+        buf.cutoff = target_cutoff(options.targets, horizon, &buf.best);
 
         std::mem::swap(&mut buf.marked, &mut buf.new_marked);
         if !buf.marked.iter().any(|&m| m) {
@@ -1027,8 +1055,7 @@ fn collect_active_routes(
 fn scan_active_routes(
     data: &RaptorData,
     k: usize,
-    active: &[bool],
-    wheelchair: bool,
+    options: &QueryOptions<'_>,
     buf: &mut RaptorBuffers,
 ) {
     for i in 0..buf.active_routes.len() {
@@ -1036,7 +1063,38 @@ fn scan_active_routes(
         let start_pos = buf.route_earliest[pat_idx];
         buf.route_earliest[pat_idx] = usize::MAX; // reset for next round
 
-        scan_pattern(data, pat_idx, start_pos, k, active, wheelchair, buf);
+        scan_pattern(data, pat_idx, start_pos, k, options, buf);
+    }
+}
+
+/// Real-time arrival of a trip at `pos`, or `None` when the call is skipped.
+///
+/// Falls back on the published schedule for trips the feed says nothing about,
+/// which is the overwhelming majority even on a well-covered network.
+fn trip_arrival(
+    pattern: &Pattern,
+    rt: Option<&PatternDeltas>,
+    trip_idx: usize,
+    pos: usize,
+) -> Option<u32> {
+    let scheduled = pattern.trips[trip_idx].stop_times[pos].0;
+    match rt.and_then(|deltas| deltas.trip(trip_idx)) {
+        Some(delta) => delta.arrival(pos, scheduled),
+        None => Some(scheduled),
+    }
+}
+
+/// Real-time departure of a trip at `pos`, or `None` when the call is skipped.
+fn trip_departure(
+    pattern: &Pattern,
+    rt: Option<&PatternDeltas>,
+    trip_idx: usize,
+    pos: usize,
+) -> Option<u32> {
+    let scheduled = pattern.trips[trip_idx].stop_times[pos].1;
+    match rt.and_then(|deltas| deltas.trip(trip_idx)) {
+        Some(delta) => delta.departure(pos, scheduled),
+        None => Some(scheduled),
     }
 }
 
@@ -1046,11 +1104,11 @@ fn scan_pattern(
     pat_idx: usize,
     start_pos: usize,
     k: usize,
-    active: &[bool],
-    wheelchair: bool,
+    options: &QueryOptions<'_>,
     buf: &mut RaptorBuffers,
 ) {
     let pattern = &data.patterns[pat_idx];
+    let rt = options.pattern_deltas(pat_idx);
     let mut current_trip: Option<usize> = None;
     let mut board_pos: usize = 0;
 
@@ -1060,16 +1118,20 @@ fn scan_pattern(
         // Try to board an earlier trip at this stop
         if buf.tau[k - 1][stop_idx] != INFINITY {
             let board_time = buf.tau[k - 1][stop_idx];
-            if let Some(trip_idx) = find_earliest_trip(pattern, pos, board_time, active, wheelchair)
-            {
+            if let Some(trip_idx) = find_earliest_trip(pattern, pos, board_time, options, rt) {
                 match current_trip {
                     None => {
                         current_trip = Some(trip_idx);
                         board_pos = pos;
                     }
                     Some(curr) => {
-                        let curr_arr = pattern.trips[curr].stop_times[pos].0;
-                        let new_arr = pattern.trips[trip_idx].stop_times[pos].0;
+                        // Compare real arrivals, not scheduled ones: a delayed
+                        // trip must not look better than it is. A skipped call
+                        // is not an improvement, so it is compared as "never"
+                        // rather than through `Option`'s ordering, which ranks
+                        // `None` first.
+                        let curr_arr = trip_arrival(pattern, rt, curr, pos).unwrap_or(INFINITY);
+                        let new_arr = trip_arrival(pattern, rt, trip_idx, pos).unwrap_or(INFINITY);
                         if new_arr < curr_arr {
                             current_trip = Some(trip_idx);
                             board_pos = pos;
@@ -1083,10 +1145,13 @@ fn scan_pattern(
         let Some(trip_idx) = current_trip else {
             continue;
         };
-        if wheelchair && data.stops[stop_idx].wheelchair_boarding == 2 {
+        if options.wheelchair && data.stops[stop_idx].wheelchair_boarding == 2 {
             continue;
         }
-        let arr = pattern.trips[trip_idx].stop_times[pos].0;
+        // A call the feed reports as skipped cannot be alighted at.
+        let Some(arr) = trip_arrival(pattern, rt, trip_idx, pos) else {
+            continue;
+        };
         // Target / max-duration pruning: skip stops that can no longer improve
         // the journey to a target. We must NOT `break` here — a later stop may
         // re-board an earlier trip and bring the arrival back under the bound —
@@ -1126,48 +1191,84 @@ fn apply_transfers_after_trips(data: &RaptorData, k: usize, buf: &mut RaptorBuff
     }
 }
 
+/// Look-back window covering trips whose first-stop departure precedes
+/// `min_departure` but which are still boardable further along the pattern.
+const LOOK_BACK_TRIPS: usize = 8;
+
 /// Find the earliest active trip departing at or after `min_departure`
 /// at position `pos` within a pattern.
 ///
 /// Trips are sorted by departure at the first stop. We use binary search
 /// on the first-stop departure to skip trips that depart too early, then
 /// scan forward for the best match at `pos`.
+///
+/// Real-time offsets break that sort order — a trip scheduled before
+/// `min_departure` can be delayed past it, and one scheduled after can run
+/// early. The window is therefore widened by the pattern's largest published
+/// offset, so a delayed vehicle is not missed simply because its *scheduled*
+/// departure fell outside the search window.
 fn find_earliest_trip(
     pattern: &Pattern,
     pos: usize,
     min_departure: u32,
-    active: &[bool],
-    wheelchair: bool,
+    options: &QueryOptions<'_>,
+    rt: Option<&PatternDeltas>,
 ) -> Option<usize> {
     let trips = &pattern.trips;
+    let slack = rt.map_or(0, PatternDeltas::max_abs_delta);
 
     // Binary search: find first trip whose first-stop departure >= min_departure.
     // Trips departing before this at stop 0 *might* still be valid at `pos` due to
     // travel time, so we look back a small window for safety.
     let pivot = trips.partition_point(|t| t.stop_times[0].1 < min_departure);
-    let start = pivot.saturating_sub(8); // look-back window for intermediate stops
+    let widened = if slack == 0 {
+        pivot
+    } else {
+        trips.partition_point(|t| t.stop_times[0].1.saturating_add(slack) < min_departure)
+    };
+    let start = widened.min(pivot).saturating_sub(LOOK_BACK_TRIPS);
 
     let mut best_dep = INFINITY;
     let mut best_idx = None;
 
     for (idx, trip) in trips.iter().enumerate().skip(start) {
-        let dep = trip.stop_times[pos].1;
-        if dep >= min_departure
+        if is_boardable(trip, idx, options, rt)
+            && let Some(dep) = trip_departure(pattern, rt, idx, pos)
+            && dep >= min_departure
             && dep < best_dep
-            && active[trip.service_idx]
-            && (!wheelchair || trip.wheelchair_accessible != 2)
         {
             best_dep = dep;
             best_idx = Some(idx);
-            // Once past the pivot, trips are roughly ordered: if we found a match
-            // and the first-stop departure is already well past our best, stop early.
-            if idx > pivot && trip.stop_times[0].1 > best_dep {
-                break;
-            }
+        }
+        // Once past the pivot, trips are roughly ordered: if the first-stop
+        // departure is already past our best — even allowing for a vehicle
+        // running `slack` seconds early — nothing later can improve on it.
+        if idx > pivot && trip.stop_times[0].1.saturating_sub(slack) > best_dep {
+            break;
         }
     }
 
     best_idx
+}
+
+/// Whether a trip can be used at all today: active service, accessible if the
+/// query requires it, and neither cancelled nor dropping calls.
+///
+/// A trip that skips a call no longer matches the stop sequence of the pattern
+/// it is filed under, so it is set aside like a cancellation — see
+/// [`TripDelta::skips_calls`](crate::transit::realtime::index::TripDelta::skips_calls)
+/// for why that is the safe reading.
+fn is_boardable(
+    trip: &PatternTrip,
+    trip_idx: usize,
+    options: &QueryOptions<'_>,
+    rt: Option<&PatternDeltas>,
+) -> bool {
+    options.active[trip.service_idx]
+        && (!options.wheelchair || trip.wheelchair_accessible != 2)
+        && !rt
+            .and_then(|deltas| deltas.trip(trip_idx))
+            .is_some_and(|delta| delta.canceled || delta.skips_calls)
 }
 
 // ---------------------------------------------------------------------------
@@ -1179,8 +1280,14 @@ pub struct JourneySection {
     pub section_type: SectionType,
     pub from_stop: usize,
     pub to_stop: usize,
+    /// Real departure when a feed covers this leg, scheduled otherwise.
     pub departure_time: u32,
+    /// Real arrival when a feed covers this leg, scheduled otherwise.
     pub arrival_time: u32,
+    /// Seconds late at the alighting stop, or `None` when no feed covers this
+    /// leg. `Some(0)` means a feed reports the vehicle exactly on time, which
+    /// is not the same statement as having no information at all.
+    pub delay: Option<i32>,
     /// Pattern index (only for PT sections).
     pub pattern_idx: Option<usize>,
     /// Trip index within the pattern (only for PT sections).
@@ -1214,6 +1321,7 @@ pub fn reconstruct_journeys(
     data: &RaptorData,
     result: &RaptorResult,
     targets: &[(usize, u32)],
+    realtime: Option<&RealtimeIndex>,
 ) -> Vec<Vec<JourneySection>> {
     let mut journeys = Vec::new();
     let mut best_time = INFINITY;
@@ -1230,7 +1338,7 @@ pub fn reconstruct_journeys(
         let time = result.tau[k][target].saturating_add(walk_to_dest);
         if time < best_time {
             best_time = time;
-            if let Some(sections) = reconstruct_for_round(data, result, target, k)
+            if let Some(sections) = reconstruct_for_round(data, result, target, k, realtime)
                 && !sections.is_empty()
             {
                 let clean = sanitize_sections(data, sections);
@@ -1294,6 +1402,52 @@ fn sanitize_sections(_data: &RaptorData, sections: Vec<JourneySection>) -> Vec<J
     result
 }
 
+/// Board and alight times for one leg, with the delay a feed reports at the
+/// alighting stop.
+///
+/// The router already searched on these times; reconstruction must report the
+/// same ones, or a journey would be planned on real times and displayed on
+/// scheduled ones.
+struct LegTimes {
+    departure_time: u32,
+    arrival_time: u32,
+    delay: Option<i32>,
+}
+
+fn leg_times(
+    pattern: &Pattern,
+    rt: Option<&PatternDeltas>,
+    trip_idx: usize,
+    board_pos: usize,
+    alight_pos: usize,
+) -> LegTimes {
+    let scheduled_departure = pattern.trips[trip_idx].stop_times[board_pos].1;
+    let scheduled_arrival = pattern.trips[trip_idx].stop_times[alight_pos].0;
+
+    let Some(delta) = rt.and_then(|deltas| deltas.trip(trip_idx)) else {
+        return LegTimes {
+            departure_time: scheduled_departure,
+            arrival_time: scheduled_arrival,
+            delay: None,
+        };
+    };
+
+    // A skipped call keeps the scheduled time: the leg was already rejected by
+    // the search, and reconstruction has no better value to show.
+    let departure_time = delta
+        .departure(board_pos, scheduled_departure)
+        .unwrap_or(scheduled_departure);
+    let arrival_time = delta
+        .arrival(alight_pos, scheduled_arrival)
+        .unwrap_or(scheduled_arrival);
+
+    LegTimes {
+        departure_time,
+        arrival_time,
+        delay: Some(i64::from(arrival_time) as i32 - i64::from(scheduled_arrival) as i32),
+    }
+}
+
 /// Reconstruct the journey for a specific RAPTOR round by tracing labels
 /// backwards from the target to the source.
 fn reconstruct_for_round(
@@ -1301,6 +1455,7 @@ fn reconstruct_for_round(
     result: &RaptorResult,
     target: usize,
     round: usize,
+    realtime: Option<&RealtimeIndex>,
 ) -> Option<Vec<JourneySection>> {
     if result.tau[round][target] == INFINITY {
         return None;
@@ -1323,14 +1478,16 @@ fn reconstruct_for_round(
                 alight_pos,
             }) => {
                 let pattern = &data.patterns[*pattern_idx];
-                let trip = &pattern.trips[*trip_idx];
+                let rt = realtime.and_then(|index| index.pattern(*pattern_idx));
+                let leg = leg_times(pattern, rt, *trip_idx, *board_pos, *alight_pos);
 
                 sections.push(JourneySection {
                     section_type: SectionType::PublicTransport,
                     from_stop: pattern.stops[*board_pos],
                     to_stop: pattern.stops[*alight_pos],
-                    departure_time: trip.stop_times[*board_pos].1,
-                    arrival_time: trip.stop_times[*alight_pos].0,
+                    departure_time: leg.departure_time,
+                    arrival_time: leg.arrival_time,
+                    delay: leg.delay,
                     pattern_idx: Some(*pattern_idx),
                     trip_idx: Some(*trip_idx),
                     board_pos: Some(*board_pos),
@@ -1354,6 +1511,7 @@ fn reconstruct_for_round(
                     to_stop: current_stop,
                     departure_time: arr.saturating_sub(*duration),
                     arrival_time: arr,
+                    delay: None,
                     pattern_idx: None,
                     trip_idx: None,
                     board_pos: None,
@@ -1449,119 +1607,16 @@ pub fn parse_datetime(input: &str) -> Option<(String, u32)> {
     Some((date.to_string(), h * 3600 + m * 60 + s))
 }
 
+/// Fixtures shared by the RAPTOR tests and the real-time index tests.
+///
+/// A three-stop line (S1 → S2 → S3) served by two trips, plus a second
+/// platform (S4) sharing S1's parent station. Small enough to reason about
+/// by hand, which is what makes the expected times in the tests readable.
 #[cfg(test)]
-mod tests {
+pub mod test_support {
     use super::*;
-    use crate::gtfs;
 
-    // -----------------------------------------------------------------------
-    // format_datetime
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn format_datetime_normal() {
-        assert_eq!(format_datetime("20260405", 0), "20260405T000000");
-        assert_eq!(format_datetime("20260405", 30600), "20260405T083000");
-        assert_eq!(format_datetime("20260405", 86399), "20260405T235959");
-    }
-
-    #[test]
-    fn format_datetime_midnight() {
-        assert_eq!(format_datetime("20260405", 86400), "20260406T000000");
-    }
-
-    #[test]
-    fn format_datetime_past_midnight() {
-        // 25h30 = 91800s → rolls over to next day 01:30
-        assert_eq!(format_datetime("20260405", 91800), "20260406T013000");
-    }
-
-    #[test]
-    fn format_datetime_month_rollover() {
-        // Jan 31 + 24h = Feb 1
-        assert_eq!(format_datetime("20260131", 86400), "20260201T000000");
-    }
-
-    // -----------------------------------------------------------------------
-    // parse_datetime
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn parse_datetime_with_t_and_seconds() {
-        let (date, secs) = parse_datetime("20260405T083000").unwrap();
-        assert_eq!(date, "20260405");
-        assert_eq!(secs, 8 * 3600 + 30 * 60);
-    }
-
-    #[test]
-    fn parse_datetime_with_t_no_seconds() {
-        let (date, secs) = parse_datetime("20260405T0830").unwrap();
-        assert_eq!(date, "20260405");
-        assert_eq!(secs, 8 * 3600 + 30 * 60);
-    }
-
-    #[test]
-    fn parse_datetime_no_t() {
-        let (date, secs) = parse_datetime("20260405083000").unwrap();
-        assert_eq!(date, "20260405");
-        assert_eq!(secs, 8 * 3600 + 30 * 60);
-    }
-
-    #[test]
-    fn parse_datetime_date_only() {
-        let (date, secs) = parse_datetime("20260405").unwrap();
-        assert_eq!(date, "20260405");
-        assert_eq!(secs, 8 * 3600); // defaults to 08:00
-    }
-
-    #[test]
-    fn parse_datetime_too_short() {
-        assert!(parse_datetime("2026").is_none());
-        assert!(parse_datetime("").is_none());
-    }
-
-    // -----------------------------------------------------------------------
-    // date_to_weekday
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn date_to_weekday_known_dates() {
-        // 2026-04-05 is a Sunday
-        assert_eq!(date_to_weekday("20260405"), 6);
-        // 2026-04-06 is a Monday
-        assert_eq!(date_to_weekday("20260406"), 0);
-        // 2024-01-01 was a Monday
-        assert_eq!(date_to_weekday("20240101"), 0);
-        // 2024-02-29 was a Thursday (leap year)
-        assert_eq!(date_to_weekday("20240229"), 3);
-    }
-
-    #[test]
-    fn date_to_weekday_invalid() {
-        assert_eq!(date_to_weekday("short"), 7);
-        assert_eq!(date_to_weekday(""), 7);
-    }
-
-    // -----------------------------------------------------------------------
-    // haversine_approx
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn haversine_approx_same_point() {
-        assert_eq!(haversine_approx(48.8566, 2.3522, 48.8566, 2.3522), 0.0);
-    }
-
-    #[test]
-    fn haversine_approx_different_points() {
-        let d = haversine_approx(48.8566, 2.3522, 48.8534, 2.3488);
-        assert!(d > 0.0);
-    }
-
-    // -----------------------------------------------------------------------
-    // Helper: build a minimal RaptorData for testing
-    // -----------------------------------------------------------------------
-
-    fn make_test_gtfs() -> gtfs::GtfsData {
+    pub fn make_test_gtfs() -> gtfs::GtfsData {
         let mut stops = FxHashMap::default();
         stops.insert(
             "S1".to_string(),
@@ -1731,8 +1786,170 @@ mod tests {
         }
     }
 
-    fn build_test_data() -> RaptorData {
+    /// A single line S1 → S2 → S3 with one trip per entry in `departures`
+    /// (seconds since midnight at S1). Each leg takes ten minutes, and each
+    /// call has a one-minute dwell.
+    ///
+    /// Used to build timetables dense enough to exercise the trip-scan window,
+    /// which a two-trip fixture cannot.
+    pub fn timetabled_gtfs(departures: &[u32]) -> gtfs::GtfsData {
+        fn hms(seconds: u32) -> String {
+            format!(
+                "{:02}:{:02}:{:02}",
+                seconds / 3600,
+                (seconds % 3600) / 60,
+                seconds % 60
+            )
+        }
+
+        let mut base = make_test_gtfs();
+        base.trips.clear();
+        base.stop_times.clear();
+        // No foot transfers: walking S2 → S3 in 180 s would beat every ride and
+        // hide what the trip scan actually selected.
+        base.transfers.clear();
+
+        for (index, &departure) in departures.iter().enumerate() {
+            let trip_id = format!("T{index:02}");
+            base.trips.insert(
+                trip_id.clone(),
+                gtfs::Trip {
+                    route_id: "R1".to_string(),
+                    service_id: "SVC1".to_string(),
+                    trip_id: trip_id.clone(),
+                    trip_headsign: "Nation".to_string(),
+                    wheelchair_accessible: 0,
+                },
+            );
+            for (position, stop_id) in ["S1", "S2", "S3"].iter().enumerate() {
+                // Depart `departure` at S1, then ten minutes per leg; arrival
+                // is one minute before departure at every call after the first.
+                let leg = position as u32 * 600;
+                let arrival = departure + leg;
+                base.stop_times.push(gtfs::StopTime {
+                    trip_id: trip_id.clone(),
+                    arrival_time: hms(arrival),
+                    departure_time: hms(arrival + 60),
+                    stop_id: (*stop_id).to_string(),
+                    stop_sequence: position as u32,
+                });
+            }
+        }
+        base
+    }
+
+    pub fn build_test_data() -> RaptorData {
         RaptorData::build(make_test_gtfs(), 120)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::{build_test_data, make_test_gtfs};
+    use super::*;
+    use crate::transit::gtfs;
+
+    // -----------------------------------------------------------------------
+    // format_datetime
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn format_datetime_normal() {
+        assert_eq!(format_datetime("20260405", 0), "20260405T000000");
+        assert_eq!(format_datetime("20260405", 30600), "20260405T083000");
+        assert_eq!(format_datetime("20260405", 86399), "20260405T235959");
+    }
+
+    #[test]
+    fn format_datetime_midnight() {
+        assert_eq!(format_datetime("20260405", 86400), "20260406T000000");
+    }
+
+    #[test]
+    fn format_datetime_past_midnight() {
+        // 25h30 = 91800s → rolls over to next day 01:30
+        assert_eq!(format_datetime("20260405", 91800), "20260406T013000");
+    }
+
+    #[test]
+    fn format_datetime_month_rollover() {
+        // Jan 31 + 24h = Feb 1
+        assert_eq!(format_datetime("20260131", 86400), "20260201T000000");
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_datetime
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_datetime_with_t_and_seconds() {
+        let (date, secs) = parse_datetime("20260405T083000").unwrap();
+        assert_eq!(date, "20260405");
+        assert_eq!(secs, 8 * 3600 + 30 * 60);
+    }
+
+    #[test]
+    fn parse_datetime_with_t_no_seconds() {
+        let (date, secs) = parse_datetime("20260405T0830").unwrap();
+        assert_eq!(date, "20260405");
+        assert_eq!(secs, 8 * 3600 + 30 * 60);
+    }
+
+    #[test]
+    fn parse_datetime_no_t() {
+        let (date, secs) = parse_datetime("20260405083000").unwrap();
+        assert_eq!(date, "20260405");
+        assert_eq!(secs, 8 * 3600 + 30 * 60);
+    }
+
+    #[test]
+    fn parse_datetime_date_only() {
+        let (date, secs) = parse_datetime("20260405").unwrap();
+        assert_eq!(date, "20260405");
+        assert_eq!(secs, 8 * 3600); // defaults to 08:00
+    }
+
+    #[test]
+    fn parse_datetime_too_short() {
+        assert!(parse_datetime("2026").is_none());
+        assert!(parse_datetime("").is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // date_to_weekday
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn date_to_weekday_known_dates() {
+        // 2026-04-05 is a Sunday
+        assert_eq!(date_to_weekday("20260405"), 6);
+        // 2026-04-06 is a Monday
+        assert_eq!(date_to_weekday("20260406"), 0);
+        // 2024-01-01 was a Monday
+        assert_eq!(date_to_weekday("20240101"), 0);
+        // 2024-02-29 was a Thursday (leap year)
+        assert_eq!(date_to_weekday("20240229"), 3);
+    }
+
+    #[test]
+    fn date_to_weekday_invalid() {
+        assert_eq!(date_to_weekday("short"), 7);
+        assert_eq!(date_to_weekday(""), 7);
+    }
+
+    // -----------------------------------------------------------------------
+    // haversine_approx
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn haversine_approx_same_point() {
+        assert_eq!(haversine_approx(48.8566, 2.3522, 48.8566, 2.3522), 0.0);
+    }
+
+    #[test]
+    fn haversine_approx_different_points() {
+        let d = haversine_approx(48.8566, 2.3522, 48.8534, 2.3488);
+        assert!(d > 0.0);
     }
 
     // -----------------------------------------------------------------------
@@ -1907,7 +2124,9 @@ mod tests {
         let pattern = &data.patterns[0];
         let active = data.active_services("20260406"); // Monday, SVC1 active
         // At position 0, departure 08:01:00 = 28860, look for trip departing >= 28000
-        let result = find_earliest_trip(pattern, 0, 28000, &active, false);
+        let excluded = FxHashSet::default();
+        let options = QueryOptions::new(&active, 3, &excluded, false);
+        let result = find_earliest_trip(pattern, 0, 28000, &options, None);
         assert!(result.is_some());
     }
 
@@ -1917,7 +2136,9 @@ mod tests {
         let pattern = &data.patterns[0];
         let active = data.active_services("20260406");
         // All trips depart before 40000 at pos 0 → should return the last trip
-        let result = find_earliest_trip(pattern, 0, 99999, &active, false);
+        let excluded = FxHashSet::default();
+        let options = QueryOptions::new(&active, 3, &excluded, false);
+        let result = find_earliest_trip(pattern, 0, 99999, &options, None);
         assert!(result.is_none());
     }
 
@@ -1926,7 +2147,9 @@ mod tests {
         let data = build_test_data();
         let pattern = &data.patterns[0];
         let active = data.active_services("20260101"); // exception: SVC1 removed
-        let result = find_earliest_trip(pattern, 0, 0, &active, false);
+        let excluded = FxHashSet::default();
+        let options = QueryOptions::new(&active, 3, &excluded, false);
+        let result = find_earliest_trip(pattern, 0, 0, &options, None);
         assert!(result.is_none());
     }
 
@@ -1949,7 +2172,7 @@ mod tests {
             &FxHashSet::default(),
             false,
         );
-        let journeys = reconstruct_journeys(&data, &result, &[(target, 0)]);
+        let journeys = reconstruct_journeys(&data, &result, &[(target, 0)], None);
         assert!(!journeys.is_empty());
     }
 
@@ -1986,7 +2209,7 @@ mod tests {
             &FxHashSet::default(),
             false,
         );
-        let journeys = reconstruct_journeys(&data, &result, &[(target, 0)]);
+        let journeys = reconstruct_journeys(&data, &result, &[(target, 0)], None);
         assert!(journeys.is_empty());
     }
 
@@ -1999,7 +2222,7 @@ mod tests {
         // Exclude all patterns
         let excluded: FxHashSet<usize> = (0..data.patterns.len()).collect();
         let result = raptor_query(&data, &[(source, 0)], 28000, &active, 3, &excluded, false);
-        let journeys = reconstruct_journeys(&data, &result, &[(target, 0)]);
+        let journeys = reconstruct_journeys(&data, &result, &[(target, 0)], None);
         assert!(journeys.is_empty());
     }
 
@@ -2016,6 +2239,7 @@ mod tests {
                 to_stop: 1,
                 departure_time: 100,
                 arrival_time: 200,
+                delay: None,
                 pattern_idx: Some(5),
                 trip_idx: Some(0),
                 board_pos: Some(0),
@@ -2027,6 +2251,7 @@ mod tests {
                 to_stop: 2,
                 departure_time: 200,
                 arrival_time: 300,
+                delay: None,
                 pattern_idx: None,
                 trip_idx: None,
                 board_pos: None,
@@ -2086,6 +2311,7 @@ mod tests {
             to_stop: 5,
             departure_time: 100,
             arrival_time: 100,
+            delay: None,
             pattern_idx: None,
             trip_idx: None,
             board_pos: None,
@@ -2104,6 +2330,7 @@ mod tests {
             to_stop: 1,
             departure_time: 100,
             arrival_time: 100, // zero duration
+            delay: None,
             pattern_idx: Some(0),
             trip_idx: Some(0),
             board_pos: Some(0),
@@ -2123,6 +2350,7 @@ mod tests {
                 to_stop: 1,
                 departure_time: 100,
                 arrival_time: 200,
+                delay: None,
                 pattern_idx: None,
                 trip_idx: None,
                 board_pos: None,
@@ -2134,6 +2362,7 @@ mod tests {
                 to_stop: 2,
                 departure_time: 200,
                 arrival_time: 300,
+                delay: None,
                 pattern_idx: None,
                 trip_idx: None,
                 board_pos: None,
@@ -2230,7 +2459,7 @@ mod tests {
             &FxHashSet::default(),
             false,
         );
-        let journeys = reconstruct_journeys(&data, &result, &[(target, 0)]);
+        let journeys = reconstruct_journeys(&data, &result, &[(target, 0)], None);
         assert!(!journeys.is_empty());
         // Journey should have at least one PT section
         let has_pt = journeys[0]
@@ -2255,7 +2484,7 @@ mod tests {
             &FxHashSet::default(),
             false,
         );
-        let journeys = reconstruct_journeys(&data, &result, &[(target, 0)]);
+        let journeys = reconstruct_journeys(&data, &result, &[(target, 0)], None);
         assert!(journeys.is_empty());
     }
 
@@ -2289,6 +2518,7 @@ mod tests {
             to_stop: 3, // same stop
             departure_time: 100,
             arrival_time: 200,
+            delay: None,
             pattern_idx: Some(0),
             trip_idx: Some(0),
             board_pos: Some(0),
@@ -2379,5 +2609,202 @@ mod tests {
             .find(|(idx, _)| *idx == data.stop_index["S1"])
             .unwrap();
         assert!(slow_s1.1 >= fast_s1.1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Real-time routing
+    // -----------------------------------------------------------------------
+
+    use crate::transit::realtime::index::{RealtimeIndex, TripLookup, build_index};
+    use crate::transit::realtime::model::{
+        RealtimeFeed, StopRelationship, StopTimeUpdate, TimeUpdate, TripRef, TripRelationship,
+        TripUpdate,
+    };
+
+    /// Resolve one feed against `data` into an overlay.
+    fn overlay(data: &RaptorData, updates: Vec<TripUpdate>) -> RealtimeIndex {
+        let lookup = TripLookup::build(data);
+        build_index(
+            data,
+            &lookup,
+            &[RealtimeFeed {
+                trip_updates: updates,
+                timestamp: None,
+            }],
+        )
+    }
+
+    fn delayed(trip_id: &str, stop_id: &str, seconds: i32) -> TripUpdate {
+        TripUpdate {
+            trip: TripRef {
+                trip_id: Some(trip_id.to_string()),
+                ..Default::default()
+            },
+            relationship: TripRelationship::Scheduled,
+            delay: None,
+            stop_updates: vec![StopTimeUpdate {
+                stop_id: Some(stop_id.to_string()),
+                stop_sequence: None,
+                arrival: Some(TimeUpdate {
+                    delay: Some(seconds),
+                    time: None,
+                }),
+                departure: Some(TimeUpdate {
+                    delay: Some(seconds),
+                    time: None,
+                }),
+                relationship: StopRelationship::Scheduled,
+            }],
+            timestamp: None,
+        }
+    }
+
+    fn cancelled(trip_id: &str) -> TripUpdate {
+        TripUpdate {
+            trip: TripRef {
+                trip_id: Some(trip_id.to_string()),
+                ..Default::default()
+            },
+            relationship: TripRelationship::Canceled,
+            ..Default::default()
+        }
+    }
+
+    /// Run a query from S1 to S3 and return the arrival time at S3.
+    fn arrival_at_s3(data: &RaptorData, departure: u32, rt: Option<&RealtimeIndex>) -> Option<u32> {
+        let source = data.stop_index["S1"];
+        let target = data.stop_index["S3"];
+        let active = data.active_services("20260406");
+        let excluded = FxHashSet::default();
+        let result = raptor_query_bounded(
+            data,
+            &[(source, 0)],
+            departure,
+            &QueryOptions {
+                active: &active,
+                max_transfers: 3,
+                excluded_patterns: &excluded,
+                wheelchair: false,
+                targets: &[(target, 0)],
+                max_duration: INFINITY,
+                realtime: rt,
+            },
+        );
+        let journeys = reconstruct_journeys(data, &result, &[(target, 0)], rt);
+        journeys
+            .first()
+            .and_then(|sections| sections.last())
+            .map(|section| section.arrival_time)
+    }
+
+    /// Two departures, 08:00 and 09:00, on a line with no foot transfers.
+    /// A trip boarded at 08:01 reaches S3 at 08:20 (= 30000).
+    fn two_departures() -> RaptorData {
+        RaptorData::build(test_support::timetabled_gtfs(&[8 * 3600, 9 * 3600]), 120)
+    }
+
+    #[test]
+    fn a_delay_pushes_back_the_journey_arrival() {
+        let data = two_departures();
+        let rt = overlay(&data, vec![delayed("T00", "S3", 600)]);
+
+        assert_eq!(arrival_at_s3(&data, 28000, None), Some(30000));
+        assert_eq!(arrival_at_s3(&data, 28000, Some(&rt)), Some(30600));
+    }
+
+    #[test]
+    fn a_cancelled_trip_is_not_boarded_and_the_next_one_is_taken() {
+        let data = two_departures();
+        let rt = overlay(&data, vec![cancelled("T00")]);
+
+        // Without the feed: the 08:00 trip, arriving 08:20. With it, the 09:00.
+        assert_eq!(arrival_at_s3(&data, 28000, None), Some(30000));
+        assert_eq!(arrival_at_s3(&data, 28000, Some(&rt)), Some(33600));
+    }
+
+    #[test]
+    fn cancelling_every_trip_leaves_no_journey() {
+        let data = two_departures();
+        let rt = overlay(&data, vec![cancelled("T00"), cancelled("T01")]);
+        assert_eq!(arrival_at_s3(&data, 28000, Some(&rt)), None);
+    }
+
+    #[test]
+    fn a_journey_reports_the_delay_it_was_planned_with() {
+        let data = two_departures();
+        let rt = overlay(&data, vec![delayed("T00", "S3", 420)]);
+        let source = data.stop_index["S1"];
+        let target = data.stop_index["S3"];
+        let active = data.active_services("20260406");
+        let excluded = FxHashSet::default();
+
+        let result = raptor_query_bounded(
+            &data,
+            &[(source, 0)],
+            28000,
+            &QueryOptions {
+                active: &active,
+                max_transfers: 3,
+                excluded_patterns: &excluded,
+                wheelchair: false,
+                targets: &[(target, 0)],
+                max_duration: INFINITY,
+                realtime: Some(&rt),
+            },
+        );
+        let journeys = reconstruct_journeys(&data, &result, &[(target, 0)], Some(&rt));
+        let leg = journeys[0]
+            .iter()
+            .find(|s| matches!(s.section_type, SectionType::PublicTransport))
+            .expect("a public-transport leg");
+        assert_eq!(leg.delay, Some(420));
+
+        // Without an overlay the same leg reports no real-time information at
+        // all, which is a different statement from "on time".
+        let journeys = reconstruct_journeys(&data, &result, &[(target, 0)], None);
+        let leg = journeys[0]
+            .iter()
+            .find(|s| matches!(s.section_type, SectionType::PublicTransport))
+            .expect("a public-transport leg");
+        assert_eq!(leg.delay, None);
+    }
+
+    #[test]
+    fn a_heavily_delayed_trip_is_found_outside_the_scheduled_search_window() {
+        // The regression this guards: trips are sorted by *scheduled* departure
+        // and the scan starts a fixed eight trips before the binary-search
+        // pivot. A vehicle delayed past that window would be invisible, and the
+        // router would send the traveller to a much later service.
+        let mut departures: Vec<u32> = (0..10).map(|i| 8 * 3600 + i * 300).collect();
+        departures.push(10 * 3600); // nothing else until 10:00
+        let data = RaptorData::build(test_support::timetabled_gtfs(&departures), 120);
+
+        // The 08:00 trip runs one hour late, so it now departs at 09:00.
+        let rt = overlay(&data, vec![delayed("T00", "S1", 3600)]);
+
+        // Query at 08:50: on the schedule alone, the next departure is 10:00.
+        assert_eq!(
+            arrival_at_s3(&data, 8 * 3600 + 3000, None),
+            Some(10 * 3600 + 1200)
+        );
+        // With the feed, the delayed 08:00 service is still ahead of it.
+        assert_eq!(
+            arrival_at_s3(&data, 8 * 3600 + 3000, Some(&rt)),
+            Some(9 * 3600 + 1200),
+            "the delayed trip sits more than eight trips before the pivot"
+        );
+    }
+
+    #[test]
+    fn a_skipped_stop_cannot_be_alighted_at() {
+        let data = two_departures();
+        let mut update = delayed("T00", "S3", 0);
+        update.stop_updates[0].relationship = StopRelationship::Skipped;
+        let rt = overlay(&data, vec![update]);
+
+        // The 08:00 trip no longer serves S3, so it is set aside entirely and
+        // the traveller waits for the 09:00 rather than being routed to a call
+        // the vehicle passes through.
+        assert_eq!(arrival_at_s3(&data, 28000, Some(&rt)), Some(33600));
     }
 }

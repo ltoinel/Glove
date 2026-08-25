@@ -6,9 +6,9 @@ use serde::Serialize;
 use std::sync::Arc;
 use utoipa::ToSchema;
 
-use crate::config::AppConfig;
-use crate::gtfs::GtfsData;
-use crate::raptor::RaptorData;
+use crate::shared::config::AppConfig;
+use crate::transit::gtfs::GtfsData;
+use crate::transit::raptor::RaptorData;
 
 // ---------------------------------------------------------------------------
 // Validation types
@@ -513,8 +513,8 @@ fn check_unparseable_times(gtfs: &GtfsData) -> Vec<ValidationIssue> {
         .stop_times
         .iter()
         .filter(|st| {
-            crate::gtfs::parse_time(&st.arrival_time).is_none()
-                || crate::gtfs::parse_time(&st.departure_time).is_none()
+            crate::transit::gtfs::parse_time(&st.arrival_time).is_none()
+                || crate::transit::gtfs::parse_time(&st.departure_time).is_none()
         })
         .map(|st| {
             format!(
@@ -677,9 +677,9 @@ pub async fn post_reload(
     let result = web::block(move || {
         let data_path = std::path::Path::new(&data_dir);
         let cache_path = std::path::Path::new(&raptor_dir);
-        let gtfs = crate::gtfs::GtfsData::load(data_path).map_err(|e| e.to_string())?;
-        let fingerprint = crate::gtfs::gtfs_fingerprint(data_path);
-        let new_data = crate::raptor::RaptorData::build(gtfs, transfer_time);
+        let gtfs = crate::transit::gtfs::GtfsData::load(data_path).map_err(|e| e.to_string())?;
+        let fingerprint = crate::transit::gtfs::gtfs_fingerprint(data_path);
+        let new_data = crate::transit::raptor::RaptorData::build(gtfs, transfer_time);
         if let Err(e) = new_data.save(cache_path, &fingerprint) {
             tracing::warn!("Failed to save RAPTOR cache: {e}");
         }
@@ -713,7 +713,7 @@ pub async fn post_reload(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gtfs;
+    use crate::transit::gtfs;
     use rustc_hash::FxHashMap;
 
     fn make_test_gtfs() -> GtfsData {
@@ -917,7 +917,7 @@ mod tests {
     #[test]
     fn validate_bad_transfer() {
         let mut gtfs = make_test_gtfs();
-        gtfs.transfers.push(crate::gtfs::Transfer {
+        gtfs.transfers.push(crate::transit::gtfs::Transfer {
             from_stop_id: "GHOST_A".into(),
             to_stop_id: "GHOST_B".into(),
             min_transfer_time: Some(0), // also flags transfer_time check
@@ -936,7 +936,7 @@ mod tests {
         let mut gtfs = make_test_gtfs();
         gtfs.routes.insert(
             "R2".into(),
-            crate::gtfs::Route {
+            crate::transit::gtfs::Route {
                 route_id: "R2".into(),
                 agency_id: "A1".into(),
                 route_short_name: "2".into(),
@@ -954,7 +954,7 @@ mod tests {
         let mut gtfs = make_test_gtfs();
         gtfs.trips.insert(
             "T2".into(),
-            crate::gtfs::Trip {
+            crate::transit::gtfs::Trip {
                 route_id: "R1".into(),
                 service_id: "SVC1".into(),
                 trip_id: "T2".into(),
@@ -970,7 +970,7 @@ mod tests {
     #[test]
     fn validate_unparseable_time() {
         let mut gtfs = make_test_gtfs();
-        gtfs.stop_times.push(crate::gtfs::StopTime {
+        gtfs.stop_times.push(crate::transit::gtfs::StopTime {
             trip_id: "T1".into(),
             arrival_time: "bad-time".into(),
             departure_time: "08:01:00".into(),
@@ -986,7 +986,10 @@ mod tests {
 
     #[actix_web::test]
     async fn post_reload_disabled_when_api_key_empty() {
-        let data = Arc::new(crate::raptor::RaptorData::build(make_test_gtfs(), 120));
+        let data = Arc::new(crate::transit::raptor::RaptorData::build(
+            make_test_gtfs(),
+            120,
+        ));
         let cfg = AppConfig::default();
         let app = actix_web::test::init_service(
             actix_web::App::new()
@@ -1004,7 +1007,10 @@ mod tests {
 
     #[actix_web::test]
     async fn gtfs_status_returns_stats() {
-        let data = Arc::new(crate::raptor::RaptorData::build(make_test_gtfs(), 120));
+        let data = Arc::new(crate::transit::raptor::RaptorData::build(
+            make_test_gtfs(),
+            120,
+        ));
         let app = actix_web::test::init_service(
             actix_web::App::new()
                 .app_data(web::Data::new(ArcSwap::from(data)))
@@ -1024,7 +1030,10 @@ mod tests {
 
     #[actix_web::test]
     async fn post_reload_unauthorized_when_wrong_key() {
-        let data = Arc::new(crate::raptor::RaptorData::build(make_test_gtfs(), 120));
+        let data = Arc::new(crate::transit::raptor::RaptorData::build(
+            make_test_gtfs(),
+            120,
+        ));
         let mut cfg = AppConfig::default();
         cfg.server.api_key = "secret".into();
         let app = actix_web::test::init_service(
@@ -1044,7 +1053,10 @@ mod tests {
 
     #[actix_web::test]
     async fn post_reload_authorized_attempts_load() {
-        let data = Arc::new(crate::raptor::RaptorData::build(make_test_gtfs(), 120));
+        let data = Arc::new(crate::transit::raptor::RaptorData::build(
+            make_test_gtfs(),
+            120,
+        ));
         let mut cfg = AppConfig::default();
         cfg.server.api_key = "secret".into();
         // Point data dir at non-existent path → load fails → 500
@@ -1121,7 +1133,10 @@ mod tests {
         cfg.server.api_key = "secret".into();
         write_minimal_gtfs(std::path::Path::new(&cfg.data.gtfs_dir()));
 
-        let data = Arc::new(crate::raptor::RaptorData::build(make_test_gtfs(), 120));
+        let data = Arc::new(crate::transit::raptor::RaptorData::build(
+            make_test_gtfs(),
+            120,
+        ));
         let app = actix_web::test::init_service(
             actix_web::App::new()
                 .app_data(web::Data::new(ArcSwap::from(data)))

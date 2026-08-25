@@ -11,8 +11,10 @@ use utoipa::{IntoParams, ToSchema};
 
 use std::sync::Arc;
 
-use crate::config::{AppConfig, WheelchairConfig};
-use crate::raptor::{self, RaptorData, SectionType};
+use crate::shared::config::{AppConfig, WheelchairConfig};
+use crate::transit::raptor::{self, RaptorData, SectionType};
+use crate::transit::realtime::index::RealtimeIndex;
+use crate::transit::realtime::service::RealtimeService;
 
 use super::valhalla;
 use crate::api::{Place, Section, StopDateTime, make_place, make_stop_point};
@@ -104,10 +106,11 @@ pub async fn get_journeys(
     query: web::Query<JourneysQuery>,
     shared: web::Data<ArcSwap<RaptorData>>,
     config: web::Data<AppConfig>,
+    realtime: web::Data<RealtimeService>,
 ) -> HttpResponse {
     let raptor_data = shared.load();
 
-    let resolved = match resolve_journey_query(&query, &raptor_data, &config) {
+    let resolved = match resolve_journey_query(&query, &raptor_data, &config, realtime.index()) {
         Ok(r) => r,
         Err(resp) => return resp,
     };
@@ -145,6 +148,10 @@ struct ResolvedQuery {
     mode_excluded: rustc_hash::FxHashSet<usize>,
     diverse_lines: bool,
     prefer_rail: bool,
+    /// Real-time overlay, snapshotted once per request so that every iteration
+    /// of the diverse search sees the same data even if a refresh lands
+    /// mid-request.
+    realtime: Option<Arc<RealtimeIndex>>,
 }
 
 fn bad_request(id: &str, message: String) -> HttpResponse {
@@ -159,6 +166,7 @@ fn resolve_journey_query(
     query: &JourneysQuery,
     raptor_data: &RaptorData,
     config: &AppConfig,
+    realtime: Option<Arc<RealtimeIndex>>,
 ) -> Result<ResolvedQuery, HttpResponse> {
     let from_str = query
         .from
@@ -217,6 +225,7 @@ fn resolve_journey_query(
         mode_excluded,
         diverse_lines: config.routing.diverse_lines,
         prefer_rail: config.routing.prefer_rail,
+        realtime,
     })
 }
 
@@ -327,22 +336,31 @@ fn collect_alternatives(
             raptor_data,
             &q.sources,
             q.effective_departure,
-            &q.active,
-            q.max_transfers,
-            &query_excluded,
-            q.wheelchair,
-            &q.targets,
-            q.max_duration,
+            &raptor::QueryOptions {
+                active: &q.active,
+                max_transfers: q.max_transfers,
+                excluded_patterns: &query_excluded,
+                wheelchair: q.wheelchair,
+                targets: &q.targets,
+                max_duration: q.max_duration,
+                realtime: q.realtime.as_deref(),
+            },
         );
 
-        let section_sets = raptor::reconstruct_journeys(raptor_data, &result, &q.targets);
+        let section_sets =
+            raptor::reconstruct_journeys(raptor_data, &result, &q.targets, q.realtime.as_deref());
         if section_sets.is_empty() {
             break;
         }
 
         let prev_count = journeys.len();
         for sections in &section_sets {
-            let journey = build_journey(raptor_data, sections, &q.effective_date);
+            let journey = build_journey(
+                raptor_data,
+                sections,
+                &q.effective_date,
+                q.realtime.as_deref(),
+            );
             if journey.duration > q.max_duration {
                 continue;
             }
@@ -535,6 +553,7 @@ fn build_walk_section(
             None
         },
         transfer_type: None,
+        delay: None,
     }
 }
 
@@ -835,7 +854,7 @@ fn journey_sections_equal(a: &Journey, b: &Journey) -> bool {
     journey_section_key(a) == journey_section_key(b)
 }
 
-use crate::util::parse_coord;
+use crate::shared::util::parse_coord;
 
 // ---------------------------------------------------------------------------
 // Stop resolution & mode exclusion
@@ -915,7 +934,7 @@ fn route_type_to_mode(route_type: u16) -> &'static str {
 }
 
 /// Build display info (line label, color, mode) from a GTFS route.
-fn make_display_info(route: &crate::gtfs::Route, headsign: &str) -> DisplayInfo {
+fn make_display_info(route: &crate::transit::gtfs::Route, headsign: &str) -> DisplayInfo {
     DisplayInfo {
         network: String::new(),
         direction: headsign.to_string(),
@@ -969,7 +988,7 @@ fn compute_mode_exclusions(
 /// Returns `(merge_target_index, should_merge)`.
 fn find_merge_target(
     api_sections: &[Section],
-    from_stop: &crate::gtfs::Stop,
+    from_stop: &crate::transit::gtfs::Stop,
     display_info: &Option<DisplayInfo>,
 ) -> (usize, bool) {
     let len = api_sections.len();
@@ -1009,7 +1028,12 @@ fn find_merge_target(
 ///
 /// Walks through each section, building display info for PT legs, merging
 /// consecutive sections on the same line (trip splits), and counting transfers.
-fn build_journey(data: &RaptorData, sections: &[raptor::JourneySection], date: &str) -> Journey {
+fn build_journey(
+    data: &RaptorData,
+    sections: &[raptor::JourneySection],
+    date: &str,
+    realtime: Option<&RealtimeIndex>,
+) -> Journey {
     let mut api_sections: Vec<Section> = Vec::new();
     let mut nb_transfers: u32 = 0;
     let mut pt_count: u32 = 0;
@@ -1027,9 +1051,9 @@ fn build_journey(data: &RaptorData, sections: &[raptor::JourneySection], date: &
                 if pt_count > 1 {
                     nb_transfers += 1;
                 }
-                let (display_info, stop_date_times) = build_pt_metadata(data, section, date);
+                let metadata = build_pt_metadata(data, section, date, realtime);
                 let (merge_target_idx, should_merge) =
-                    find_merge_target(&api_sections, from_stop, &display_info);
+                    find_merge_target(&api_sections, from_stop, &metadata.display);
                 if should_merge {
                     merge_with_previous(
                         &mut api_sections,
@@ -1037,19 +1061,13 @@ fn build_journey(data: &RaptorData, sections: &[raptor::JourneySection], date: &
                         to_stop,
                         arr_dt,
                         duration,
-                        stop_date_times,
+                        metadata.stop_date_times,
                     );
                     pt_count -= 1;
                     nb_transfers = nb_transfers.saturating_sub(1);
                 } else {
                     api_sections.push(make_pt_section(
-                        from_stop,
-                        to_stop,
-                        dep_dt,
-                        arr_dt,
-                        duration,
-                        display_info,
-                        stop_date_times,
+                        from_stop, to_stop, dep_dt, arr_dt, duration, metadata,
                     ));
                 }
             }
@@ -1074,25 +1092,47 @@ fn build_journey(data: &RaptorData, sections: &[raptor::JourneySection], date: &
     }
 }
 
+/// Everything a public-transport section needs beyond its endpoints: the line
+/// it runs on, the per-stop schedule, and any real-time delay.
+///
+/// Bundled so the section constructor stays at six arguments and so the three
+/// values, which are always computed together, cannot drift apart.
+struct PtMetadata {
+    display: Option<DisplayInfo>,
+    stop_date_times: Option<Vec<StopDateTime>>,
+    delay: Option<i32>,
+}
+
 /// Build the per-stop schedule and route display info for a PT section.
+///
+/// Per-stop times carry the same real-time offsets the router searched on: a
+/// journey planned on real times must not be displayed on scheduled ones.
 fn build_pt_metadata(
     data: &RaptorData,
     section: &raptor::JourneySection,
     date: &str,
-) -> (Option<DisplayInfo>, Option<Vec<StopDateTime>>) {
+    realtime: Option<&RealtimeIndex>,
+) -> PtMetadata {
     let (Some(pat_idx), Some(trip_idx), Some(bp), Some(ap)) = (
         section.pattern_idx,
         section.trip_idx,
         section.board_pos,
         section.alight_pos,
     ) else {
-        return (None, None);
+        return PtMetadata {
+            display: None,
+            stop_date_times: None,
+            delay: None,
+        };
     };
 
     let pattern = &data.patterns[pat_idx];
     let trip = &pattern.trips[trip_idx];
+    let deltas = realtime
+        .and_then(|index| index.pattern(pat_idx))
+        .and_then(|pattern| pattern.trip(trip_idx));
 
-    let display_info = data
+    let display = data
         .routes
         .get(&pattern.route_id)
         .map(|route| make_display_info(route, &trip.headsign));
@@ -1100,15 +1140,26 @@ fn build_pt_metadata(
     let stop_date_times: Vec<StopDateTime> = (bp..=ap)
         .map(|pos| {
             let st = &data.stops[pattern.stops[pos]];
+            let (scheduled_arrival, scheduled_departure) = trip.stop_times[pos];
+            let arrival = deltas
+                .and_then(|delta| delta.arrival(pos, scheduled_arrival))
+                .unwrap_or(scheduled_arrival);
+            let departure = deltas
+                .and_then(|delta| delta.departure(pos, scheduled_departure))
+                .unwrap_or(scheduled_departure);
             StopDateTime {
                 stop_point: make_stop_point(st),
-                arrival_date_time: raptor::format_datetime(date, trip.stop_times[pos].0),
-                departure_date_time: raptor::format_datetime(date, trip.stop_times[pos].1),
+                arrival_date_time: raptor::format_datetime(date, arrival),
+                departure_date_time: raptor::format_datetime(date, departure),
             }
         })
         .collect();
 
-    (display_info, Some(stop_date_times))
+    PtMetadata {
+        display,
+        stop_date_times: Some(stop_date_times),
+        delay: section.delay,
+    }
 }
 
 /// Merge an incoming PT section into a previous one at `merge_target_idx`
@@ -1118,7 +1169,7 @@ fn build_pt_metadata(
 fn merge_with_previous(
     api_sections: &mut Vec<Section>,
     merge_target_idx: usize,
-    to_stop: &crate::gtfs::Stop,
+    to_stop: &crate::transit::gtfs::Stop,
     arr_dt: String,
     duration: u32,
     stop_date_times: Option<Vec<StopDateTime>>,
@@ -1138,13 +1189,12 @@ fn merge_with_previous(
 }
 
 fn make_pt_section(
-    from_stop: &crate::gtfs::Stop,
-    to_stop: &crate::gtfs::Stop,
+    from_stop: &crate::transit::gtfs::Stop,
+    to_stop: &crate::transit::gtfs::Stop,
     dep_dt: String,
     arr_dt: String,
     duration: u32,
-    display_informations: Option<DisplayInfo>,
-    stop_date_times: Option<Vec<StopDateTime>>,
+    metadata: PtMetadata,
 ) -> Section {
     Section {
         section_type: "public_transport".to_string(),
@@ -1153,18 +1203,19 @@ fn make_pt_section(
         departure_date_time: dep_dt,
         arrival_date_time: arr_dt,
         duration,
-        display_informations,
-        stop_date_times,
+        display_informations: metadata.display,
+        stop_date_times: metadata.stop_date_times,
         shape: None,
         distance: None,
         maneuvers: None,
         transfer_type: None,
+        delay: metadata.delay,
     }
 }
 
 fn make_transfer_section(
-    from_stop: &crate::gtfs::Stop,
-    to_stop: &crate::gtfs::Stop,
+    from_stop: &crate::transit::gtfs::Stop,
+    to_stop: &crate::transit::gtfs::Stop,
     dep_dt: String,
     arr_dt: String,
     duration: u32,
@@ -1182,6 +1233,7 @@ fn make_transfer_section(
         distance: None,
         maneuvers: None,
         transfer_type: None,
+        delay: None,
     }
 }
 
@@ -1293,7 +1345,7 @@ fn tag_journeys(journeys: &mut [Journey], wheelchair: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gtfs;
+    use crate::transit::gtfs;
     use rustc_hash::FxHashMap;
 
     fn make_test_raptor_data() -> Arc<RaptorData> {
@@ -1403,6 +1455,7 @@ mod tests {
             to_stop: 1,
             departure_time: 100,
             arrival_time: 200,
+            delay: None,
             pattern_idx,
             trip_idx: pattern_idx.map(|_| 0),
             board_pos: pattern_idx.map(|_| 0),
@@ -1507,6 +1560,7 @@ mod tests {
                     distance: None,
                     maneuvers: None,
                     transfer_type: None,
+                    delay: None,
                 }],
             },
             Journey {
@@ -1541,6 +1595,7 @@ mod tests {
             distance: None,
             maneuvers: None,
             transfer_type: None,
+            delay: None,
         };
         let mut journeys = vec![
             Journey {
@@ -1584,9 +1639,9 @@ mod tests {
             &rustc_hash::FxHashSet::default(),
             false,
         );
-        let section_sets = raptor::reconstruct_journeys(&data, &result, &[(target, 0)]);
+        let section_sets = raptor::reconstruct_journeys(&data, &result, &[(target, 0)], None);
         assert!(!section_sets.is_empty());
-        let journey = build_journey(&data, &section_sets[0], "20260406");
+        let journey = build_journey(&data, &section_sets[0], "20260406", None);
         assert!(journey.duration > 0);
         assert!(!journey.sections.is_empty());
         assert!(journey.departure_date_time.contains('T'));
@@ -1608,8 +1663,8 @@ mod tests {
             &rustc_hash::FxHashSet::default(),
             false,
         );
-        let section_sets = raptor::reconstruct_journeys(&data, &result, &[(target, 0)]);
-        let journey = build_journey(&data, &section_sets[0], "20260406");
+        let section_sets = raptor::reconstruct_journeys(&data, &result, &[(target, 0)], None);
+        let journey = build_journey(&data, &section_sets[0], "20260406", None);
         let pt_sections: Vec<_> = journey
             .sections
             .iter()
@@ -1635,6 +1690,7 @@ mod tests {
             actix_web::App::new()
                 .app_data(shared)
                 .app_data(config)
+                .app_data(web::Data::new(RealtimeService::disabled()))
                 .service(get_journeys),
         )
         .await;
@@ -1654,6 +1710,7 @@ mod tests {
             actix_web::App::new()
                 .app_data(shared)
                 .app_data(config)
+                .app_data(web::Data::new(RealtimeService::disabled()))
                 .service(get_journeys),
         )
         .await;
@@ -1673,6 +1730,7 @@ mod tests {
             actix_web::App::new()
                 .app_data(shared)
                 .app_data(config)
+                .app_data(web::Data::new(RealtimeService::disabled()))
                 .service(get_journeys),
         )
         .await;
@@ -1692,6 +1750,7 @@ mod tests {
             actix_web::App::new()
                 .app_data(shared)
                 .app_data(config)
+                .app_data(web::Data::new(RealtimeService::disabled()))
                 .service(get_journeys),
         )
         .await;
@@ -1711,6 +1770,7 @@ mod tests {
             actix_web::App::new()
                 .app_data(shared)
                 .app_data(config)
+                .app_data(web::Data::new(RealtimeService::disabled()))
                 .service(get_journeys),
         )
         .await;
@@ -1734,6 +1794,7 @@ mod tests {
             actix_web::App::new()
                 .app_data(shared)
                 .app_data(config)
+                .app_data(web::Data::new(RealtimeService::disabled()))
                 .service(get_journeys),
         )
         .await;
@@ -1781,6 +1842,7 @@ mod tests {
             distance: None,
             maneuvers: None,
             transfer_type: None,
+            delay: None,
         }
     }
 
@@ -1798,11 +1860,12 @@ mod tests {
             distance: None,
             maneuvers: None,
             transfer_type: None,
+            delay: None,
         }
     }
 
-    fn make_gtfs_stop(id: &str) -> crate::gtfs::Stop {
-        crate::gtfs::Stop {
+    fn make_gtfs_stop(id: &str) -> crate::transit::gtfs::Stop {
+        crate::transit::gtfs::Stop {
             stop_id: id.into(),
             stop_name: id.into(),
             stop_lon: 2.3,
@@ -2013,8 +2076,11 @@ mod tests {
             "20260406T080000".into(),
             "20260406T081000".into(),
             600,
-            None,
-            None,
+            PtMetadata {
+                display: None,
+                stop_date_times: None,
+                delay: None,
+            },
         );
         assert_eq!(s.section_type, "public_transport");
         assert_eq!(s.duration, 600);
@@ -2281,6 +2347,7 @@ mod tests {
                 distance: None,
                 maneuvers: None,
                 transfer_type: None,
+                delay: None,
             }],
         }];
         enrich_transfers(&mut journeys, &ctx).await;
@@ -2314,10 +2381,10 @@ mod tests {
             &rustc_hash::FxHashSet::default(),
             false,
         );
-        let section_sets = raptor::reconstruct_journeys(&data, &result, &[(target, 0)]);
+        let section_sets = raptor::reconstruct_journeys(&data, &result, &[(target, 0)], None);
         let mut journeys: Vec<Journey> = section_sets
             .iter()
-            .map(|s| build_journey(&data, s, "20260406"))
+            .map(|s| build_journey(&data, s, "20260406", None))
             .collect();
         let endpoints = Endpoints {
             from: Some((2.347, 48.858)),
@@ -2344,6 +2411,7 @@ mod tests {
             actix_web::App::new()
                 .app_data(shared)
                 .app_data(web::Data::new(cfg))
+                .app_data(web::Data::new(RealtimeService::disabled()))
                 .service(get_journeys),
         )
         .await;
@@ -2366,6 +2434,7 @@ mod tests {
             actix_web::App::new()
                 .app_data(shared)
                 .app_data(config)
+                .app_data(web::Data::new(RealtimeService::disabled()))
                 .service(get_journeys),
         )
         .await;
@@ -2386,6 +2455,7 @@ mod tests {
             actix_web::App::new()
                 .app_data(shared)
                 .app_data(config)
+                .app_data(web::Data::new(RealtimeService::disabled()))
                 .service(get_journeys),
         )
         .await;
@@ -2419,6 +2489,7 @@ mod tests {
                 distance: None,
                 maneuvers: None,
                 transfer_type: None,
+                delay: None,
             }],
         }
     }
@@ -2788,9 +2859,9 @@ mod tests {
             &rustc_hash::FxHashSet::default(),
             false,
         );
-        let section_sets = raptor::reconstruct_journeys(&data, &result, &[(s3, 0)]);
+        let section_sets = raptor::reconstruct_journeys(&data, &result, &[(s3, 0)], None);
         if !section_sets.is_empty() {
-            let journey = build_journey(&data, &section_sets[0], "20260406");
+            let journey = build_journey(&data, &section_sets[0], "20260406", None);
             // Verify the journey reached S3 successfully
             assert!(journey.duration > 0);
         }

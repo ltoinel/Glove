@@ -4,7 +4,7 @@ use actix_web::{HttpResponse, get, web};
 use serde::Serialize;
 use utoipa::ToSchema;
 
-use crate::config::AppConfig;
+use crate::shared::config::AppConfig;
 
 /// Check Valhalla connectivity by hitting its /status endpoint.
 ///
@@ -79,7 +79,7 @@ pub struct StatusResponse {
 
 /// Build the GTFS + RAPTOR statistics payload, shared by `GET /api/gtfs/status`
 /// and `POST /api/gtfs/reload`.
-pub fn gtfs_status_payload(s: &crate::raptor::GtfsStats) -> serde_json::Value {
+pub fn gtfs_status_payload(s: &crate::transit::raptor::GtfsStats) -> serde_json::Value {
     serde_json::json!({
         "loaded_at": s.loaded_at.to_rfc3339(),
         "gtfs": {
@@ -129,7 +129,7 @@ pub async fn get_status(config: web::Data<AppConfig>) -> HttpResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AppConfig;
+    use crate::shared::config::AppConfig;
 
     #[actix_web::test]
     async fn check_valhalla_rejects_empty_host() {

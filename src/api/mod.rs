@@ -6,11 +6,13 @@
 //! - [`status`]   — `GET /api/status` (engine health)
 //! - [`gtfs`]     — `GET /api/gtfs/validate` + `POST /api/gtfs/reload` (GTFS management)
 //! - [`traffic`]  — `GET /api/traffic/{geometry,states}` (real-time road traffic overlay)
+//! - [`realtime`] — `GET /api/realtime/status` (real-time transit feed health)
 
 pub mod gtfs;
 pub mod journeys;
 pub mod metrics;
 pub mod places;
+pub mod realtime;
 pub mod status;
 pub mod tiles;
 pub mod traffic;
@@ -25,6 +27,7 @@ pub use journeys::{__path_get_journeys, get_journeys};
 pub use journeys::{__path_get_walk, get_walk};
 pub use metrics::{__path_get_metrics, get_metrics};
 pub use places::{__path_get_places, get_places};
+pub use realtime::{__path_get_realtime_status, get_realtime_status};
 pub use status::{__path_get_status, get_status};
 pub use tiles::get_tile;
 pub use traffic::{
@@ -89,6 +92,11 @@ pub struct Section {
     /// Transfer type: "indoor" (same station) or "outdoor" (different stations).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transfer_type: Option<String>,
+    /// Seconds late at the arrival stop, when a real-time feed covers this leg.
+    /// Absent means no feed said anything about it — which is not the same as
+    /// `0`, a feed reporting the vehicle exactly on time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delay: Option<i32>,
 }
 
 /// A stop visit within a public transport section.
@@ -99,8 +107,8 @@ pub struct StopDateTime {
     pub departure_date_time: String,
 }
 
-/// Build a [`Place`] from a GTFS [`Stop`](crate::gtfs::Stop).
-pub fn make_place(stop: &crate::gtfs::Stop) -> Place {
+/// Build a [`Place`] from a GTFS [`Stop`](crate::transit::gtfs::Stop).
+pub fn make_place(stop: &crate::transit::gtfs::Stop) -> Place {
     Place {
         id: stop.stop_id.clone(),
         name: stop.stop_name.clone(),
@@ -108,8 +116,8 @@ pub fn make_place(stop: &crate::gtfs::Stop) -> Place {
     }
 }
 
-/// Build a [`StopPointRef`] from a GTFS [`Stop`](crate::gtfs::Stop).
-pub fn make_stop_point(stop: &crate::gtfs::Stop) -> StopPointRef {
+/// Build a [`StopPointRef`] from a GTFS [`Stop`](crate::transit::gtfs::Stop).
+pub fn make_stop_point(stop: &crate::transit::gtfs::Stop) -> StopPointRef {
     StopPointRef {
         id: stop.stop_id.clone(),
         name: stop.stop_name.clone(),
@@ -123,7 +131,7 @@ pub fn make_stop_point(stop: &crate::gtfs::Stop) -> StopPointRef {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gtfs::Stop;
+    use crate::transit::gtfs::Stop;
 
     fn test_stop() -> Stop {
         Stop {

@@ -3,6 +3,18 @@
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
+/// Strip a URL's query string, replacing it with `?…` when one was present.
+///
+/// Real-time providers commonly pass the API key as a query parameter, so a
+/// feed URL is a credential. Logs and the status endpoint show the endpoint
+/// without it.
+pub fn redact_query(url: &str) -> String {
+    match url.split_once('?') {
+        Some((base, _)) => format!("{base}?…"),
+        None => url.to_string(),
+    }
+}
+
 /// Compute a SHA-256 fingerprint of a directory based on file sizes.
 ///
 /// Hashes each listed file's name and size. Files that don't exist are skipped.

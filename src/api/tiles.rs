@@ -7,7 +7,7 @@
 use actix_web::{HttpResponse, get, web};
 use std::path::PathBuf;
 
-use crate::config::AppConfig;
+use crate::shared::config::AppConfig;
 
 /// Subdomains for load balancing across tile servers.
 const SUBDOMAINS: &[&str] = &["a", "b", "c", "d"];

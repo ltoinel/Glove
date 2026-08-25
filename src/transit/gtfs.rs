@@ -265,7 +265,7 @@ pub fn parse_time(time_str: &str) -> Option<u32> {
 /// This is a fast way to detect changes without reading file contents.
 /// Returns a hex-encoded hash string.
 pub fn gtfs_fingerprint(data_dir: &Path) -> String {
-    crate::util::dir_fingerprint(
+    crate::shared::util::dir_fingerprint(
         data_dir,
         &[
             "agency.txt",

@@ -23,8 +23,8 @@ use serde::Serialize;
 use tracing::{debug, info, warn};
 use utoipa::ToSchema;
 
-use crate::config::TrafficConfig;
-use crate::traffic::{TrafficEvent, TrafficGeometry, build_snapshot};
+use crate::shared::config::TrafficConfig;
+use crate::traffic::sytadin::{TrafficEvent, TrafficGeometry, build_snapshot};
 
 /// Timeout for a single dynamic-feed fetch.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
