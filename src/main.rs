@@ -17,6 +17,7 @@ mod transit;
 use geocoding::ban;
 use shared::config;
 use traffic::sytadin;
+use transit::disruptions::store::DisruptionStore;
 use transit::{gtfs, raptor, realtime};
 
 use actix_cors::Cors;
@@ -131,6 +132,13 @@ fn load_or_build_ban(config: &config::AppConfig) -> Arc<ban::BanData> {
         api::get_traffic_geometry,
         api::get_traffic_states,
         api::get_realtime_status,
+        api::get_lines,
+        api::get_disruptions,
+        api::get_active_disruptions,
+        api::get_disruption,
+        api::post_disruption,
+        api::put_disruption,
+        api::delete_disruption,
     ),
     components(schemas(
         api::journeys::public_transport::JourneysResponse,
@@ -162,6 +170,20 @@ fn load_or_build_ban(config: &config::AppConfig) -> Arc<ban::BanData> {
         api::traffic::TrafficGeometryResponse,
         api::traffic::TrafficStatesResponse,
         api::realtime::RealtimeStatusResponse,
+        api::disruptions::DisruptionsResponse,
+        api::disruptions::BlockedDisruptionsResponse,
+        api::disruptions::BlockedDisruption,
+        api::disruptions::BlockedStop,
+        api::lines::LinesResponse,
+        api::lines::Line,
+        api::journeys::public_transport::JourneyStatus,
+        api::journeys::public_transport::JourneyDisruption,
+        transit::disruptions::model::Disruption,
+        transit::disruptions::model::DisruptionInput,
+        transit::disruptions::model::Scope,
+        transit::disruptions::model::Severity,
+        transit::disruptions::model::Cause,
+        transit::disruptions::model::Period,
         realtime::service::FeedHealth,
         realtime::index::MatchStats,
         sytadin::TrafficEvent,
@@ -237,6 +259,13 @@ async fn run_http_server(
     // the trip lookup on the next refresh.
     let realtime = realtime::service::start(&config.realtime, shared_data.clone().into_inner());
     let shared_ban = web::Data::new(ban_data);
+
+    // Authored, not imported: the catalog is read from disk once and lives in
+    // an ArcSwap, so a back-office edit is visible to the next query without
+    // touching the RAPTOR index.
+    let disruptions = web::Data::new(DisruptionStore::load(Path::new(
+        &config.data.disruptions_file(),
+    )));
     let config = web::Data::new(config);
 
     // When rate_limit is 0 (disabled), use a very high burst to effectively disable limiting
@@ -256,6 +285,7 @@ async fn run_http_server(
             .app_data(config.clone())
             .app_data(traffic.clone())
             .app_data(realtime.clone())
+            .app_data(disruptions.clone())
             .app_data(openapi_json.clone())
             // Tile proxy: no rate limiting (high request volume from map panning)
             .service(api::get_tile)
@@ -285,7 +315,18 @@ async fn run_http_server(
                     .service(api::get_validate)
                     .service(api::post_reload)
                     .service(api::get_traffic_geometry)
-                    .service(api::get_traffic_states),
+                    .service(api::get_traffic_states)
+                    // Order matters: the literal path must be registered
+                    // before `/api/disruptions/{id}` so a GET on the
+                    // collection is not captured as an id.
+                    .service(api::get_lines)
+                    .service(api::get_disruptions)
+                    .service(api::post_disruption)
+                    // Before `/{id}`, which would otherwise capture "active".
+                    .service(api::get_active_disruptions)
+                    .service(api::get_disruption)
+                    .service(api::put_disruption)
+                    .service(api::delete_disruption),
             )
     });
 
@@ -320,6 +361,30 @@ mod tests {
         assert!(s.starts_with('{'));
         // Spec must reference the main public-transport endpoint
         assert!(s.contains("/api/journeys/public_transport"));
+        // …and every route registered above, so a schema added to ApiDoc
+        // without its path (or the reverse) is caught here rather than at
+        // startup.
+        for path in [
+            "/api/disruptions",
+            "/api/disruptions/active",
+            "/api/disruptions/{id}",
+            "/api/lines",
+            "/api/realtime/status",
+        ] {
+            assert!(s.contains(path), "OpenAPI spec is missing {path}");
+        }
+        for schema in [
+            "Disruption",
+            "DisruptionInput",
+            "JourneyDisruption",
+            "BlockedDisruption",
+            "Line",
+        ] {
+            assert!(
+                s.contains(schema),
+                "OpenAPI spec is missing schema {schema}"
+            );
+        }
     }
 
     #[test]

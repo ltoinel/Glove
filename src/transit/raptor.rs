@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tracing::info;
 
+use crate::transit::disruptions::overlay::DisruptionIndex;
 use crate::transit::gtfs::{self, GtfsData};
 use crate::transit::realtime::index::{PatternDeltas, RealtimeIndex};
 
@@ -879,6 +880,10 @@ pub struct QueryOptions<'a> {
     pub max_duration: u32,
     /// Real-time overlay. `None` searches the published schedule alone.
     pub realtime: Option<&'a RealtimeIndex>,
+    /// Operator-authored disruptions in force at the query instant. `None`
+    /// searches as if nothing were disrupted — which is also how the caller
+    /// obtains the journey it then reports as blocked.
+    pub disruptions: Option<&'a DisruptionIndex>,
 }
 
 impl<'a> QueryOptions<'a> {
@@ -899,12 +904,26 @@ impl<'a> QueryOptions<'a> {
             targets: &[],
             max_duration: INFINITY,
             realtime: None,
+            disruptions: None,
         }
     }
 
     /// Real-time adjustments for one pattern, if any are published.
     fn pattern_deltas(&self, pattern_idx: usize) -> Option<&'a PatternDeltas> {
         self.realtime?.pattern(pattern_idx)
+    }
+
+    /// Whether a disruption makes this stop unusable — no boarding, no
+    /// alighting, no transfer.
+    fn stop_blocked(&self, stop_idx: usize) -> bool {
+        self.disruptions
+            .is_some_and(|index| index.blocks_stop(stop_idx))
+    }
+
+    /// Whether a disruption cuts the ride from `position` to `position + 1`.
+    fn ride_blocked(&self, pattern_idx: usize, position: usize) -> bool {
+        self.disruptions
+            .is_some_and(|index| index.blocks_ride(pattern_idx, position))
     }
 }
 
@@ -954,7 +973,7 @@ pub fn raptor_query_bounded(
 
     let mut buf = RaptorBuffers::new(n, data.patterns.len(), rounds);
     buf.cutoff = horizon;
-    init_source_stops(data, sources, departure_time, &mut buf);
+    init_source_stops(data, sources, departure_time, options, &mut buf);
 
     for k in 1..=rounds {
         collect_active_routes(data, options.excluded_patterns, &mut buf);
@@ -962,7 +981,7 @@ pub fn raptor_query_bounded(
         buf.trip_improved.clear();
 
         scan_active_routes(data, k, options, &mut buf);
-        apply_transfers_after_trips(data, k, &mut buf);
+        apply_transfers_after_trips(data, k, options, &mut buf);
 
         // Tighten the bound: once a target is reached, no relaxation arriving
         // later than the best target arrival can ever improve the result.
@@ -1000,9 +1019,15 @@ fn init_source_stops(
     data: &RaptorData,
     sources: &[(usize, u32)],
     departure_time: u32,
+    options: &QueryOptions<'_>,
     buf: &mut RaptorBuffers,
 ) {
     for &(source, walk_time) in sources {
+        // A closed station is no more usable as an origin than as an
+        // interchange, and its transfers are cut with it.
+        if options.stop_blocked(source) {
+            continue;
+        }
         let arr = departure_time.saturating_add(walk_time);
         if arr < buf.tau[0][source] {
             buf.tau[0][source] = arr;
@@ -1010,6 +1035,9 @@ fn init_source_stops(
             buf.marked[source] = true;
         }
         for &(to_stop, duration) in &data.stop_transfers[source] {
+            if options.stop_blocked(to_stop) {
+                continue;
+            }
             let total = arr.saturating_add(duration);
             if total < buf.tau[0][to_stop] {
                 buf.tau[0][to_stop] = total;
@@ -1115,8 +1143,22 @@ fn scan_pattern(
     for pos in start_pos..pattern.stops.len() {
         let stop_idx = pattern.stops[pos];
 
+        // A disrupted section cuts the ride, not the line: the vehicle cannot
+        // carry us past the works, but the pattern stays boardable beyond
+        // them. Checked before boarding so re-boarding here is still allowed.
+        if current_trip.is_some()
+            && pos
+                .checked_sub(1)
+                .is_some_and(|prev| options.ride_blocked(pat_idx, prev))
+        {
+            current_trip = None;
+        }
+
+        // A closed stop serves nobody: no boarding, and no alighting below.
+        let stop_blocked = options.stop_blocked(stop_idx);
+
         // Try to board an earlier trip at this stop
-        if buf.tau[k - 1][stop_idx] != INFINITY {
+        if !stop_blocked && buf.tau[k - 1][stop_idx] != INFINITY {
             let board_time = buf.tau[k - 1][stop_idx];
             if let Some(trip_idx) = find_earliest_trip(pattern, pos, board_time, options, rt) {
                 match current_trip {
@@ -1145,6 +1187,9 @@ fn scan_pattern(
         let Some(trip_idx) = current_trip else {
             continue;
         };
+        if stop_blocked {
+            continue;
+        }
         if options.wheelchair && data.stops[stop_idx].wheelchair_boarding == 2 {
             continue;
         }
@@ -1173,10 +1218,18 @@ fn scan_pattern(
 
 /// Apply transfers ONLY from stops improved by trips (not by other transfers)
 /// to prevent transitive transfer chains within a single round.
-fn apply_transfers_after_trips(data: &RaptorData, k: usize, buf: &mut RaptorBuffers) {
+fn apply_transfers_after_trips(
+    data: &RaptorData,
+    k: usize,
+    options: &QueryOptions<'_>,
+    buf: &mut RaptorBuffers,
+) {
     for i in 0..buf.trip_improved.len() {
         let stop_idx = buf.trip_improved[i];
         for &(to_stop, duration) in &data.stop_transfers[stop_idx] {
+            if options.stop_blocked(to_stop) {
+                continue;
+            }
             let arr = buf.tau[k][stop_idx].saturating_add(duration);
             if arr < buf.best[to_stop] && arr < buf.cutoff {
                 buf.tau[k][to_stop] = arr;
@@ -2688,6 +2741,7 @@ mod tests {
                 targets: &[(target, 0)],
                 max_duration: INFINITY,
                 realtime: rt,
+                disruptions: None,
             },
         );
         let journeys = reconstruct_journeys(data, &result, &[(target, 0)], rt);
@@ -2750,6 +2804,7 @@ mod tests {
                 targets: &[(target, 0)],
                 max_duration: INFINITY,
                 realtime: Some(&rt),
+                disruptions: None,
             },
         );
         let journeys = reconstruct_journeys(&data, &result, &[(target, 0)], Some(&rt));

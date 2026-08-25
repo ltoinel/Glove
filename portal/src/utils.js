@@ -71,3 +71,35 @@ export function modeColor(mode, color) {
     default: return '#90a4ae'
   }
 }
+
+// --- Disruption instants ---------------------------------------------------
+//
+// The disruption API speaks local wall-clock time as "YYYY-MM-DDTHH:MM:SS",
+// while <input type="datetime-local"> works in "YYYY-MM-DDTHH:MM". These three
+// convert between the two, and never go through toISOString(): that returns
+// UTC, which would shift a 00:30 start to the previous day for anyone east of
+// Greenwich.
+
+function pad2(n) {
+  return String(n).padStart(2, '0')
+}
+
+// "YYYY-MM-DDTHH:MM" from an input to the "YYYY-MM-DDTHH:MM:SS" the API wants.
+// Returns null for an empty value, which the API reads as "no end date".
+export function disruptionInstantToApi(value) {
+  if (!value) return null
+  return value.length === 16 ? `${value}:00` : value
+}
+
+// The API form back to what <input type="datetime-local"> expects.
+export function disruptionInstantToInput(value) {
+  return value ? value.slice(0, 16) : ''
+}
+
+// Local now, as an <input type="datetime-local"> value. A new disruption
+// applies immediately unless the operator says otherwise, so this seeds the
+// start field rather than leaving it blank.
+export function disruptionStartDefault(now = new Date()) {
+  const date = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`
+  return `${date}T${pad2(now.getHours())}:${pad2(now.getMinutes())}`
+}

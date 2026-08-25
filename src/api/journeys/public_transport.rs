@@ -12,12 +12,15 @@ use utoipa::{IntoParams, ToSchema};
 use std::sync::Arc;
 
 use crate::shared::config::{AppConfig, WheelchairConfig};
+use crate::transit::disruptions::model::{Cause, Severity};
+use crate::transit::disruptions::overlay::{self, DisruptionIndex, Impact};
+use crate::transit::disruptions::store::{Catalog, DisruptionStore};
 use crate::transit::raptor::{self, RaptorData, SectionType};
 use crate::transit::realtime::index::RealtimeIndex;
 use crate::transit::realtime::service::RealtimeService;
 
 use super::valhalla;
-use crate::api::{Place, Section, StopDateTime, make_place, make_stop_point};
+use crate::api::{Place, Section, StopDateTime, StopPointRef, make_place, make_stop_point};
 
 // ---------------------------------------------------------------------------
 // Query parameters
@@ -59,16 +62,58 @@ pub struct JourneysResponse {
     pub journeys: Vec<Journey>,
 }
 
+/// Whether the traveller can actually take a journey.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum JourneyStatus {
+    /// Nothing in force prevents it.
+    #[default]
+    Usable,
+    /// A blocking disruption makes it impossible. Returned anyway, because
+    /// "the fastest route is closed, here is why" is more useful than silently
+    /// offering a slower alternative with no explanation.
+    Blocked,
+}
+
 /// A complete journey from origin to destination.
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize, ToSchema, Default)]
 pub struct Journey {
     pub departure_date_time: String,
     pub arrival_date_time: String,
     pub duration: u32,
     pub nb_transfers: u32,
     /// Quality tags: "fastest", "least_transfers", "least_walking".
+    /// Always empty on a blocked journey — labels rank usable options.
     pub tags: Vec<String>,
     pub sections: Vec<Section>,
+    pub status: JourneyStatus,
+    /// Disruptions touching this journey. On a blocked journey at least one of
+    /// them has `severity: "blocking"` and explains why it is unusable.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub disruptions: Vec<JourneyDisruption>,
+}
+
+/// A disruption as reported against one section of one journey.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct JourneyDisruption {
+    pub id: String,
+    pub title: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub message: String,
+    pub cause: Cause,
+    pub severity: Severity,
+    /// What the disruption names: "stop", "line" or "line_section".
+    pub scope: String,
+    /// Index of the journey section it applies to.
+    pub section: usize,
+    /// The stop it makes unusable, when it names a stop.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop_point: Option<StopPointRef>,
+    /// Local date-time, `YYYY-MM-DDTHH:MM:SS`.
+    pub starts_at: String,
+    /// `null` when no resumption has been announced.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ends_at: Option<String>,
 }
 
 /// Display information for a public transport section.
@@ -107,15 +152,29 @@ pub async fn get_journeys(
     shared: web::Data<ArcSwap<RaptorData>>,
     config: web::Data<AppConfig>,
     realtime: web::Data<RealtimeService>,
+    disruptions: web::Data<DisruptionStore>,
 ) -> HttpResponse {
     let raptor_data = shared.load();
 
-    let resolved = match resolve_journey_query(&query, &raptor_data, &config, realtime.index()) {
+    let overlays = Overlays {
+        realtime: realtime.index(),
+        // Snapshotted once so every iteration of the diverse search, and the
+        // blocked-alternative pass below, see the same catalog.
+        disruptions: std::sync::Arc::clone(&disruptions.snapshot()),
+    };
+
+    let resolved = match resolve_journey_query(&query, &raptor_data, &config, overlays) {
         Ok(r) => r,
         Err(resp) => return resp,
     };
 
     let mut journeys = run_iterative_search(&raptor_data, &resolved);
+
+    // Added before enrichment so the blocked journey gets the same first and
+    // last-mile walking legs as the others, and sorts among them by duration.
+    if let Some(blocked) = find_blocked_alternative(&raptor_data, &resolved, &journeys) {
+        journeys.push(blocked);
+    }
 
     if !journeys.is_empty() {
         enrich_journeys(&mut journeys, &query, &config, &raptor_data, &resolved).await;
@@ -152,6 +211,18 @@ struct ResolvedQuery {
     /// of the diverse search sees the same data even if a refresh lands
     /// mid-request.
     realtime: Option<Arc<RealtimeIndex>>,
+    /// Disruptions in force at [`Self::query_instant`]. `None` when none are —
+    /// which keeps the pattern-scan hot loop free of per-stop lookups.
+    disruptions: Option<DisruptionIndex>,
+}
+
+/// The overlays layered on the published schedule at query time.
+///
+/// Bundled because they are always resolved together and would otherwise push
+/// [`resolve_journey_query`] to five parameters.
+struct Overlays {
+    realtime: Option<Arc<RealtimeIndex>>,
+    disruptions: Arc<Catalog>,
 }
 
 fn bad_request(id: &str, message: String) -> HttpResponse {
@@ -166,7 +237,7 @@ fn resolve_journey_query(
     query: &JourneysQuery,
     raptor_data: &RaptorData,
     config: &AppConfig,
-    realtime: Option<Arc<RealtimeIndex>>,
+    overlays: Overlays,
 ) -> Result<ResolvedQuery, HttpResponse> {
     let from_str = query
         .from
@@ -199,6 +270,10 @@ fn resolve_journey_query(
     }
 
     let (date, departure_time) = parse_query_datetime(query.datetime.as_deref())?;
+    // Resolved before the day shift: disruption periods are wall-clock, and a
+    // 01:00 query must not be matched against the previous day at 25:00.
+    let instant = query_instant(&date, departure_time);
+    let disruptions = overlay::resolve(raptor_data, &overlays.disruptions, instant);
     let (effective_date, effective_departure) =
         shift_to_previous_day_if_early(date, departure_time);
 
@@ -225,8 +300,22 @@ fn resolve_journey_query(
         mode_excluded,
         diverse_lines: config.routing.diverse_lines,
         prefer_rail: config.routing.prefer_rail,
-        realtime,
+        realtime: overlays.realtime,
+        disruptions: (!disruptions.is_empty()).then_some(disruptions),
     })
+}
+
+/// Wall-clock instant a query is asked for, used to select the disruptions in
+/// force. Falls back to the epoch only if the date cannot be parsed, which
+/// [`parse_query_datetime`] already rejects.
+fn query_instant(date: &str, departure_time: u32) -> chrono::NaiveDateTime {
+    chrono::NaiveDate::parse_from_str(date, "%Y%m%d")
+        .ok()
+        .and_then(|day| {
+            day.and_hms_opt(0, 0, 0)?
+                .checked_add_signed(chrono::Duration::seconds(departure_time as i64))
+        })
+        .unwrap_or_default()
 }
 
 /// Parse the user-supplied datetime, or default to "now" when omitted.
@@ -274,6 +363,13 @@ fn run_iterative_search(raptor_data: &RaptorData, q: &ResolvedQuery) -> Vec<Jour
     let mut journeys: Vec<Journey> = Vec::new();
     let mut excluded_patterns = q.mode_excluded.clone();
 
+    // A blocked line is removed for every iteration. A blocked *section* is
+    // not: the line keeps working either side of the works, so it is cut ride
+    // by ride inside the pattern scan instead.
+    if let Some(index) = q.disruptions.as_ref() {
+        excluded_patterns.extend(index.blocked_patterns().iter().copied());
+    }
+
     // Line-level diversity: precompute route_id -> patterns so we can exclude a
     // whole head line at once (see exclude_head_line). Only built when enabled.
     let route_patterns = q
@@ -311,6 +407,115 @@ fn run_iterative_search(raptor_data: &RaptorData, q: &ResolvedQuery) -> Vec<Jour
     journeys
 }
 
+/// The journey the traveller would have taken if nothing were disrupted.
+///
+/// Run as a second, undisrupted RAPTOR pass rather than by inspecting the
+/// first: once a stop is removed from the graph, the journey through it leaves
+/// no trace to report. The cost is one extra query, and only when a blocking
+/// disruption is actually in force.
+///
+/// Returns `None` unless the result is genuinely explained by a blocking
+/// disruption *and* absent from `usable` — otherwise a merely slower
+/// alternative would be presented as blocked.
+fn find_blocked_alternative(
+    raptor_data: &RaptorData,
+    q: &ResolvedQuery,
+    usable: &[Journey],
+) -> Option<Journey> {
+    let index = q.disruptions.as_ref()?;
+    if !index.has_blocking() {
+        return None;
+    }
+
+    let result = raptor::raptor_query_bounded(
+        raptor_data,
+        &q.sources,
+        q.effective_departure,
+        &raptor::QueryOptions {
+            active: &q.active,
+            max_transfers: q.max_transfers,
+            // Mode exclusions still apply: the traveller asked to avoid buses,
+            // and a blocked bus journey is not the answer to "why".
+            excluded_patterns: &q.mode_excluded,
+            wheelchair: q.wheelchair,
+            targets: &q.targets,
+            max_duration: q.max_duration,
+            realtime: q.realtime.as_deref(),
+            disruptions: None,
+        },
+    );
+
+    // `reconstruct_journeys` pushes strictly improving arrivals, so the last
+    // one is the fastest.
+    let section_sets =
+        raptor::reconstruct_journeys(raptor_data, &result, &q.targets, q.realtime.as_deref());
+    let sections = section_sets.last()?;
+
+    let mut journey = build_journey(
+        raptor_data,
+        sections,
+        &q.effective_date,
+        q.realtime.as_deref(),
+    );
+    if journey.duration > q.max_duration {
+        return None;
+    }
+
+    let impacts = overlay::journey_impacts(index, sections);
+    let blocked_by_disruption = impacts.iter().any(|impact| {
+        index
+            .entry(impact.entry)
+            .is_some_and(|d| d.severity == Severity::Blocking)
+    });
+    if !blocked_by_disruption {
+        return None;
+    }
+    if usable
+        .iter()
+        .any(|existing| journey_sections_equal(existing, &journey))
+    {
+        return None;
+    }
+
+    journey.status = JourneyStatus::Blocked;
+    journey.disruptions = describe_impacts(raptor_data, index, &impacts);
+    Some(journey)
+}
+
+/// Turn resolved impacts into the API's per-section disruption notices.
+fn describe_impacts(
+    data: &RaptorData,
+    index: &DisruptionIndex,
+    impacts: &[Impact],
+) -> Vec<JourneyDisruption> {
+    impacts
+        .iter()
+        .filter_map(|impact| {
+            let disruption = index.entry(impact.entry)?;
+            Some(JourneyDisruption {
+                id: disruption.id.clone(),
+                title: disruption.title.clone(),
+                message: disruption.message.clone(),
+                cause: disruption.cause,
+                severity: disruption.severity,
+                scope: disruption.scope.kind().to_string(),
+                section: impact.section,
+                stop_point: impact
+                    .stop_idx
+                    .and_then(|idx| data.stops.get(idx))
+                    .map(make_stop_point),
+                starts_at: format_local(disruption.period.starts_at),
+                ends_at: disruption.period.ends_at.map(format_local),
+            })
+        })
+        .collect()
+}
+
+/// Render a local date-time the way the API accepts it back.
+fn format_local(instant: chrono::NaiveDateTime) -> String {
+    instant.format("%Y-%m-%dT%H:%M:%S").to_string()
+}
+
 /// Run RAPTOR iterations, accumulating diverse journeys until `q.requested` is
 /// reached or no new journey appears. `extra_forbidden` is unioned into each
 /// query's exclusion set *without* being recorded in `excluded_patterns`, so a
@@ -344,6 +549,7 @@ fn collect_alternatives(
                 targets: &q.targets,
                 max_duration: q.max_duration,
                 realtime: q.realtime.as_deref(),
+                disruptions: q.disruptions.as_ref(),
             },
         );
 
@@ -355,7 +561,7 @@ fn collect_alternatives(
 
         let prev_count = journeys.len();
         for sections in &section_sets {
-            let journey = build_journey(
+            let mut journey = build_journey(
                 raptor_data,
                 sections,
                 &q.effective_date,
@@ -363,6 +569,15 @@ fn collect_alternatives(
             );
             if journey.duration > q.max_duration {
                 continue;
+            }
+            // Only informational disruptions can surface here: the blocking
+            // ones were removed from the graph before this search ran.
+            if let Some(index) = q.disruptions.as_ref() {
+                journey.disruptions = describe_impacts(
+                    raptor_data,
+                    index,
+                    &overlay::journey_impacts(index, sections),
+                );
             }
             let dominated = journeys
                 .iter()
@@ -922,7 +1137,7 @@ fn resolve_stops(
 }
 
 /// GTFS route_type code to commercial mode name.
-fn route_type_to_mode(route_type: u16) -> &'static str {
+pub(crate) fn route_type_to_mode(route_type: u16) -> &'static str {
     match route_type {
         0 => "tramway",
         1 => "metro",
@@ -1089,6 +1304,8 @@ fn build_journey(
         nb_transfers,
         tags: Vec::new(),
         sections: api_sections,
+        status: JourneyStatus::Usable,
+        disruptions: Vec::new(),
     }
 }
 
@@ -1248,13 +1465,41 @@ fn make_transfer_section(
 /// When `wheelchair` is true, also adds `most_accessible` to the journey
 /// with the best accessibility score (least walking + fewest transfers).
 /// If all journeys share a tag, only the first keeps it.
+/// The per-journey values of `values` that belong to a usable journey.
+fn usable_values<'a>(journeys: &'a [Journey], values: &'a [u32]) -> impl Iterator<Item = u32> + 'a {
+    journeys
+        .iter()
+        .zip(values)
+        .filter(|(journey, _)| journey.status != JourneyStatus::Blocked)
+        .map(|(_, &value)| value)
+}
+
 fn tag_journeys(journeys: &mut [Journey], wheelchair: bool) {
     if journeys.is_empty() {
         return;
     }
 
-    let min_duration = journeys.iter().map(|j| j.duration).min().unwrap_or(0);
-    let min_transfers = journeys.iter().map(|j| j.nb_transfers).min().unwrap_or(0);
+    // Quality labels rank options the traveller can actually take. A blocked
+    // journey is returned to explain why the obvious route is missing, so it
+    // must neither carry a label nor drag the minima down and steal one from a
+    // usable alternative.
+    let usable = |journey: &Journey| journey.status != JourneyStatus::Blocked;
+    if !journeys.iter().any(usable) {
+        return;
+    }
+
+    let min_duration = journeys
+        .iter()
+        .filter(|j| usable(j))
+        .map(|j| j.duration)
+        .min()
+        .unwrap_or(0);
+    let min_transfers = journeys
+        .iter()
+        .filter(|j| usable(j))
+        .map(|j| j.nb_transfers)
+        .min()
+        .unwrap_or(0);
 
     let walking_times: Vec<u32> = journeys
         .iter()
@@ -1266,7 +1511,7 @@ fn tag_journeys(journeys: &mut [Journey], wheelchair: bool) {
                 .sum()
         })
         .collect();
-    let min_walking = walking_times.iter().copied().min().unwrap_or(0);
+    let min_walking = usable_values(journeys, &walking_times).min().unwrap_or(0);
 
     // Total platform waiting time = end-to-end duration minus the time spent in
     // every section (vehicles + walking/transfers). The remainder is the time
@@ -1278,9 +1523,12 @@ fn tag_journeys(journeys: &mut [Journey], wheelchair: bool) {
             j.duration.saturating_sub(sections_total)
         })
         .collect();
-    let min_waiting = waiting_times.iter().copied().min().unwrap_or(0);
+    let min_waiting = usable_values(journeys, &waiting_times).min().unwrap_or(0);
 
     for (i, journey) in journeys.iter_mut().enumerate() {
+        if !usable(journey) {
+            continue;
+        }
         if journey.duration == min_duration {
             journey.tags.push("fastest".to_string());
         }
@@ -1302,6 +1550,7 @@ fn tag_journeys(journeys: &mut [Journey], wheelchair: bool) {
         let best_idx = journeys
             .iter()
             .enumerate()
+            .filter(|(_, j)| usable(j))
             .map(|(i, j)| {
                 let score = walking_times[i] as u64 * 3 + j.nb_transfers as u64 * 120;
                 (i, score)
@@ -1519,6 +1768,8 @@ mod tests {
     #[test]
     fn tag_journeys_single() {
         let mut journeys = vec![Journey {
+            status: JourneyStatus::Usable,
+            disruptions: Vec::new(),
             departure_date_time: "20260406T080100".into(),
             arrival_date_time: "20260406T082000".into(),
             duration: 1140,
@@ -1534,6 +1785,8 @@ mod tests {
     fn tag_journeys_diverse() {
         let mut journeys = vec![
             Journey {
+                status: JourneyStatus::Usable,
+                disruptions: Vec::new(),
                 departure_date_time: "20260406T080100".into(),
                 arrival_date_time: "20260406T082000".into(),
                 duration: 1140,
@@ -1564,6 +1817,8 @@ mod tests {
                 }],
             },
             Journey {
+                status: JourneyStatus::Usable,
+                disruptions: Vec::new(),
                 departure_date_time: "20260406T080100".into(),
                 arrival_date_time: "20260406T083000".into(),
                 duration: 1740,
@@ -1599,6 +1854,8 @@ mod tests {
         };
         let mut journeys = vec![
             Journey {
+                status: JourneyStatus::Usable,
+                disruptions: Vec::new(),
                 departure_date_time: "20260406T080000".into(),
                 arrival_date_time: "20260406T082000".into(),
                 duration: 1200,
@@ -1607,6 +1864,8 @@ mod tests {
                 sections: vec![section(1200)], // wait = 0
             },
             Journey {
+                status: JourneyStatus::Usable,
+                disruptions: Vec::new(),
                 departure_date_time: "20260406T080000".into(),
                 arrival_date_time: "20260406T082000".into(),
                 duration: 1200,
@@ -1691,6 +1950,7 @@ mod tests {
                 .app_data(shared)
                 .app_data(config)
                 .app_data(web::Data::new(RealtimeService::disabled()))
+                .app_data(web::Data::new(DisruptionStore::for_tests(Vec::new())))
                 .service(get_journeys),
         )
         .await;
@@ -1711,6 +1971,7 @@ mod tests {
                 .app_data(shared)
                 .app_data(config)
                 .app_data(web::Data::new(RealtimeService::disabled()))
+                .app_data(web::Data::new(DisruptionStore::for_tests(Vec::new())))
                 .service(get_journeys),
         )
         .await;
@@ -1731,6 +1992,7 @@ mod tests {
                 .app_data(shared)
                 .app_data(config)
                 .app_data(web::Data::new(RealtimeService::disabled()))
+                .app_data(web::Data::new(DisruptionStore::for_tests(Vec::new())))
                 .service(get_journeys),
         )
         .await;
@@ -1751,6 +2013,7 @@ mod tests {
                 .app_data(shared)
                 .app_data(config)
                 .app_data(web::Data::new(RealtimeService::disabled()))
+                .app_data(web::Data::new(DisruptionStore::for_tests(Vec::new())))
                 .service(get_journeys),
         )
         .await;
@@ -1771,6 +2034,7 @@ mod tests {
                 .app_data(shared)
                 .app_data(config)
                 .app_data(web::Data::new(RealtimeService::disabled()))
+                .app_data(web::Data::new(DisruptionStore::for_tests(Vec::new())))
                 .service(get_journeys),
         )
         .await;
@@ -1795,6 +2059,7 @@ mod tests {
                 .app_data(shared)
                 .app_data(config)
                 .app_data(web::Data::new(RealtimeService::disabled()))
+                .app_data(web::Data::new(DisruptionStore::for_tests(Vec::new())))
                 .service(get_journeys),
         )
         .await;
@@ -2005,6 +2270,8 @@ mod tests {
     #[test]
     fn journey_section_key_filters_pt_only() {
         let j = Journey {
+            status: JourneyStatus::Usable,
+            disruptions: Vec::new(),
             departure_date_time: "".into(),
             arrival_date_time: "".into(),
             duration: 0,
@@ -2025,6 +2292,8 @@ mod tests {
     #[test]
     fn journey_sections_equal_same_pt_legs_match() {
         let a = Journey {
+            status: JourneyStatus::Usable,
+            disruptions: Vec::new(),
             departure_date_time: "".into(),
             arrival_date_time: "".into(),
             duration: 0,
@@ -2033,6 +2302,8 @@ mod tests {
             sections: vec![make_pt_test_section("S1", "S2", "1")],
         };
         let b = Journey {
+            status: JourneyStatus::Usable,
+            disruptions: Vec::new(),
             departure_date_time: "".into(),
             arrival_date_time: "".into(),
             duration: 100,
@@ -2046,6 +2317,8 @@ mod tests {
     #[test]
     fn journey_sections_equal_different_label_no_match() {
         let a = Journey {
+            status: JourneyStatus::Usable,
+            disruptions: Vec::new(),
             departure_date_time: "".into(),
             arrival_date_time: "".into(),
             duration: 0,
@@ -2054,6 +2327,8 @@ mod tests {
             sections: vec![make_pt_test_section("S1", "S2", "1")],
         };
         let b = Journey {
+            status: JourneyStatus::Usable,
+            disruptions: Vec::new(),
             departure_date_time: "".into(),
             arrival_date_time: "".into(),
             duration: 0,
@@ -2199,6 +2474,8 @@ mod tests {
             coord: crate::api::Coord { lon: 0.0, lat: 0.0 },
         });
         let journey = Journey {
+            status: JourneyStatus::Usable,
+            disruptions: Vec::new(),
             departure_date_time: "".into(),
             arrival_date_time: "".into(),
             duration: 0,
@@ -2215,6 +2492,8 @@ mod tests {
     fn endpoint_stop_indices_no_pt_returns_none() {
         let data = make_test_raptor_data();
         let journey = Journey {
+            status: JourneyStatus::Usable,
+            disruptions: Vec::new(),
             departure_date_time: "".into(),
             arrival_date_time: "".into(),
             duration: 0,
@@ -2307,6 +2586,8 @@ mod tests {
         };
         // Build a journey with one transfer section
         let mut journeys = vec![Journey {
+            status: JourneyStatus::Usable,
+            disruptions: Vec::new(),
             departure_date_time: "".into(),
             arrival_date_time: "".into(),
             duration: 0,
@@ -2412,6 +2693,7 @@ mod tests {
                 .app_data(shared)
                 .app_data(web::Data::new(cfg))
                 .app_data(web::Data::new(RealtimeService::disabled()))
+                .app_data(web::Data::new(DisruptionStore::for_tests(Vec::new())))
                 .service(get_journeys),
         )
         .await;
@@ -2435,6 +2717,7 @@ mod tests {
                 .app_data(shared)
                 .app_data(config)
                 .app_data(web::Data::new(RealtimeService::disabled()))
+                .app_data(web::Data::new(DisruptionStore::for_tests(Vec::new())))
                 .service(get_journeys),
         )
         .await;
@@ -2456,6 +2739,7 @@ mod tests {
                 .app_data(shared)
                 .app_data(config)
                 .app_data(web::Data::new(RealtimeService::disabled()))
+                .app_data(web::Data::new(DisruptionStore::for_tests(Vec::new())))
                 .service(get_journeys),
         )
         .await;
@@ -2471,6 +2755,8 @@ mod tests {
 
     fn make_test_journey() -> Journey {
         Journey {
+            status: JourneyStatus::Usable,
+            disruptions: Vec::new(),
             departure_date_time: "20260406T081000".into(),
             arrival_date_time: "20260406T082000".into(),
             duration: 600,
@@ -2871,6 +3157,8 @@ mod tests {
     fn tag_journeys_wheelchair_adds_most_accessible() {
         let mut journeys = vec![
             Journey {
+                status: JourneyStatus::Usable,
+                disruptions: Vec::new(),
                 departure_date_time: "".into(),
                 arrival_date_time: "".into(),
                 duration: 1000,
@@ -2879,6 +3167,8 @@ mod tests {
                 sections: vec![],
             },
             Journey {
+                status: JourneyStatus::Usable,
+                disruptions: Vec::new(),
                 departure_date_time: "".into(),
                 arrival_date_time: "".into(),
                 duration: 1100,
@@ -2892,5 +3182,182 @@ mod tests {
             journeys[0].tags.contains(&"most_accessible".to_string())
                 || journeys[1].tags.contains(&"most_accessible".to_string())
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Disruptions end to end
+    // -----------------------------------------------------------------------
+
+    use crate::transit::disruptions::model::{Disruption, Period, Scope};
+
+    /// A disruption in force over the whole fixture calendar.
+    fn make_disruption(scope: Scope, severity: Severity) -> Disruption {
+        let start =
+            chrono::NaiveDateTime::parse_from_str("2026-04-01T00:00:00", "%Y-%m-%dT%H:%M:%S")
+                .expect("valid test time");
+        Disruption {
+            id: "d1".to_string(),
+            title: "Travaux".to_string(),
+            message: "Station fermée".to_string(),
+            cause: Cause::Works,
+            severity,
+            scope,
+            period: Period {
+                starts_at: start,
+                ends_at: None,
+            },
+            created_at: start,
+            updated_at: start,
+        }
+    }
+
+    /// `GET /api/journeys/public_transport?from=S1&to=S3` at 08:00, with the
+    /// given catalog in force.
+    macro_rules! journeys_with {
+        ($disruptions:expr) => {{
+            let data = make_test_raptor_data();
+            let app = actix_web::test::init_service(
+                actix_web::App::new()
+                    .app_data(web::Data::new(ArcSwap::from(data)))
+                    .app_data(web::Data::new(make_test_config()))
+                    .app_data(web::Data::new(RealtimeService::disabled()))
+                    .app_data(web::Data::new(DisruptionStore::for_tests($disruptions)))
+                    .service(get_journeys),
+            )
+            .await;
+            let req = actix_web::test::TestRequest::get()
+                .uri("/api/journeys/public_transport?from=S1&to=S3&datetime=20260406T080000")
+                .to_request();
+            let resp = actix_web::test::call_service(&app, req).await;
+            assert_eq!(resp.status(), 200);
+            let body: serde_json::Value = actix_web::test::read_body_json(resp).await;
+            body["journeys"].as_array().expect("journeys array").clone()
+        }};
+    }
+
+    #[actix_web::test]
+    async fn without_disruptions_the_journey_is_usable_and_unannotated() {
+        let journeys = journeys_with!(Vec::new());
+        assert_eq!(journeys.len(), 1);
+        assert_eq!(journeys[0]["status"], "usable");
+        assert!(journeys[0]["disruptions"].is_null());
+    }
+
+    #[actix_web::test]
+    async fn closing_the_destination_returns_the_journey_marked_blocked() {
+        let journeys = journeys_with!(vec![make_disruption(
+            Scope::Stop {
+                stop_id: "S3".into()
+            },
+            Severity::Blocking,
+        )]);
+
+        assert_eq!(
+            journeys.len(),
+            1,
+            "the blocked journey is still offered, with an explanation"
+        );
+        let journey = &journeys[0];
+        assert_eq!(journey["status"], "blocked");
+        assert!(
+            journey["tags"].as_array().expect("tags").is_empty(),
+            "a blocked journey must not win a quality label"
+        );
+
+        let notes = journey["disruptions"].as_array().expect("disruptions");
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0]["id"], "d1");
+        assert_eq!(notes[0]["severity"], "blocking");
+        assert_eq!(notes[0]["scope"], "stop");
+        assert_eq!(notes[0]["stop_point"]["id"], "S3");
+        assert_eq!(notes[0]["title"], "Travaux");
+        assert!(notes[0]["ends_at"].is_null(), "open-ended disruption");
+    }
+
+    #[actix_web::test]
+    async fn closing_an_intermediate_stop_leaves_the_through_journey_usable() {
+        // S2 sits between S1 and S3: the vehicle runs through a closed station
+        // without calling, so S1 -> S3 is unaffected.
+        let journeys = journeys_with!(vec![make_disruption(
+            Scope::Stop {
+                stop_id: "S2".into()
+            },
+            Severity::Blocking,
+        )]);
+
+        assert_eq!(journeys.len(), 1);
+        assert_eq!(journeys[0]["status"], "usable");
+        assert!(journeys[0]["disruptions"].is_null());
+    }
+
+    #[actix_web::test]
+    async fn closing_the_line_blocks_the_only_journey() {
+        let journeys = journeys_with!(vec![make_disruption(
+            Scope::Line {
+                route_id: "R1".into()
+            },
+            Severity::Blocking,
+        )]);
+
+        assert_eq!(journeys.len(), 1);
+        assert_eq!(journeys[0]["status"], "blocked");
+        let notes = journeys[0]["disruptions"].as_array().expect("disruptions");
+        assert_eq!(notes[0]["scope"], "line");
+        assert!(
+            notes[0]["stop_point"].is_null(),
+            "a line closure has no single stop to point at"
+        );
+    }
+
+    #[actix_web::test]
+    async fn closing_a_section_the_journey_rides_through_blocks_it() {
+        let journeys = journeys_with!(vec![make_disruption(
+            Scope::LineSection {
+                route_id: "R1".into(),
+                from_stop_id: "S1".into(),
+                to_stop_id: "S2".into(),
+            },
+            Severity::Blocking,
+        )]);
+
+        assert_eq!(journeys.len(), 1);
+        assert_eq!(journeys[0]["status"], "blocked");
+        assert_eq!(journeys[0]["disruptions"][0]["scope"], "line_section");
+    }
+
+    #[actix_web::test]
+    async fn an_informational_disruption_annotates_without_blocking() {
+        let journeys = journeys_with!(vec![make_disruption(
+            Scope::Stop {
+                stop_id: "S3".into()
+            },
+            Severity::Info,
+        )]);
+
+        assert_eq!(journeys.len(), 1);
+        assert_eq!(journeys[0]["status"], "usable");
+        let notes = journeys[0]["disruptions"].as_array().expect("disruptions");
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0]["severity"], "info");
+        assert_eq!(notes[0]["stop_point"]["id"], "S3");
+    }
+
+    #[actix_web::test]
+    async fn a_disruption_outside_the_query_period_is_ignored() {
+        let mut past = make_disruption(
+            Scope::Stop {
+                stop_id: "S3".into(),
+            },
+            Severity::Blocking,
+        );
+        past.period.ends_at = Some(
+            chrono::NaiveDateTime::parse_from_str("2026-04-02T00:00:00", "%Y-%m-%dT%H:%M:%S")
+                .expect("valid test time"),
+        );
+
+        let journeys = journeys_with!(vec![past]);
+        assert_eq!(journeys.len(), 1);
+        assert_eq!(journeys[0]["status"], "usable");
+        assert!(journeys[0]["disruptions"].is_null());
     }
 }

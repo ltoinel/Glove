@@ -171,6 +171,11 @@ impl DataConfig {
     pub fn sytadin_dir(&self) -> String {
         format!("{}/sytadin", self.dir)
     }
+    /// Operator-authored disruption catalog. A file rather than a directory:
+    /// it is one JSON document, rewritten whole on every change.
+    pub fn disruptions_file(&self) -> String {
+        format!("{}/disruptions/disruptions.json", self.dir)
+    }
 }
 
 impl Default for DataConfig {

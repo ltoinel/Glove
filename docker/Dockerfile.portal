@@ -3,6 +3,7 @@
 # backend container. This keeps the frontend a separate process from the API.
 
 # Stage 1: Build the SPA
+
 # 22+ is required by swagger-client, pulled in by swagger-ui-react.
 FROM node:22-alpine AS build
 WORKDIR /app/portal

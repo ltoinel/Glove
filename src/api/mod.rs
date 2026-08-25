@@ -7,9 +7,13 @@
 //! - [`gtfs`]     — `GET /api/gtfs/validate` + `POST /api/gtfs/reload` (GTFS management)
 //! - [`traffic`]  — `GET /api/traffic/{geometry,states}` (real-time road traffic overlay)
 //! - [`realtime`] — `GET /api/realtime/status` (real-time transit feed health)
+//! - [`disruptions`] — `/api/disruptions` CRUD (operator-authored works and closures)
+//! - [`lines`]    — `GET /api/lines` (line picker for the back office)
 
+pub mod disruptions;
 pub mod gtfs;
 pub mod journeys;
+pub mod lines;
 pub mod metrics;
 pub mod places;
 pub mod realtime;
@@ -17,6 +21,11 @@ pub mod status;
 pub mod tiles;
 pub mod traffic;
 
+pub use disruptions::{
+    __path_delete_disruption, __path_get_active_disruptions, __path_get_disruption,
+    __path_get_disruptions, __path_post_disruption, __path_put_disruption, delete_disruption,
+    get_active_disruptions, get_disruption, get_disruptions, post_disruption, put_disruption,
+};
 pub use gtfs::{
     __path_get_gtfs_status, __path_get_validate, __path_post_reload, get_gtfs_status, get_validate,
     post_reload,
@@ -25,6 +34,7 @@ pub use journeys::{__path_get_bike, get_bike};
 pub use journeys::{__path_get_car, get_car};
 pub use journeys::{__path_get_journeys, get_journeys};
 pub use journeys::{__path_get_walk, get_walk};
+pub use lines::{__path_get_lines, get_lines};
 pub use metrics::{__path_get_metrics, get_metrics};
 pub use places::{__path_get_places, get_places};
 pub use realtime::{__path_get_realtime_status, get_realtime_status};

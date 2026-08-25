@@ -6,12 +6,12 @@ server:
   workers: 0                    # 0 = auto (one per logical CPU)
   log_level: "warn"             # trace, debug, info, warn, error
   shutdown_timeout: 30          # seconds — graceful shutdown for in-flight requests
-  api_key: ""                   # Required for POST /api/reload. Empty = endpoint disabled
+  api_key: "glove"               # Required for POST /api/gtfs/reload and disruption writes. Empty = disabled
   cors_origins: []              # Allowed origins. ["*"] = permissive (not for production)
-  rate_limit: 0                # Max requests/sec per IP. 0 = disabled
+  rate_limit: 0                 # Max requests/sec per IP. 0 = disabled
 
 data:
-  dir: "data"                   # sub-dirs gtfs/, osm/, raptor/, ban/ are implicit
+  dir: "data"                   # sub-dirs gtfs/, osm/, raptor/, ban/, disruptions/ are implicit
   gtfs_url: "https://data.iledefrance-mobilites.fr/explore/dataset/offre-horaires-tc-gtfs-idfm/files/a925e164271e4bca93433756d6a340d1/download/"
   osm_url: "https://download.geofabrik.de/europe/france/ile-de-france-latest.osm.pbf"
   ban_url: "https://adresse.data.gouv.fr/data/ban/adresses/latest/csv"
@@ -37,6 +37,21 @@ traffic:                        # Real-time road traffic overlay (Sytadin / DiRI
   refresh_secs: 600             # dynamic-data refresh interval (feed updates ~1 min)
   # Data © Ministère chargé des transports / DiRIF — Sytadin®, subject to usage
   # conditions. Geometry (Segment.mif/.mid) is loaded from data/sytadin/.
+
+realtime:                       # Real-time transit data (delays, cancellations)
+  enabled: false                # true = poll the feeds below and route on real times
+  feeds:
+    # - name: "idfm-trip-updates"
+    #   type: gtfs-rt           # gtfs-rt (SIRI connector to follow)
+    #   url: "https://prim.iledefrance-mobilites.fr/marketplace/gtfs-rt"
+    #   refresh_secs: 30        # polling interval
+    #   timeout_secs: 10        # per-request timeout; keep below refresh_secs
+    #   headers:                # provider credentials, sent on every request
+    #     apikey: "YOUR_KEY"
+  # Feeds are merged in order: on conflict, the last one wins. Health and
+  # schedule-matching counters are exposed by GET /api/realtime/status — check
+  # them after adding a feed, since a feed can answer 200 and still match
+  # nothing when its identifiers use a different namespace than the GTFS.
 
 map:
   zoom: 11

@@ -15,7 +15,7 @@ import {
   RoundaboutLeft, Flag, MyLocation, ForkLeft, ForkRight, MergeType,
   Commute, Tune, CheckCircle, Error as ErrorIcon, Warning as WarningIcon,
   Info as InfoIcon, ArrowBack, PlayArrow, FilterList, FactCheck, Accessible,
-  Traffic,
+  Traffic, WarningAmber,
 } from '@mui/icons-material'
 import { MapContainer, TileLayer, Polyline, CircleMarker, Marker, Tooltip as LTooltip, useMap, useMapEvents } from 'react-leaflet'
 import L from 'leaflet'
@@ -496,6 +496,95 @@ function formatTrafficDate(value) {
   return d.isValid() ? d.format('DD/MM HH:mm') : value
 }
 
+// --- Blocking disruptions overlay (GET /api/disruptions/active) ---
+
+// Disruptions change when an operator edits them, not continuously. A minute is
+// responsive enough for a back-office entry to show up, and cheap.
+const DISRUPTION_REFRESH_MS = 60000
+
+const DISRUPTION_COLOR = '#ff5252'
+
+// Poll the blocking disruptions in force while `active`. Returns null until the
+// first response lands, so callers can tell "loading" from "nothing blocked".
+function useBlockedDisruptions(active) {
+  const [snapshot, setSnapshot] = useState(null)
+
+  useEffect(() => {
+    if (!active) return
+    let cancelled = false
+    const load = () => {
+      fetch('/api/disruptions/active')
+        .then(r => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+        .then(data => { if (!cancelled) setSnapshot(data) })
+        .catch(e => {
+          console.warn('Blocked disruptions fetch failed:', e)
+          if (!cancelled) setSnapshot({ disruptions: [] })
+        })
+    }
+    load()
+    const timer = setInterval(load, DISRUPTION_REFRESH_MS)
+    return () => { cancelled = true; clearInterval(timer) }
+  }, [active])
+
+  return snapshot
+}
+
+// One tooltip body, shared by the markers and the segments so a closed stop and
+// a cut section read the same way.
+function DisruptionTooltip({ disruption, stopName }) {
+  const { t } = useI18n()
+  return (
+    <span style={{ fontSize: 12 }}>
+      <b>{disruption.title}</b>
+      {stopName ? <><br />{stopName}</> : null}
+      <br />
+      {disruption.ends_at
+        ? t('disruptionUntil', { date: formatTrafficDate(disruption.ends_at) })
+        : t('disruptionOngoing')}
+      {disruption.message ? <><br />{disruption.message}</> : null}
+    </span>
+  )
+}
+
+// Closed stops as markers, cut rides as segments. Drawn before the journey
+// lines so a result stays readable on top of them.
+function DisruptionLayer({ snapshot }) {
+  const renderer = useMemo(() => L.canvas({ padding: 0.4 }), [])
+  if (!snapshot?.disruptions?.length) return null
+
+  return (
+    <>
+      {snapshot.disruptions.map(disruption => (
+        <Fragment key={`disruption-${disruption.id}`}>
+          {disruption.segments.map((segment, i) => (
+            <Polyline key={`seg-${i}`} positions={segment}
+              pathOptions={{
+                renderer, color: DISRUPTION_COLOR, weight: 6, opacity: 0.75,
+                dashArray: '10, 6', lineCap: 'round', lineJoin: 'round',
+              }}>
+              <LTooltip sticky>
+                <DisruptionTooltip disruption={disruption} />
+              </LTooltip>
+            </Polyline>
+          ))}
+
+          {disruption.stops.map(stop => (
+            <CircleMarker key={`stop-${stop.id}`} center={[stop.lat, stop.lon]} radius={7}
+              pathOptions={{
+                renderer, color: '#0a0a12', fillColor: DISRUPTION_COLOR,
+                fillOpacity: 1, weight: 2,
+              }}>
+              <LTooltip direction="top" offset={[0, -8]}>
+                <DisruptionTooltip disruption={disruption} stopName={stop.name} />
+              </LTooltip>
+            </CircleMarker>
+          ))}
+        </Fragment>
+      ))}
+    </>
+  )
+}
+
 // Indoor maneuver types: 39=elevator, 40=stairs, 41=escalator
 const INDOOR_MANEUVER_TYPES = { 39: 'elevator', 40: 'stairs', 41: 'escalator' }
 
@@ -599,17 +688,35 @@ const TAG_COLORS = {
   least_waiting: '#26a69a',
 }
 
+/** Short local date for a disruption end, e.g. "08/09 04:30". */
+function formatDisruptionDate(value) {
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return value
+  return parsed.toLocaleString(undefined, {
+    day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
+  })
+}
+
 function JourneyCard({ journey, selected, onSelect, animDelay }) {
   const { t } = useI18n()
   const [open, setOpen] = useState(false)
+  const blocked = journey.status === 'blocked'
+  // Only the disruptions that actually remove the journey are worth a banner;
+  // informational ones are listed below it without the alarming framing.
+  const blockingNotes = (journey.disruptions || []).filter(d => d.severity === 'blocking')
+  const infoNotes = (journey.disruptions || []).filter(d => d.severity === 'info')
 
   return (
     <Card
       sx={{
         mb: 1.5,
         border: '1px solid',
-        borderColor: selected ? 'rgba(0, 229, 255, 0.4)' : 'rgba(255, 255, 255, 0.04)',
-        bgcolor: selected ? 'rgba(0, 229, 255, 0.06)' : 'rgba(20, 20, 35, 0.5)',
+        borderColor: blocked
+          ? 'rgba(255, 82, 82, 0.35)'
+          : selected ? 'rgba(0, 229, 255, 0.4)' : 'rgba(255, 255, 255, 0.04)',
+        bgcolor: blocked
+          ? 'rgba(40, 16, 20, 0.5)'
+          : selected ? 'rgba(0, 229, 255, 0.06)' : 'rgba(20, 20, 35, 0.5)',
         boxShadow: selected ? '0 0 24px rgba(0, 229, 255, 0.1), inset 0 1px 0 rgba(255,255,255,0.05)' : 'inset 0 1px 0 rgba(255,255,255,0.03)',
         '&:hover': {
           borderColor: selected ? 'rgba(0, 229, 255, 0.5)' : 'rgba(255, 255, 255, 0.1)',
@@ -621,8 +728,58 @@ function JourneyCard({ journey, selected, onSelect, animDelay }) {
       }}
       elevation={0}
     >
+      {blocked && (
+        <Box sx={{
+          px: 2.5, py: 1,
+          bgcolor: 'rgba(255, 82, 82, 0.1)',
+          borderBottom: '1px solid rgba(255, 82, 82, 0.2)',
+          display: 'flex', alignItems: 'flex-start', gap: 1,
+        }}>
+          <WarningAmber sx={{ fontSize: 16, color: '#ff5252', mt: 0.2 }} />
+          <Box sx={{ minWidth: 0 }}>
+            <Typography variant="caption" fontWeight={700} sx={{ color: '#ff5252', display: 'block' }}>
+              {t('disruptionBlockedJourney')}
+            </Typography>
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+              {t('disruptionBlockedHint')}
+            </Typography>
+          </Box>
+        </Box>
+      )}
+
+      {blockingNotes.map((note, i) => (
+        <Box key={`blocking-${i}`} sx={{ px: 2.5, py: 0.75, bgcolor: 'rgba(255, 82, 82, 0.04)' }}>
+          <Typography variant="caption" fontWeight={600} sx={{ display: 'block', color: '#ffb4b4' }}>
+            {note.title}
+          </Typography>
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+            {note.stop_point
+              ? t('disruptionStopUnusable', { stop: note.stop_point.name })
+              : t(`scope_${note.scope}`)}
+            {note.ends_at
+              ? ` · ${t('disruptionUntil', { date: formatDisruptionDate(note.ends_at) })}`
+              : ` · ${t('disruptionOngoing')}`}
+          </Typography>
+          {note.message && (
+            <Typography variant="caption" color="text.disabled" sx={{ display: 'block' }}>
+              {note.message}
+            </Typography>
+          )}
+        </Box>
+      ))}
+
+      {infoNotes.map((note, i) => (
+        <Box key={`info-${i}`} sx={{ px: 2.5, py: 0.75, display: 'flex', alignItems: 'flex-start', gap: 1 }}>
+          <InfoIcon sx={{ fontSize: 14, color: '#ffb800', mt: 0.3 }} />
+          <Typography variant="caption" color="text.secondary">
+            {note.title}
+            {note.stop_point ? ` — ${note.stop_point.name}` : ''}
+          </Typography>
+        </Box>
+      ))}
+
       <CardActionArea onClick={() => { setOpen(!open); onSelect() }}>
-        <CardContent sx={{ py: 1.5, px: 2.5 }}>
+        <CardContent sx={{ py: 1.5, px: 2.5, opacity: blocked ? 0.55 : 1 }}>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
             <Box sx={{ flex: 1, minWidth: 0 }}>
               <Typography variant="body2" fontWeight={600} sx={{ fontFamily: '"Syne", sans-serif' }}>
@@ -1444,6 +1601,8 @@ function GtfsValidationPanel() {
 
 // Loaded on demand: swagger-ui-react is more than half of the bundle.
 const SwaggerPanel = lazy(() => import('./SwaggerPanel.jsx'))
+// Lazy: the back office is a rarely-used screen and pulls its own form widgets.
+const DisruptionsPanel = lazy(() => import('./components/DisruptionsPanel.jsx'))
 
 // --- Metrics panel ---
 
@@ -1617,6 +1776,20 @@ export default function App() {
   const { geometry: trafficGeometry, snapshot: trafficSnapshot } = useTrafficData(trafficOn)
   const toggleTraffic = useCallback(() => setTrafficOn(v => !v), [])
   // The server answers `enabled: false` when the overlay is off in config.
+  // Blocking disruptions overlay: same lifecycle as the traffic one, polled
+  // only while displayed.
+  const [blockagesOn, setBlockagesOn] = useState(false)
+  const blockagesSnapshot = useBlockedDisruptions(blockagesOn)
+  const toggleBlockages = useCallback(() => setBlockagesOn(v => !v), [])
+  const blockageCount = blockagesSnapshot?.disruptions?.length
+  const blockagesTooltip = !blockagesOn
+    ? t('blockagesShow')
+    : blockageCount === undefined
+      ? t('blockagesLoading')
+      : blockageCount === 0
+        ? t('blockagesNone')
+        : t('blockagesCount', { count: blockageCount })
+
   const trafficUnavailable = trafficOn && trafficSnapshot?.enabled === false
   const trafficTooltip = !trafficOn
     ? t('trafficShow')
@@ -1783,6 +1956,7 @@ export default function App() {
         {/* Main nav buttons */}
         {[
           { key: 'gtfs', icon: <FactCheck fontSize="small" />, label: t('gtfsValidation') },
+          { key: 'disruptions', icon: <WarningAmber fontSize="small" />, label: t('disruptions') },
           { key: 'settings', icon: <Storage fontSize="small" />, label: t('dataset') },
         ].map(item => (
           <Tooltip key={item.key} title={item.label} placement="right">
@@ -1888,6 +2062,10 @@ export default function App() {
           <MetricsPanel />
         ) : view === 'gtfs' ? (
           <GtfsValidationPanel />
+        ) : view === 'disruptions' ? (
+          <Suspense fallback={<Box sx={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><CircularProgress size={28} /></Box>}>
+            <DisruptionsPanel />
+          </Suspense>
         ) : view === 'settings' ? (
           <SettingsPanel status={status} onReload={refreshStatus} />
         ) : (
@@ -2281,6 +2459,24 @@ export default function App() {
           pointerEvents: 'none',
         }} />
 
+        {/* Blocking disruptions overlay toggle, left of the traffic one */}
+        <Tooltip title={blockagesTooltip} placement="left">
+          <IconButton
+            aria-label={blockagesOn ? t('blockagesHide') : t('blockagesShow')}
+            onClick={toggleBlockages}
+            sx={{
+              position: 'absolute', top: 16, right: 64, zIndex: 600,
+              bgcolor: 'rgba(20, 20, 32, 0.85)', border: '1px solid rgba(255,255,255,0.12)',
+              '&:hover': { bgcolor: 'rgba(30, 30, 46, 0.95)' },
+            }}
+          >
+            <WarningAmber sx={{
+              fontSize: 20,
+              color: blockagesOn ? '#ff5252' : 'text.secondary',
+            }} />
+          </IconButton>
+        </Tooltip>
+
         {/* Road traffic overlay toggle */}
         <Tooltip title={trafficTooltip} placement="left">
           <IconButton
@@ -2310,6 +2506,7 @@ export default function App() {
 
           {/* Drawn before the journey lines so those stay on top */}
           {trafficOn && <TrafficLayer geometry={trafficGeometry} snapshot={trafficSnapshot} />}
+          {blockagesOn && <DisruptionLayer snapshot={blockagesSnapshot} />}
 
           {fitBounds && <FitBounds bounds={fitBounds} />}
           {flyTo && <FlyToPoint point={flyTo} />}

@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { formatTime, formatDuration, secondsBetween, parseApiDateTime, toApiDatetime, decodePolyline, modeColor } from '../utils.js'
+import { formatTime, formatDuration, secondsBetween, parseApiDateTime, toApiDatetime, decodePolyline, modeColor,
+  disruptionInstantToApi, disruptionInstantToInput, disruptionStartDefault } from '../utils.js'
 
 describe('formatTime', () => {
   it('formats a valid datetime string', () => {
@@ -94,5 +95,60 @@ describe('modeColor', () => {
   })
   it('returns default for unknown mode', () => {
     expect(modeColor('unknown', '')).toBe('#90a4ae')
+  })
+})
+
+describe('disruptionInstantToApi', () => {
+  it('appends seconds to a datetime-local value', () => {
+    expect(disruptionInstantToApi('2026-09-01T22:00')).toBe('2026-09-01T22:00:00')
+  })
+
+  it('leaves a value that already carries seconds alone', () => {
+    expect(disruptionInstantToApi('2026-09-01T22:00:30')).toBe('2026-09-01T22:00:30')
+  })
+
+  it('maps an empty value to null, which the API reads as "no end date"', () => {
+    expect(disruptionInstantToApi('')).toBeNull()
+    expect(disruptionInstantToApi(null)).toBeNull()
+    expect(disruptionInstantToApi(undefined)).toBeNull()
+  })
+})
+
+describe('disruptionInstantToInput', () => {
+  it('drops the seconds an input cannot show', () => {
+    expect(disruptionInstantToInput('2026-09-01T22:00:00')).toBe('2026-09-01T22:00')
+  })
+
+  it('maps an absent value to an empty field', () => {
+    expect(disruptionInstantToInput(null)).toBe('')
+    expect(disruptionInstantToInput('')).toBe('')
+  })
+
+  it('round-trips with disruptionInstantToApi', () => {
+    const api = '2026-09-01T22:00:00'
+    expect(disruptionInstantToApi(disruptionInstantToInput(api))).toBe(api)
+  })
+})
+
+describe('disruptionStartDefault', () => {
+  it('formats an instant from its local components', () => {
+    // Constructed and read back through local getters, so the expectation
+    // holds in any timezone.
+    expect(disruptionStartDefault(new Date(2026, 8, 1, 22, 5))).toBe('2026-09-01T22:05')
+  })
+
+  it('pads month, day, hour and minute', () => {
+    expect(disruptionStartDefault(new Date(2026, 0, 2, 3, 4))).toBe('2026-01-02T03:04')
+  })
+
+  it('keeps a just-past-midnight start on its own local day', () => {
+    // The trap toISOString() would fall into: east of Greenwich it would
+    // report the previous day, making the disruption look already over.
+    expect(disruptionStartDefault(new Date(2026, 0, 1, 0, 30))).toBe('2026-01-01T00:30')
+  })
+
+  it('produces a value disruptionInstantToApi accepts', () => {
+    const value = disruptionStartDefault(new Date(2026, 8, 1, 22, 5))
+    expect(disruptionInstantToApi(value)).toBe('2026-09-01T22:05:00')
   })
 })
