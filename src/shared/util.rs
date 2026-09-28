@@ -3,7 +3,7 @@
 use sha2::{Digest, Sha256};
 use std::collections::BinaryHeap;
 use std::fs::Metadata;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 use tracing::debug;
 
@@ -17,6 +17,33 @@ pub fn redact_query(url: &str) -> String {
         Some((base, _)) => format!("{base}?…"),
         None => url.to_string(),
     }
+}
+
+/// Resolve `dir` to its canonical absolute form, or keep it as given when it
+/// does not exist yet.
+///
+/// Callers build file paths under the result and then pass them through
+/// [`reject_parent_traversal`]; canonicalizing first is what lets a
+/// legitimately relative data directory (`../data`) pass that check.
+pub fn canonical_dir(dir: &Path) -> PathBuf {
+    dir.canonicalize().unwrap_or_else(|e| {
+        debug!("Cannot canonicalize {}: {e}", dir.display());
+        dir.to_path_buf()
+    })
+}
+
+/// Refuse a filesystem path that contains `..`.
+///
+/// A plain substring test rather than a component walk: stricter (it also
+/// refuses `a..b`, which no path of ours contains) and the form CodeQL's
+/// path-injection query recognizes as a sanitizer. The paths it guards are
+/// built from config and request values, so anything climbing out of the
+/// base directory is refused before it reaches the filesystem.
+pub fn reject_parent_traversal(path: String) -> Option<PathBuf> {
+    if path.contains("..") {
+        return None;
+    }
+    Some(PathBuf::from(path))
 }
 
 /// Feed one file's identity into a fingerprint: name, size and modification time.
@@ -272,5 +299,28 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let fp = dir_fingerprint_glob(dir.path(), "data-", ".csv");
         assert_eq!(fp.len(), 64);
+    }
+
+    #[test]
+    fn reject_parent_traversal_refuses_dot_dot() {
+        assert!(reject_parent_traversal("data/../etc/passwd".into()).is_none());
+        assert_eq!(
+            reject_parent_traversal("data/tiles/1/2/3.png".into()),
+            Some(PathBuf::from("data/tiles/1/2/3.png"))
+        );
+    }
+
+    #[test]
+    fn canonical_dir_resolves_parent_components() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir(dir.path().join("a")).expect("mkdir");
+        let resolved = canonical_dir(&dir.path().join("a").join(".."));
+        assert!(!resolved.to_string_lossy().contains(".."));
+    }
+
+    #[test]
+    fn canonical_dir_keeps_a_missing_dir_as_given() {
+        let missing = Path::new("does/not/exist");
+        assert_eq!(canonical_dir(missing), missing.to_path_buf());
     }
 }

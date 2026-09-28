@@ -5,9 +5,10 @@
 //! Subsequent requests for the same tile are served directly from disk.
 
 use actix_web::{HttpResponse, get, web};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::shared::config::AppConfig;
+use crate::shared::util::{canonical_dir, reject_parent_traversal};
 
 /// Subdomains for load balancing across tile servers.
 const SUBDOMAINS: &[&str] = &["a", "b", "c", "d"];
@@ -69,21 +70,12 @@ fn validate_tile_coords(z: u32, x: u32, y: u32) -> Result<(), HttpResponse> {
     Ok(())
 }
 
-/// Resolve `{tiles_dir}/{z}/{x}/{y}.png` and verify it stays inside the
-/// configured tile cache directory (defense in depth — z/x/y are u32 already).
+/// Resolve `{tiles_dir}/{z}/{x}/{y}.png`, refusing any path that could climb
+/// out of the tile cache (defense in depth — z/x/y are u32 already).
 fn resolve_tile_path(config: &AppConfig, z: u32, x: u32, y: u32) -> Result<PathBuf, HttpResponse> {
-    let tiles_dir = config.data.tiles_dir();
-    let base = PathBuf::from(&tiles_dir)
-        .canonicalize()
-        .unwrap_or_else(|_| PathBuf::from(&tiles_dir));
-    let tile_path = base
-        .join(z.to_string())
-        .join(x.to_string())
-        .join(format!("{y}.png"));
-    if !tile_path.starts_with(&base) {
-        return Err(bad_request("Invalid tile path"));
-    }
-    Ok(tile_path)
+    let base = canonical_dir(Path::new(&config.data.tiles_dir()));
+    let tile_path = format!("{}/{z}/{x}/{y}.png", base.display());
+    reject_parent_traversal(tile_path).ok_or_else(|| bad_request("Invalid tile path"))
 }
 
 /// Return a cached response if the tile is on disk and readable.

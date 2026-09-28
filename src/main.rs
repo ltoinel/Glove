@@ -47,6 +47,12 @@ async fn main() -> std::io::Result<()> {
     let ban_data = load_or_build_ban(&config);
     api::metrics::init_start_time();
 
+    // Exists before the first tile request so the tile proxy can canonicalize
+    // it: a relative `data.dir` such as `../data` would otherwise be refused.
+    if let Err(e) = std::fs::create_dir_all(config.data.tiles_dir()) {
+        warn!("Cannot create tile cache directory: {e}");
+    }
+
     info!(
         "Starting server on http://{}:{}",
         config.server.bind, config.server.port

@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 
 use super::model::{Disruption, DisruptionInput};
+use crate::shared::util::{canonical_dir, reject_parent_traversal};
 
 /// Everything persisted, in one document.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -75,6 +76,7 @@ impl DisruptionStore {
     /// overwritten: losing an operator's disruptions silently is worse than
     /// starting empty and saying so loudly.
     pub fn load(path: &Path) -> Self {
+        let path = &resolve_catalog_path(path);
         let catalog = match std::fs::read_to_string(path) {
             Ok(content) => match serde_json::from_str::<Catalog>(&content) {
                 Ok(catalog) => {
@@ -223,6 +225,28 @@ impl DisruptionStore {
     }
 }
 
+/// Anchor the catalog path to its canonical directory, created if missing.
+///
+/// Done once at startup so every later write goes to an absolute path free
+/// of `..`, which [`persist`] then insists on.
+fn resolve_catalog_path(path: &Path) -> PathBuf {
+    let (Some(parent), Some(file_name)) = (path.parent(), path.file_name()) else {
+        return path.to_path_buf();
+    };
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
+    if let Err(e) = std::fs::create_dir_all(parent) {
+        warn!(
+            "Cannot create disruption catalog directory {}: {e}",
+            parent.display()
+        );
+    }
+    canonical_dir(parent).join(file_name)
+}
+
 /// Server-local wall clock, matching how journey queries resolve "now".
 fn local_now() -> chrono::NaiveDateTime {
     chrono::Local::now().naive_local()
@@ -233,6 +257,10 @@ fn local_now() -> chrono::NaiveDateTime {
 /// `rename` is atomic within a filesystem, so a crash mid-write leaves the
 /// previous catalog intact rather than a truncated one.
 fn persist(path: &Path, catalog: &Catalog) -> Result<(), StoreError> {
+    // `load` canonicalized the directory, so a `..` here was never configured.
+    let path = reject_parent_traversal(path.to_string_lossy().into_owned())
+        .ok_or_else(|| StoreError::Io(format!("refusing path {}", path.display())))?;
+    let path = path.as_path();
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -385,5 +413,25 @@ mod tests {
         let snapshot = store.snapshot();
         assert!(snapshot.get(&created.id).is_some());
         assert!(snapshot.get("d999").is_none());
+    }
+
+    #[test]
+    fn a_relative_catalog_path_is_anchored_without_parent_components() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let nested = dir.path().join("sub");
+        let path = nested.join("..").join("data").join("disruptions.json");
+
+        let store = DisruptionStore::load(&path);
+        store.create(input("Travaux", "S1")).expect("created");
+        assert!(!store.path.to_string_lossy().contains(".."));
+        assert!(dir.path().join("data").join("disruptions.json").exists());
+    }
+
+    #[test]
+    fn persist_refuses_a_path_climbing_out() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("..").join("disruptions.json");
+        let outcome = persist(&path, &Catalog::default());
+        assert!(matches!(outcome, Err(StoreError::Io(_))));
     }
 }
