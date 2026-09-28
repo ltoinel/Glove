@@ -7,7 +7,8 @@ server:
   log_level: "warn"             # trace, debug, info, warn, error
   shutdown_timeout: 30          # seconds — graceful shutdown for in-flight requests
   api_key: "glove"               # Required for POST /api/gtfs/reload and disruption writes. Empty = disabled
-  cors_origins: []              # Allowed origins. ["*"] = permissive (not for production)
+  cors_origins:                 # Allowed origins. ["*"] = permissive (not for production)
+    - "https://portal.glove"    # portal served by Caddy (bin/start.sh); keep in sync with GLOVE_PORTAL_HOST
   rate_limit: 0                 # Max requests/sec per IP. 0 = disabled
 
 data:

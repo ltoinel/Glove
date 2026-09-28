@@ -3,6 +3,7 @@
 // bundle, for a view that is opened rarely.
 import { Box } from '@mui/material'
 import SwaggerUI from 'swagger-ui-react'
+import { apiUrl } from './api'
 import 'swagger-ui-react/swagger-ui.css'
 
 export default function SwaggerPanel() {
@@ -40,7 +41,7 @@ export default function SwaggerPanel() {
       '& .swagger-ui .opblock.opblock-get .opblock-summary-method': { bgcolor: '#00e5ff', color: '#0a0a12' },
       '& .swagger-ui .opblock.opblock-post .opblock-summary-method': { bgcolor: '#ffb800', color: '#0a0a12' },
     }}>
-      <SwaggerUI url="/api-docs/openapi.json" docExpansion="list" defaultModelsExpandDepth={-1} />
+      <SwaggerUI url={apiUrl('/api-docs/openapi.json')} docExpansion="list" defaultModelsExpandDepth={-1} />
     </Box>
   )
 }

@@ -32,8 +32,9 @@ npx eslint src/              # Lint (CI enforced)
 bin/download.sh              # Download GTFS + OSM + BAN + traffic data (reads config.yaml)
 bin/valhalla.sh              # Start Valhalla Docker container (port 8002)
 bin/build.sh                 # Build release artifacts: backend binary + portal SPA
-bin/start.sh                 # Production: run only (auto-runs build.sh if artifacts missing)
-bin/start.sh --dev           # Dev: cargo-watch + Vite HMR
+bin/start.sh                 # Production: Caddy + backend, run only (auto-runs build.sh if artifacts missing)
+bin/start.sh --dev           # Dev: Caddy + cargo-watch + Vite HMR
+bin/start.sh --docker        # Docker: Caddy + api/portal/valhalla images (docker/docker-compose.yml)
 ```
 
 ## Architecture
@@ -74,7 +75,8 @@ Core of the application. Round-based public transit routing with:
 ### Data Flow
 1. `src/main.rs` loads config (`src/shared/config.rs`) and GTFS CSVs (`src/transit/gtfs.rs`)
 2. Builds `RaptorData` index, wraps in `ArcSwap` for lock-free hot-reload
-3. Actix-web serves the REST API only (port 8080). The React portal runs as a **separate process** — Vite dev server in dev, `vite preview` in prod (port 3000) — and proxies `/api` to the backend (`portal/vite.config.js`)
+3. Actix-web serves the REST API only (port 8080). The React portal is **separate**: `bin/start.sh` runs Caddy (`deploy/Caddyfile`) on two HTTPS domains — `https://portal.glove` (static build in prod, Vite dev server in dev) and `https://api.glove` (reverse proxy to :8080). Certificates come from Caddy's local CA (`tls internal`); `GLOVE_PORTAL_HOST` / `GLOVE_API_HOST` / `GLOVE_HTTPS_PORT` override names and ports. `--docker` runs the images from `docker/` instead (`Dockerfile.api`, `Dockerfile.portal`), Caddy proxying to their loopback ports; in containers `GLOVE_VALHALLA_HOST` / `GLOVE_VALHALLA_PORT` override `valhalla.*` from the mounted `config.yaml`
+4. The portal reaches the API through `apiUrl()` (`portal/src/api.js`): the origin comes from `VITE_API_URL`, baked in at build time by `bin/build.sh` (`https://api.glove`). Left empty, calls stay same-origin — a bare `npm run dev` proxies `/api` (`portal/vite.config.js`), and the Docker portal image proxies it through nginx. Cross-origin calls require the portal origin in `server.cors_origins`
 
 ### API Endpoints
 - `GET /api/journeys/public_transport` — RAPTOR journey planning

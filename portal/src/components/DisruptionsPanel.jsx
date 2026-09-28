@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { apiUrl } from '../api'
 import {
   Alert, Autocomplete, Box, Button, Chip, CircularProgress, Divider,
   FormControlLabel, IconButton, MenuItem, Paper, Switch, TextField,
@@ -69,7 +70,7 @@ function StopPicker({ label, value, onChange, required }) {
     (data) => (data.places || []).filter(place => place.type === 'stop'),
     [],
   )
-  const { options, loading, search } = useRemoteOptions('/api/places?q=', mapStops)
+  const { options, loading, search } = useRemoteOptions(apiUrl('/api/places?q='), mapStops)
 
   return (
     <Autocomplete
@@ -106,7 +107,7 @@ function StopPicker({ label, value, onChange, required }) {
 function LinePicker({ label, value, onChange, required }) {
   const { t } = useI18n()
   const mapLines = useCallback((data) => data.lines || [], [])
-  const { options, loading, search } = useRemoteOptions('/api/lines?q=', mapLines)
+  const { options, loading, search } = useRemoteOptions(apiUrl('/api/lines?q='), mapLines)
 
   return (
     <Autocomplete
@@ -174,7 +175,7 @@ export default function DisruptionsPanel() {
 
   useEffect(() => {
     let cancelled = false
-    const url = onlyActive ? '/api/disruptions?active_at=now' : '/api/disruptions'
+    const url = onlyActive ? apiUrl('/api/disruptions?active_at=now') : apiUrl('/api/disruptions')
     fetch(url)
       .then(res => res.json())
       .then(data => {
@@ -264,7 +265,7 @@ export default function DisruptionsPanel() {
 
     try {
       const res = await fetch(
-        form.id ? `/api/disruptions/${form.id}` : '/api/disruptions',
+        form.id ? apiUrl(`/api/disruptions/${form.id}`) : apiUrl('/api/disruptions'),
         {
           method: form.id ? 'PUT' : 'POST',
           headers: { 'Content-Type': 'application/json', 'X-Api-Key': apiKey },
@@ -290,7 +291,7 @@ export default function DisruptionsPanel() {
 
   const remove = useCallback(async (id) => {
     try {
-      const res = await fetch(`/api/disruptions/${id}`, {
+      const res = await fetch(apiUrl(`/api/disruptions/${id}`), {
         method: 'DELETE',
         headers: { 'X-Api-Key': apiKey },
       })

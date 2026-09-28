@@ -46,12 +46,17 @@ Glove loads GTFS data into memory, builds a RAPTOR index, and exposes a REST API
 bin/download.sh all      # Download GTFS, OSM, BAN and road traffic data
 bin/valhalla.sh          # Start Valhalla (optional, for walk/bike/car)
 bin/build.sh             # Build release artifacts (backend + portal)
-bin/start.sh             # Production: run (auto-builds on first run)
-bin/start.sh --dev       # Dev: cargo-watch + Vite HMR
+bin/start.sh             # Production: Caddy + backend (auto-builds on first run)
+bin/start.sh --dev       # Dev: Caddy + cargo-watch + Vite HMR
+bin/start.sh --docker    # Docker: Caddy + api/portal/valhalla images (docker compose)
 ```
 
-- **Portal**: [http://localhost:3000](http://localhost:3000) (served by the frontend process in both production and dev)
-- **API**: [http://localhost:8080/api](http://localhost:8080/api) (Actix backend; the portal proxies `/api` to it)
+`bin/start.sh` serves Glove over HTTPS through [Caddy](https://caddyserver.com/), on two domains:
+
+- **Portal**: [https://portal.glove](https://portal.glove) (static build in production, Vite HMR in dev)
+- **API**: [https://api.glove/api](https://api.glove/api) (reverse proxy to the Actix backend on `localhost:8080`)
+
+It needs a one-time setup (free ports 80/443 for Caddy, `/etc/hosts` entries, trust Caddy's local CA) — see [Installation](https://ltoinel.github.io/Glove/getting-started/installation.html#one-time-setup).
 
 ## Documentation
 

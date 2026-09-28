@@ -2,6 +2,8 @@
 name = "glove"
 version = "0.2.0"
 edition = "2024"
+# let-chains and actix-web 4.14 both need 1.88. Keep docker/Dockerfile.api at or above it.
+rust-version = "1.88"
 
 [dependencies]
 csv = "1.3"

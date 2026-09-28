@@ -26,9 +26,14 @@ log "Building backend (release)..."
 cargo build --release --quiet
 ok "Backend built: target/release/glove"
 
-# Build frontend (reproducible install via npm ci, then static build)
-log "Building frontend..."
-(cd "$ROOT/portal" && npm ci --silent && npx vite build --outDir "$ROOT/target/portal" --emptyOutDir)
+# Build frontend (reproducible install via npm ci, then static build).
+# The portal and the API are served on separate domains by Caddy (bin/start.sh),
+# so the API origin is baked into the bundle. Recorded next to the build so
+# start.sh can tell when a different GLOVE_API_HOST calls for a rebuild.
+API_URL="${GLOVE_API_URL:-https://${GLOVE_API_HOST:-api.glove}}"
+log "Building frontend (API at $API_URL)..."
+(cd "$ROOT/portal" && npm ci --silent && VITE_API_URL="$API_URL" npx vite build --outDir "$ROOT/target/portal" --emptyOutDir)
+echo "$API_URL" > "$ROOT/target/portal.api-url"
 ok "Frontend built: target/portal"
 
 echo ""

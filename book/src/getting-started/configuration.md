@@ -12,7 +12,8 @@ server:
   log_level: "info"             # trace, debug, info, warn, error
   shutdown_timeout: 30          # seconds — graceful shutdown for in-flight requests
   api_key: ""                   # Required for POST /api/gtfs/reload. Empty = endpoint disabled
-  cors_origins: []              # Allowed origins. ["*"] = permissive (not for production)
+  cors_origins:                 # Allowed origins. ["*"] = permissive (not for production)
+    - "https://portal.glove"    # portal served by Caddy (bin/start.sh)
   rate_limit: 20                # Max requests/sec per IP. 0 = disabled
 ```
 
@@ -24,7 +25,7 @@ server:
 | `log_level` | Minimum log level | `info` |
 | `shutdown_timeout` | Seconds to wait for in-flight requests on shutdown | `30` |
 | `api_key` | API key for the reload endpoint. Empty disables the endpoint | `""` |
-| `cors_origins` | List of allowed CORS origins. `["*"]` allows all | `[]` |
+| `cors_origins` | List of allowed CORS origins. `["*"]` allows all. `bin/start.sh` serves the portal on its own domain, so its origin must be listed (see [Custom domains and ports](./installation.md#custom-domains-and-ports)) | `[]` (the shipped `config.yaml` lists `https://portal.glove`) |
 | `rate_limit` | Maximum requests per second per IP address | `20` |
 
 ```admonish tip
@@ -84,6 +85,13 @@ valhalla:
 ```
 
 The Valhalla routing engine is used for walking, cycling, and driving directions. It runs as a separate Docker container. When OSM data includes indoor information, Valhalla provides indoor maneuvers (elevator, stairs, escalator, enter/exit building) in transfer and walking sections.
+
+Two environment variables override these settings without editing the file — used by Docker Compose, where Valhalla is the `valhalla` service rather than `localhost`:
+
+| Variable | Overrides |
+|----------|-----------|
+| `GLOVE_VALHALLA_HOST` | `valhalla.host` (ignored when empty) |
+| `GLOVE_VALHALLA_PORT` | `valhalla.port` (ignored, with a warning, when not a valid port) |
 
 ## Traffic
 

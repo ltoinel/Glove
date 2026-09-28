@@ -29,6 +29,7 @@ Glove/
 ├── portal/                      # React frontend
 │   ├── src/
 │   │   ├── App.jsx              # Main SPA (search, results, map, metrics)
+│   │   ├── api.js               # API base URL (VITE_API_URL) — apiUrl() for every call
 │   │   ├── SwaggerPanel.jsx     # API docs view, lazy-loaded
 │   │   ├── i18n.jsx             # Internationalization (FR/EN)
 │   │   ├── main.jsx             # Entry point with MUI theme
@@ -40,7 +41,8 @@ Glove/
 │   └── eslint.config.js
 │
 ├── bin/                         # Utility scripts
-│   ├── start.sh                 # Start script (production & dev)
+│   ├── build.sh                 # Release build: backend binary + portal SPA
+│   ├── start.sh                 # Start script (production & dev), behind Caddy
 │   ├── download.sh              # Data download (GTFS, OSM, BAN, traffic)
 │   └── valhalla.sh              # Valhalla Docker setup
 │
@@ -48,8 +50,14 @@ Glove/
 │   ├── benchmark.py             # Performance benchmark with charts
 │   └── check_indoor.py          # Check GTFS transfers for indoor routing data
 │
+├── deploy/
+│   └── Caddyfile                # HTTPS reverse proxy: portal.glove + api.glove (bin/start.sh)
+│
 ├── docker/
-│   └── Dockerfile               # Multi-stage build (Node + Rust + Debian)
+│   ├── Dockerfile.api           # API image (Rust build + Debian slim runtime)
+│   ├── Dockerfile.portal        # Portal image (Vite build + nginx)
+│   ├── nginx.conf               # Portal nginx: static SPA + /api proxy to the api service
+│   └── docker-compose.yml       # api + portal + valhalla
 │
 ├── book/                        # Documentation (mdBook)
 │   ├── book.toml

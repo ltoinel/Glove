@@ -17,7 +17,7 @@ Glove is a monorepo with a Rust backend and React frontend.
   <!-- ===== Clients (two separate processes) ===== -->
   <rect x="60" y="14" width="280" height="54" rx="12" fill="url(#accent)" stroke="#22d3ee" stroke-opacity="0.55"/>
   <text x="200" y="38" text-anchor="middle" fill="#67e8f9" font-size="13" font-weight="700">Portal · React + MUI + Leaflet</text>
-  <text x="200" y="56" text-anchor="middle" fill="#9b9ab2" font-size="10.5">Vite dev / nginx · proxies /api → :8080</text>
+  <text x="200" y="56" text-anchor="middle" fill="#9b9ab2" font-size="10.5">Caddy: portal.glove → api.glove · Docker: nginx /api</text>
   <rect x="380" y="14" width="280" height="54" rx="12" fill="url(#violet)" stroke="#818cf8" stroke-opacity="0.55"/>
   <text x="520" y="38" text-anchor="middle" fill="#a5b4fc" font-size="13" font-weight="700">REST / OpenAPI clients</text>
   <text x="520" y="56" text-anchor="middle" fill="#9b9ab2" font-size="10.5">/api-docs/openapi.json</text>

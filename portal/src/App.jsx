@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo, lazy, Suspense, Fragment } from 'react'
+import { apiUrl } from './api'
 import {
   Typography, Paper, TextField, Button, Slider, Checkbox, FormControlLabel, Switch,
   Box, Card, CardContent, CardActionArea, Chip, Collapse, Alert, LinearProgress,
@@ -239,7 +240,7 @@ function useDebouncedFetch(delay = 250) {
       const controller = new AbortController()
       controllerRef.current = controller
       try {
-        const res = await fetch(`/api/places?q=${encodeURIComponent(query)}&limit=10`, { signal: controller.signal })
+        const res = await fetch(apiUrl(`/api/places?q=${encodeURIComponent(query)}&limit=10`), { signal: controller.signal })
         const data = await readJsonResponse(res)
         if (!controller.signal.aborted) callback(data.places || [])
       } catch (e) {
@@ -489,7 +490,7 @@ function useTrafficData(active) {
   useEffect(() => {
     if (!active || geometry) return
     const controller = new AbortController()
-    fetch('/api/traffic/geometry', { signal: controller.signal })
+    fetch(apiUrl('/api/traffic/geometry'), { signal: controller.signal })
       .then(readJsonResponse)
       .then(data => { if (!controller.signal.aborted) setGeometry(data.segments || {}) })
       .catch(e => {
@@ -501,7 +502,7 @@ function useTrafficData(active) {
   }, [active, geometry])
 
   // States: refreshed while the overlay is displayed.
-  const snapshot = usePolledJson('/api/traffic/states', {
+  const snapshot = usePolledJson(apiUrl('/api/traffic/states'), {
     active, intervalMs: TRAFFIC_REFRESH_MS, fallback: TRAFFIC_STATES_FALLBACK, label: 'Traffic states',
   })
 
@@ -595,7 +596,7 @@ const BLOCKED_DISRUPTIONS_FALLBACK = { disruptions: [] }
 // Poll the blocking disruptions in force while `active`. Returns null until the
 // first response lands, so callers can tell "loading" from "nothing blocked".
 function useBlockedDisruptions(active) {
-  return usePolledJson('/api/disruptions/active', {
+  return usePolledJson(apiUrl('/api/disruptions/active'), {
     active, intervalMs: DISRUPTION_REFRESH_MS, fallback: BLOCKED_DISRUPTIONS_FALLBACK, label: 'Blocked disruptions',
   })
 }
@@ -1266,7 +1267,7 @@ function SettingsPanel({ status, onReload }) {
   const handleReload = async () => {
     setReloading(true); setReloadMsg(null)
     try {
-      const res = await fetch('/api/gtfs/reload', { method: 'POST' })
+      const res = await fetch(apiUrl('/api/gtfs/reload'), { method: 'POST' })
       const data = await res.json()
       if (data.error) {
         setReloadMsg({ severity: 'error', text: data.error.message })
@@ -1435,7 +1436,7 @@ function GtfsValidationPanel() {
       setElapsed(Math.round((performance.now() - t0) / 1000))
     }, 500)
     try {
-      const res = await fetch('/api/gtfs/validate')
+      const res = await fetch(apiUrl('/api/gtfs/validate'))
       const json = await res.json()
       const duration = (performance.now() - t0) / 1000
       localStorage.setItem('glove_gtfs_validate_duration', duration.toFixed(1))
@@ -1710,7 +1711,7 @@ function MetricsPanel() {
   const [metrics, setMetrics] = useState(null)
 
   useEffect(() => {
-    const load = () => fetch('/api/metrics').then(r => r.text()).then(text => setMetrics(parsePrometheus(text))).catch(err => console.warn('Metrics fetch failed:', err.message))
+    const load = () => fetch(apiUrl('/api/metrics')).then(r => r.text()).then(text => setMetrics(parsePrometheus(text))).catch(err => console.warn('Metrics fetch failed:', err.message))
     load()
     const interval = setInterval(load, 5000)
     return () => clearInterval(interval)
@@ -1830,8 +1831,8 @@ export default function App() {
     // /api/status = engine health + map defaults; /api/gtfs/status = GTFS stats.
     // Merge both so the rest of the UI keeps reading status.map / status.gtfs.
     Promise.all([
-      fetch('/api/status').then(r => r.json()),
-      fetch('/api/gtfs/status').then(r => r.json()),
+      fetch(apiUrl('/api/status')).then(r => r.json()),
+      fetch(apiUrl('/api/gtfs/status')).then(r => r.json()),
     ])
       .then(([health, gtfs]) => setStatus({ ...health, ...gtfs }))
       .catch(err => console.warn('Status fetch failed:', err.message))
@@ -1927,7 +1928,7 @@ export default function App() {
       const forbidden = ['metro', 'rail', 'bus', 'tramway'].filter(m => !modes[m])
       if (forbidden.length > 0) ptParams.set('forbidden_modes', forbidden.join(','))
       const ptT0 = performance.now()
-      const ptFetch = fetch(`/api/journeys/public_transport?${ptParams}`, { signal })
+      const ptFetch = fetch(apiUrl(`/api/journeys/public_transport?${ptParams}`), { signal })
         .then(readJsonResponse)
         .then(data => { if (!signal.aborted) setPtTime(Math.round(performance.now() - ptT0)); return data })
 
@@ -1946,7 +1947,7 @@ export default function App() {
           walkParams.set('language', lang === 'fr' ? 'fr-FR' : 'en-US')
           if (wheelchair) walkParams.set('wheelchair', 'true')
           const walkT0 = performance.now()
-          walkFetch = fetch(`/api/journeys/walk?${walkParams}`, { signal })
+          walkFetch = fetch(apiUrl(`/api/journeys/walk?${walkParams}`), { signal })
             .then(readJsonResponse)
             .then(data => { if (!signal.aborted) setWalkTime(Math.round(performance.now() - walkT0)); return data })
             .catch(err => { if (!isAbortError(err)) console.warn('Walk fetch failed:', err.message); return null })
@@ -1955,7 +1956,7 @@ export default function App() {
           const bikeT0 = performance.now()
           const bikeParams = new URLSearchParams(coordParams)
           bikeParams.set('language', lang === 'fr' ? 'fr-FR' : 'en-US')
-          bikeFetch = fetch(`/api/journeys/bike?${bikeParams}`, { signal })
+          bikeFetch = fetch(apiUrl(`/api/journeys/bike?${bikeParams}`), { signal })
             .then(readJsonResponse)
             .then(data => { if (!signal.aborted) setBikeTime(Math.round(performance.now() - bikeT0)); return data })
             .catch(err => { if (!isAbortError(err)) console.warn('Bike fetch failed:', err.message); return null })
@@ -1964,7 +1965,7 @@ export default function App() {
           const carT0 = performance.now()
           const carParams = new URLSearchParams(coordParams)
           carParams.set('language', lang === 'fr' ? 'fr-FR' : 'en-US')
-          carFetch = fetch(`/api/journeys/car?${carParams}`, { signal })
+          carFetch = fetch(apiUrl(`/api/journeys/car?${carParams}`), { signal })
             .then(readJsonResponse)
             .then(data => { if (!signal.aborted) setCarTime(Math.round(performance.now() - carT0)); return data })
             .catch(err => { if (!isAbortError(err)) console.warn('Car fetch failed:', err.message); return null })
@@ -2594,7 +2595,7 @@ export default function App() {
           style={{ height: '100%', width: '100%' }} zoomControl={false}>
           <TileLayer
             attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; <a href="https://carto.com/">CARTO</a>'
-            url="/api/tiles/{z}/{x}/{y}.png"
+            url={apiUrl('/api/tiles/{z}/{x}/{y}.png')}
           />
 
           {/* Drawn before the journey lines so those stay on top */}

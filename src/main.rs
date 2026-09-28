@@ -225,7 +225,8 @@ fn build_cors(cors_origins: &[String]) -> Cors {
         return Cors::default();
     }
     let mut c = Cors::default()
-        .allowed_methods(vec!["GET", "POST", "OPTIONS"])
+        // PUT and DELETE: the disruptions back office edits and removes entries.
+        .allowed_methods(vec!["GET", "POST", "PUT", "DELETE", "OPTIONS"])
         .allowed_headers(vec!["Content-Type", "Authorization", "X-Api-Key"])
         .max_age(3600);
     for origin in cors_origins {

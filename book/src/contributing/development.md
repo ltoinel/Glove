@@ -17,8 +17,10 @@ cd Glove
 bin/download.sh gtfs
 
 # Start in dev mode (auto-reload on file changes)
-bin/start.sh --dev
+bin/start.sh --dev    # https://portal.glove (HMR) + https://api.glove, through Caddy
 ```
+
+`bin/start.sh` needs a one-time Caddy setup (ports, `/etc/hosts`, local CA) — see [Installation](../getting-started/installation.md#one-time-setup). `npm run dev` alone still works without Caddy, on http://localhost:3000.
 
 ## Backend Development
 

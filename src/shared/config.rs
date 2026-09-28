@@ -680,9 +680,10 @@ impl AppConfig {
     pub fn load(path: &Path) -> Self {
         if path.exists() {
             match std::fs::read_to_string(path) {
-                Ok(content) => match serde_yaml::from_str(&content) {
-                    Ok(config) => {
+                Ok(content) => match serde_yaml::from_str::<Self>(&content) {
+                    Ok(mut config) => {
                         info!("Configuration loaded from {}", path.display());
+                        config.apply_env_overrides(|key| std::env::var(key).ok());
                         return config;
                     }
                     Err(e) => {
@@ -698,12 +699,61 @@ impl AppConfig {
         }
 
         info!("No config file found at {}, using defaults", path.display());
-        Self::default()
+        let mut config = Self::default();
+        config.apply_env_overrides(|key| std::env::var(key).ok());
+        config
+    }
+
+    /// Override deployment-specific settings from the environment.
+    ///
+    /// Only what differs between a host and a container: in Docker Compose
+    /// Valhalla is another service (`valhalla`), not `localhost`, while the
+    /// mounted `config.yaml` stays the one used on the host.
+    /// `lookup` stands in for `std::env::var` so tests need not mutate the
+    /// process environment.
+    fn apply_env_overrides(&mut self, lookup: impl Fn(&str) -> Option<String>) {
+        if let Some(host) = lookup("GLOVE_VALHALLA_HOST").filter(|h| !h.is_empty()) {
+            info!("valhalla.host overridden by GLOVE_VALHALLA_HOST: {host}");
+            self.valhalla.host = host;
+        }
+        match lookup("GLOVE_VALHALLA_PORT").map(|p| p.parse::<u16>()) {
+            Some(Ok(port)) => {
+                info!("valhalla.port overridden by GLOVE_VALHALLA_PORT: {port}");
+                self.valhalla.port = port;
+            }
+            Some(Err(e)) => tracing::warn!("Ignoring invalid GLOVE_VALHALLA_PORT: {e}"),
+            None => {}
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn env_overrides_replace_valhalla_host_and_port() {
+        let mut cfg = AppConfig::default();
+        cfg.apply_env_overrides(|key| match key {
+            "GLOVE_VALHALLA_HOST" => Some("valhalla".into()),
+            "GLOVE_VALHALLA_PORT" => Some("8003".into()),
+            _ => None,
+        });
+        assert_eq!(cfg.valhalla.host, "valhalla");
+        assert_eq!(cfg.valhalla.port, 8003);
+    }
+
+    #[test]
+    fn env_overrides_ignore_empty_host_and_invalid_port() {
+        let mut cfg = AppConfig::default();
+        cfg.apply_env_overrides(|key| match key {
+            "GLOVE_VALHALLA_HOST" => Some(String::new()),
+            "GLOVE_VALHALLA_PORT" => Some("not-a-port".into()),
+            _ => None,
+        });
+        assert_eq!(cfg.valhalla.host, "localhost");
+        assert_eq!(cfg.valhalla.port, 8002);
+    }
+
     use super::*;
 
     #[test]

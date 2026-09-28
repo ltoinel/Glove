@@ -1,32 +1,56 @@
+# Glove in containers: api + portal + valhalla. Started by `bin/start.sh --docker`,
+# which puts Caddy in front (https://portal.glove, https://api.glove); also usable
+# on its own: docker compose -f docker/docker-compose.yml up -d --build
+#
+# Ports are published on loopback only: Caddy (or a local browser) reaches them,
+# the network does not.
+
 services:
-  glove:
+  # REST API. The service name is what docker/nginx.conf proxies /api to.
+  api:
     build:
       context: ..
-      dockerfile: docker/Dockerfile
+      dockerfile: docker/Dockerfile.api
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     volumes:
       - ../data:/app/data
       - ../config.yaml:/app/config.yaml:ro
+    environment:
+      # The host's config.yaml says localhost; here Valhalla is a service.
+      - GLOVE_VALHALLA_HOST=valhalla
+      - GLOVE_VALHALLA_PORT=8002
     depends_on:
-      valhalla:
-        condition: service_healthy
+      - valhalla
     restart: unless-stopped
 
+  # Static portal + /api reverse proxy (nginx): the SPA calls the API on its
+  # own origin, so no CORS setup is needed.
+  portal:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.portal
+    ports:
+      - "127.0.0.1:3000:80"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  # Same image, data and options as bin/valhalla.sh, so both share the tiles in
+  # data/valhalla instead of rebuilding them. Not published: the api reaches it
+  # over the Compose network, and port 8002 stays free for bin/valhalla.sh.
   valhalla:
     image: ghcr.io/gis-ops/docker-valhalla/valhalla:latest
-    ports:
-      - "8002:8002"
     volumes:
       - ../data/osm:/custom_files
+      - ../data/valhalla:/custom_files/valhalla_tiles
     environment:
-      - tile_urls=http://download.geofabrik.de/europe/france/ile-de-france-latest.osm.pbf
-      - serve_tiles=True
-      - build_admins=False
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8002/status"]
-      interval: 30s
-      timeout: 5s
-      start_period: 120s
-      retries: 3
+      - use_tiles_ignore_pbf=False
+      - force_rebuild=False
+      - build_elevation=True
+      - build_admins=True
+      - build_time_zones=True
+      - build_transit=False
+      - server_threads=2
+      - include_platforms=True
     restart: unless-stopped

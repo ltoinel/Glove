@@ -1,0 +1,61 @@
+# Glove reverse proxy — started by bin/start.sh, which sets the variables below.
+#
+#   https://{$GLOVE_PORTAL_HOST}  the portal: the static build (prod), or a
+#                                 local server on :3000 — the Vite dev server
+#                                 (dev, HMR over WebSocket) or the portal
+#                                 container (docker)
+#   https://{$GLOVE_API_HOST}     the Actix API on localhost:8080
+#
+# Neither name is a public domain, so certificates come from Caddy's own local
+# CA (`tls internal`). Its root must be trusted once by the browser; see the
+# hints bin/start.sh prints.
+
+{
+	# The admin endpoint is not used (start.sh owns the process lifecycle) and
+	# would collide with another Caddy on localhost:2019.
+	admin off
+	# Never try to install the local CA root on startup: it runs sudo, which
+	# would prompt mid-start. Trusting it is a one-time manual step.
+	skip_install_trust
+	# Overridable for a setup without privileged ports (URLs then carry the
+	# HTTPS port, e.g. https://portal.glove:8443).
+	http_port {$GLOVE_HTTP_PORT:80}
+	https_port {$GLOVE_HTTPS_PORT:443}
+}
+
+(tls_local) {
+	tls internal
+}
+
+# GLOVE_PORTAL_MODE picks one of the two snippets below: `static` or `proxy`.
+
+# Production: serve the Vite build. Hashed assets never change, so they are
+# cached for a year; everything else (index.html, SPA routes) is revalidated,
+# otherwise a deploy would leave browsers on stale asset names.
+(portal_static) {
+	root * {$GLOVE_PORTAL_ROOT}
+	encode zstd gzip
+	@assets path /assets/*
+	header @assets Cache-Control "public, max-age=31536000, immutable"
+	@pages not path /assets/*
+	header @pages Cache-Control "no-cache"
+	try_files {path} /index.html
+	file_server
+}
+
+# Development (Vite dev server, WebSocket included for HMR) and Docker (portal
+# container): whatever listens on 127.0.0.1:3000.
+(portal_proxy) {
+	reverse_proxy 127.0.0.1:3000
+}
+
+{$GLOVE_PORTAL_HOST} {
+	import tls_local
+	import portal_{$GLOVE_PORTAL_MODE}
+}
+
+{$GLOVE_API_HOST} {
+	import tls_local
+	# The API compresses its own responses (actix Compress).
+	reverse_proxy 127.0.0.1:8080
+}
