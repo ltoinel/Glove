@@ -13,7 +13,7 @@ COPY portal/ ./
 RUN npx vite build --outDir /app/portal-dist --emptyOutDir
 
 # Stage 2: Serve with nginx
-FROM nginx:1.27-alpine
+FROM nginx:1.29-alpine
 COPY docker/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /app/portal-dist /usr/share/nginx/html
 
