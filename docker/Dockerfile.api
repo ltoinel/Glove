@@ -3,7 +3,7 @@
 # which proxies /api requests to this backend. The two processes stay fully decoupled.
 
 # Stage 1: Build backend
-FROM rust:1.94-bookworm AS backend
+FROM rust:1.98-bookworm AS backend
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src/ src/
