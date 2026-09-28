@@ -19,9 +19,9 @@ use std::path::Path;
 
 use proj4rs::Proj;
 use quick_xml::Reader;
-use quick_xml::events::{BytesStart, Event};
+use quick_xml::events::{BytesRef, BytesStart, Event};
 use serde::Serialize;
-use tracing::warn;
+use tracing::{debug, warn};
 use utoipa::ToSchema;
 
 /// EPSG:27572 — Lambert II étendu (NTF, Clarke 1880 IGN), the projection used
@@ -321,24 +321,33 @@ fn parse_segment_states(xml: &[u8]) -> HashMap<u32, SegState> {
     let mut buf = Vec::new();
     let mut states = HashMap::new();
     let mut current_id: Option<u32> = None;
-    let mut in_etat = false;
+    // Text of the open <EtatTrafic>, `None` outside it.
+    let mut etat: Option<String> = None;
 
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => match e.local_name().as_ref() {
                 b"SegmentDynamique" => current_id = attr_u32(&e, b"ID_SEGMENT"),
-                b"EtatTrafic" => in_etat = true,
+                b"EtatTrafic" => etat = Some(String::new()),
                 _ => {}
             },
-            Ok(Event::Text(t)) if in_etat => {
-                in_etat = false;
-                if let (Some(id), Ok(text)) = (current_id, t.unescape())
-                    && let Some(state) = SegState::from_label(&text)
+            Ok(Event::Text(t)) => {
+                if let Some(text) = etat.as_mut() {
+                    push_text(text, &t);
+                }
+            }
+            Ok(Event::GeneralRef(r)) => {
+                if let Some(text) = etat.as_mut() {
+                    push_reference(text, &r);
+                }
+            }
+            Ok(Event::End(e)) if e.local_name().as_ref() == b"EtatTrafic" => {
+                if let (Some(id), Some(text)) = (current_id, etat.take())
+                    && let Some(state) = SegState::from_label(text.trim())
                 {
                     states.insert(id, state);
                 }
             }
-            Ok(Event::End(e)) if e.local_name().as_ref() == b"EtatTrafic" => in_etat = false,
             Ok(Event::Eof) => break,
             Err(e) => {
                 warn!("segments_dyn.xml parse error: {e}");
@@ -385,6 +394,10 @@ fn parse_events(xml: &[u8], geometry: &TrafficGeometry) -> Vec<TrafficEvent> {
     let mut events = Vec::new();
     let mut current: Option<EventBuilder> = None;
     let mut tag: Vec<u8> = Vec::new();
+    // Text of the element just opened. Only that text counts: the indentation
+    // between two closing tags must not overwrite a field already captured,
+    // hence the reset on every start and end tag.
+    let mut text = String::new();
 
     loop {
         match reader.read_event_into(&mut buf) {
@@ -394,20 +407,19 @@ fn parse_events(xml: &[u8], geometry: &TrafficGeometry) -> Vec<TrafficEvent> {
                     current = Some(EventBuilder::default());
                 }
                 tag = name;
+                text.clear();
             }
-            Ok(Event::Text(t)) => {
-                // Only text directly inside the tag just opened counts: the
-                // indentation between two closing tags must not overwrite a
-                // field already captured.
+            Ok(Event::Text(t)) => push_text(&mut text, &t),
+            Ok(Event::GeneralRef(r)) => push_reference(&mut text, &r),
+            Ok(Event::End(e)) => {
                 if let Some(ev) = current.as_mut()
-                    && let Ok(text) = t.unescape()
+                    && !tag.is_empty()
                     && !text.trim().is_empty()
                 {
                     assign_event_field(ev, &tag, &text);
                 }
-            }
-            Ok(Event::End(e)) => {
                 tag.clear();
+                text.clear();
                 if e.local_name().as_ref() == b"Evenement"
                     && let Some(ev) = current.take()
                     && let Some(event) = ev.build(geometry)
@@ -462,6 +474,32 @@ fn midpoint(coords: &[[f64; 2]]) -> [f64; 2] {
 }
 
 /// Read an integer XML attribute by key from a start tag.
+/// Append a text node to `out`.
+///
+/// Since quick-xml 0.38 a text node stops at each entity reference, which
+/// arrives as its own [`Event::GeneralRef`]: element text is rebuilt from the
+/// pieces with [`push_reference`].
+fn push_text(out: &mut String, text: &quick_xml::events::BytesText) {
+    match text.decode() {
+        Ok(decoded) => out.push_str(&decoded),
+        Err(e) => debug!("Undecodable Sytadin text node skipped: {e}"),
+    }
+}
+
+/// Append the character an entity reference stands for (`&amp;`, `&#233;`...).
+/// Only the XML predefined entities exist in these feeds; others are dropped.
+fn push_reference(out: &mut String, reference: &BytesRef) {
+    if let Ok(Some(c)) = reference.resolve_char_ref() {
+        out.push(c);
+    } else if let Ok(name) = reference.decode()
+        && let Some(resolved) = quick_xml::escape::resolve_predefined_entity(&name)
+    {
+        out.push_str(resolved);
+    } else {
+        debug!("Unknown entity reference in Sytadin feed skipped");
+    }
+}
+
 fn attr_u32(e: &BytesStart, key: &[u8]) -> Option<u32> {
     e.attributes()
         .flatten()
@@ -624,6 +662,33 @@ mod tests {
         assert_eq!(events[0].category, "accident");
         assert_eq!(events[0].label, "Voie de droite neutralisee");
         assert!(events[0].end.is_none());
+    }
+
+    #[test]
+    fn parse_events_rebuilds_text_split_by_entity_references() {
+        let mut segments = HashMap::new();
+        segments.insert(20u32, vec![[48.85, 2.35], [48.86, 2.36]]);
+        let geometry = TrafficGeometry { segments };
+
+        // quick-xml hands each entity reference over as its own event: the
+        // label must still come out whole, not cut at the first `&`.
+        let xml = br#"<R><Evenement>
+            <QualificationTypeEvenement>Travaux</QualificationTypeEvenement>
+            <Commentaire>Bretelle d&apos;acc&#232;s A86 &amp; N118 ferm&#xE9;e</Commentaire>
+            <Localisation><Segments><Segment>20</Segment></Segments></Localisation>
+        </Evenement></R>"#;
+
+        let events = parse_events(xml, &geometry);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].label, "Bretelle d'accès A86 & N118 fermée");
+    }
+
+    #[test]
+    fn parse_segment_states_reads_state_containing_a_reference() {
+        // A reference splits the text node; the state label is rebuilt whole.
+        let xml = br#"<Root><SegmentDynamique ID_SEGMENT="10"><EtatTrafic>Fl&#117;ide</EtatTrafic></SegmentDynamique></Root>"#;
+        let states = parse_segment_states(xml);
+        assert!(matches!(states.get(&10), Some(SegState::Fluid)));
     }
 
     #[test]

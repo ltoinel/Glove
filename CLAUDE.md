@@ -204,4 +204,6 @@ This codebase follows Clean Code practices (Robert C. Martin). All contributions
 
 ## CI
 
-GitHub Actions (`.github/workflows/ci.yml`): Rust format + clippy + build + test, then Node ESLint + Vite build.
+GitHub Actions (`.github/workflows/ci.yml`), jobs gated by a paths filter: Rust fmt + clippy + test; MSRV `cargo check` on 1.88; `cargo deny check` (`deny.toml`); tarpaulin coverage; portal ESLint (`npm run lint`, i.e. `eslint .` — config files included, not just `src/`) + vitest + build + `npm audit`; Docker build of both images. CI uses the latest stable Rust, so a newer Clippy can flag code that passes locally. Actions are SHA-pinned and kept current by Dependabot (`.github/dependabot.yml`). `docs.yml` builds the book on PRs and deploys from master; `docker.yml` publishes both images on release. `deny.toml` carries a deliberate, documented license exception for `actix-governor` (GPL-3.0) pending a maintainer decision.
+
+Pre-commit hook `.githooks/pre-commit` (enable: `git config core.hooksPath .githooks`) runs the same lint steps for the staged areas.

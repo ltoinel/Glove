@@ -102,5 +102,5 @@ The portal's nginx config (`docker/nginx.conf`) proxies `/api` to the `api` serv
 | `GLOVE_VALHALLA_PORT` | `valhalla.port` | `8002` |
 
 ```admonish note title="Published images"
-The release workflow (`.github/workflows/docker.yml`) publishes the API image only.
+Each GitHub release publishes both images to the GitHub Container Registry: `ghcr.io/ltoinel/glove` (API) and `ghcr.io/ltoinel/glove-portal` (portal).
 ```

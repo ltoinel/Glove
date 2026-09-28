@@ -9,30 +9,73 @@ on:
 permissions:
   contents: read
 
+# A new push to a PR supersedes the run in progress; master runs always finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
+  # Incremental artifacts are useless on a fresh runner and bloat the cache.
+  CARGO_INCREMENTAL: 0
 
 jobs:
+  # Which parts of the tree changed, so each job only runs when it matters.
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      portal: ${{ steps.filter.outputs.portal }}
+      docker: ${{ steps.filter.outputs.docker }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3.0.4
+        id: filter
+        with:
+          filters: |
+            rust:
+              - 'src/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'deny.toml'
+              - 'config.yaml'
+              - '.github/workflows/ci.yml'
+            portal:
+              - 'portal/**'
+              - '.github/workflows/ci.yml'
+            docker:
+              - 'docker/**'
+              - 'src/**'
+              - 'portal/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'config.yaml'
+              - '.dockerignore'
+              - '.github/workflows/ci.yml'
+
   backend:
     name: Backend (Rust)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
-          components: clippy
+          toolchain: stable
+          components: clippy, rustfmt
 
-      - name: Cache cargo
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+      # Caches dependencies only and prunes target/, unlike a raw actions/cache.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Check formatting
         run: cargo fmt -- --check
@@ -40,39 +83,76 @@ jobs:
       - name: Clippy
         run: cargo clippy -- -D warnings
 
-      - name: Build
-        run: cargo build --release
-
+      # No release build here: tests already compile everything, and the
+      # release binary (LTO, codegen-units=1) is built by the Docker job.
       - name: Tests
         run: cargo test
 
-  coverage:
-    name: Code Coverage
+  msrv:
+    name: MSRV (Rust 1.88)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      # Keep in sync with `rust-version` in Cargo.toml.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: "1.88"
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Check
+        run: cargo check --locked
+
+  supply-chain:
+    name: Supply chain (cargo-deny)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      # Advisories, licenses, bans and sources, configured in deny.toml.
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+
+  coverage:
+    name: Code Coverage
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install cargo-tarpaulin
-        run: cargo install cargo-tarpaulin
-
-      - name: Cache cargo
-        uses: actions/cache@v5
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-coverage-${{ hashFiles('Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-coverage-
+          toolchain: stable
+
+      # Prebuilt binary: `cargo install` compiled tarpaulin on every run (~3 min).
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+        with:
+          tool: cargo-tarpaulin
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: coverage
 
       - name: Run coverage
         run: cargo tarpaulin --out xml --out html --skip-clean
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238 # v4.6.0
         with:
           files: cobertura.xml
           fail_ci_if_error: false
@@ -80,22 +160,26 @@ jobs:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
       - name: Upload coverage report
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
           name: coverage-report
           path: tarpaulin-report.html
 
   frontend:
     name: Frontend (React)
+    needs: changes
+    if: needs.changes.outputs.portal == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: portal
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           # 22+ is required by swagger-client, pulled in by swagger-ui-react.
           node-version: 22
@@ -108,5 +192,43 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      - name: Tests
+        run: npm test
+
       - name: Build
         run: npm run build
+
+      # Production dependencies only: dev tooling is not shipped.
+      - name: Audit
+        run: npm audit --omit=dev --audit-level=high
+
+  # Builds (without pushing) the two images the release workflow publishes, so
+  # a broken Dockerfile is caught on the PR rather than at release time.
+  docker:
+    name: Docker (${{ matrix.image }})
+    needs: changes
+    if: needs.changes.outputs.docker == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: api
+            dockerfile: docker/Dockerfile.api
+          - image: portal
+            dockerfile: docker/Dockerfile.portal
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: false
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}

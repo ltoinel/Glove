@@ -2,6 +2,7 @@
 name = "glove"
 version = "0.2.0"
 edition = "2024"
+license = "MIT"
 # let-chains and actix-web 4.14 both need 1.88. Keep docker/Dockerfile.api at or above it.
 rust-version = "1.88"
 
@@ -29,7 +30,7 @@ rustc-hash = "2"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 actix-cors = "0.7"
 actix-governor = "0.7"
-quick-xml = "0.36"
+quick-xml = "0.41"
 proj4rs = "0.1"
 
 [dev-dependencies]

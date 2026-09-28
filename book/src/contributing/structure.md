@@ -78,7 +78,13 @@ Glove/
 ├── CLAUDE.md                    # AI assistant guidance
 ├── README.md                    # Project overview
 ├── LICENSE.md                   # MIT license
-└── .github/workflows/ci.yml    # CI pipeline
+├── deny.toml                    # cargo-deny: advisories, licenses, sources
+├── .githooks/pre-commit         # Local lint hook (git config core.hooksPath .githooks)
+└── .github/
+    ├── workflows/ci.yml         # CI: lint, tests, MSRV, audit, coverage, Docker build
+    ├── workflows/docs.yml       # Book build (PRs) and GitHub Pages deploy (master)
+    ├── workflows/docker.yml     # Publishes the API and portal images on release
+    └── dependabot.yml           # Weekly dependency updates
 ```
 
 ## Key Files
