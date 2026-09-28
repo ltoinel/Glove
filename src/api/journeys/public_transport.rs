@@ -1255,13 +1255,11 @@ fn compute_mode_exclusions(
     }
     let forbidden: rustc_hash::FxHashSet<&str> =
         forbidden_modes_str.split(',').map(str::trim).collect();
-    data.patterns
+    data.pattern_route_types()
         .iter()
         .enumerate()
-        .filter(|(_, p)| {
-            data.routes
-                .get(&p.route_id)
-                .is_some_and(|r| forbidden.contains(route_type_to_mode(r.route_type)))
+        .filter(|(_, route_type)| {
+            route_type.is_some_and(|rt| forbidden.contains(route_type_to_mode(rt)))
         })
         .map(|(i, _)| i)
         .collect()

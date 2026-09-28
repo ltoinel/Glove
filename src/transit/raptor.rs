@@ -50,6 +50,10 @@ const MAX_ROUNDS: usize = 8;
 pub struct PatternTrip {
     /// Index into [`RaptorData::service_ids`] for fast active-service checks.
     pub service_idx: usize,
+    /// Departure from the first stop, copied out of `stop_times`. The boarding
+    /// search reads it for every trip it passes over — most of them running on
+    /// other days — and keeping it inline spares a cache miss on each.
+    pub first_departure: u32,
     /// (arrival, departure) in seconds since midnight, one per stop in the pattern.
     pub stop_times: Vec<(u32, u32)>,
     #[allow(dead_code)]
@@ -74,6 +78,10 @@ pub struct Pattern {
     /// For each position, the spread of `departure(pos) - departure(0)` across
     /// all trips. Filled by [`finalize_patterns`]; see [`find_earliest_trip`].
     pub departure_offsets: Vec<OffsetRange>,
+    /// Whether no trip overtakes another: in first-stop order, arrivals and
+    /// departures are non-decreasing at every position. Lets the scan skip
+    /// boarding searches that cannot improve on the trip already held.
+    pub fifo: bool,
 }
 
 /// Smallest and largest value of a time offset, in seconds.
@@ -88,7 +96,7 @@ pub struct OffsetRange {
 /// Version of the on-disk `raptor.bin` layout, written next to the GTFS
 /// fingerprint. Bump it whenever a serialized struct changes shape, so a cache
 /// written by an older binary is rebuilt instead of mis-decoded.
-const CACHE_FORMAT_VERSION: u32 = 2;
+const CACHE_FORMAT_VERSION: u32 = 4;
 
 /// Aggregate statistics captured during GTFS loading and RAPTOR index build.
 #[derive(Serialize, Deserialize)]
@@ -140,6 +148,11 @@ pub struct RaptorData {
     calendars: FxHashMap<String, gtfs::Calendar>,
     /// Calendar exceptions: `service_id → { date → exception_type }` for O(1) lookup.
     calendar_exceptions: FxHashMap<String, FxHashMap<String, u8>>,
+    /// GTFS `route_type` of each pattern's route, derived on first use and not
+    /// persisted: mode filters run on every journey request, and resolving
+    /// each pattern's `route_id` through [`Self::routes`] cost milliseconds.
+    #[serde(skip)]
+    pattern_route_types: std::sync::OnceLock<Vec<Option<u16>>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -264,6 +277,7 @@ fn build_patterns(
 
         let pattern_trip = PatternTrip {
             service_idx: svc_idx,
+            first_departure: stop_times_parsed.first().map_or(0, |&(_, dep)| dep),
             stop_times: stop_times_parsed,
             trip_id: trip_id.to_string(),
             headsign: trip.trip_headsign.clone(),
@@ -280,6 +294,7 @@ fn build_patterns(
                 stops: stop_seq,
                 trips: vec![pattern_trip],
                 departure_offsets: Vec::new(),
+                fifo: false,
             });
         }
     }
@@ -299,9 +314,23 @@ fn versioned_fingerprint(fingerprint: &str) -> String {
 /// their terminus, including patterns where trips overtake each other.
 fn finalize_patterns(patterns: &mut [Pattern]) {
     for pattern in patterns {
-        pattern.trips.sort_by_key(|t| t.stop_times[0].1);
+        pattern.trips.sort_by_key(|t| t.first_departure);
         pattern.departure_offsets = departure_offset_ranges(&pattern.trips, pattern.stops.len());
+        pattern.fifo = is_fifo(&pattern.trips);
     }
+}
+
+/// Whether `trips`, sorted by first-stop departure, keep that order at every
+/// position — both arrivals and departures, since boarding reads the one and
+/// alighting the other.
+fn is_fifo(trips: &[PatternTrip]) -> bool {
+    trips.windows(2).all(|pair| {
+        pair[0]
+            .stop_times
+            .iter()
+            .zip(&pair[1].stop_times)
+            .all(|(earlier, later)| earlier.0 <= later.0 && earlier.1 <= later.1)
+    })
 }
 
 /// Per-position range of `departure(pos) - departure(0)` over `trips`.
@@ -562,7 +591,19 @@ impl RaptorData {
             service_ids,
             search_index,
             stats,
+            pattern_route_types: std::sync::OnceLock::new(),
         }
+    }
+
+    /// GTFS `route_type` of every pattern, by pattern index; `None` when the
+    /// pattern's route is missing from `routes.txt`.
+    pub fn pattern_route_types(&self) -> &[Option<u16>] {
+        self.pattern_route_types.get_or_init(|| {
+            self.patterns
+                .iter()
+                .map(|p| self.routes.get(&p.route_id).map(|r| r.route_type))
+                .collect()
+        })
     }
 
     // -----------------------------------------------------------------------
@@ -851,31 +892,83 @@ fn haversine_meters(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
 // ---------------------------------------------------------------------------
 
 /// Label used during journey reconstruction to trace how each stop was reached.
-#[derive(Debug, Clone)]
+///
+/// Indices are stored as `u32` (stops, patterns, trips and positions all fit
+/// by orders of magnitude): the label table is `rounds × stops`, the largest
+/// per-query structure, and this halves it from 40 to 20 bytes per entry.
+#[derive(Debug, Clone, Copy)]
 enum Label {
     /// Reached by boarding a vehicle trip.
     Trip {
-        pattern_idx: usize,
-        trip_idx: usize,
-        board_pos: usize,
-        alight_pos: usize,
+        pattern_idx: u32,
+        trip_idx: u32,
+        board_pos: u32,
+        alight_pos: u32,
     },
     /// Reached by walking from another stop.
-    Transfer { from_stop: usize, duration: u32 },
+    Transfer { from_stop: u32, duration: u32 },
+}
+
+/// Narrow an in-memory index for storage in a [`Label`].
+fn label_idx(idx: usize) -> u32 {
+    // Stop, pattern, trip and position counts are bounded by the GTFS feed,
+    // five orders of magnitude below u32::MAX.
+    idx as u32
 }
 
 /// Internal result of a RAPTOR query, containing arrival times and labels
 /// for all stops across all rounds.
+///
+/// Owns the search buffers and hands them back to the thread's pool when
+/// dropped, so the next query on this thread reuses them.
 pub struct RaptorResult {
-    /// `tau[k][stop]` = best arrival time at `stop` using at most `k` vehicle trips.
-    pub tau: Vec<Vec<u32>>,
-    /// `labels[k][stop]` = how we reached `stop` in round `k`.
-    labels: Vec<Vec<Option<Label>>>,
+    /// `buf.tau[k][stop]` = best arrival time at `stop` using at most `k`
+    /// vehicle trips; `buf.labels[k][stop]` = how it was reached.
+    buf: RaptorBuffers,
     /// Source stop indices (for reconstruction termination).
     sources: FxHashSet<usize>,
 }
 
-/// Mutable per-round scratch buffers, reused across rounds to avoid reallocation.
+impl Drop for RaptorResult {
+    fn drop(&mut self) {
+        release_buffers(std::mem::take(&mut self.buf));
+    }
+}
+
+thread_local! {
+    /// Buffers of the last finished query on this thread.
+    ///
+    /// A query touches a few thousand stops but its tables span every stop in
+    /// every round — megabytes that used to be allocated and filled for each
+    /// of the several RAPTOR runs behind one journey request. Kept per thread
+    /// because queries run on the blocking pool, one at a time per thread.
+    static BUFFER_POOL: std::cell::RefCell<Option<RaptorBuffers>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Clean buffers sized for this network: the pooled ones when they fit (they
+/// do not after a GTFS reload or with another round count), fresh ones
+/// otherwise.
+fn acquire_buffers(num_stops: usize, num_patterns: usize, rounds: usize) -> RaptorBuffers {
+    BUFFER_POOL
+        .with(|pool| pool.borrow_mut().take())
+        .filter(|buf| buf.fits(num_stops, num_patterns, rounds))
+        .unwrap_or_else(|| RaptorBuffers::new(num_stops, num_patterns, rounds))
+}
+
+/// Reset `buf` and park it for the next query on this thread.
+fn release_buffers(mut buf: RaptorBuffers) {
+    buf.reset();
+    BUFFER_POOL.with(|pool| *pool.borrow_mut() = Some(buf));
+}
+
+/// A reset refills whole tables once more than one stop in this many was
+/// touched: sequential fills beat scattered writes well before every stop is.
+const DENSE_RESET_RATIO: usize = 8;
+
+/// Mutable per-round scratch buffers, reused across rounds and, through the
+/// thread's pool, across queries.
+#[derive(Default)]
 struct RaptorBuffers {
     tau: Vec<Vec<u32>>,
     best: Vec<u32>,
@@ -889,6 +982,9 @@ struct RaptorBuffers {
     /// best arrival at any target)`. Relaxations at or beyond it are skipped
     /// (target + max-duration pruning). `INFINITY` disables pruning.
     cutoff: u32,
+    /// Every stop given an arrival time, each listed once: the only entries a
+    /// reset has to restore.
+    touched: Vec<usize>,
 }
 
 impl RaptorBuffers {
@@ -903,7 +999,66 @@ impl RaptorBuffers {
             active_routes: Vec::with_capacity(num_patterns),
             trip_improved: Vec::new(),
             cutoff: INFINITY,
+            touched: Vec::new(),
         }
+    }
+
+    fn fits(&self, num_stops: usize, num_patterns: usize, rounds: usize) -> bool {
+        self.best.len() == num_stops
+            && self.route_earliest.len() == num_patterns
+            && self.tau.len() == rounds + 1
+    }
+
+    /// Record `arr` as the arrival at `stop` in round `k`.
+    ///
+    /// `best` only ever decreases from `INFINITY`, so a stop is new to
+    /// [`Self::touched`] exactly when its `best` is still infinite.
+    fn set_arrival(&mut self, k: usize, stop: usize, arr: u32) {
+        if self.best[stop] == INFINITY {
+            self.touched.push(stop);
+        }
+        self.tau[k][stop] = arr;
+        self.best[stop] = arr;
+    }
+
+    /// Restore the state of freshly allocated buffers. `marked` flags and
+    /// labels are only ever set on touched stops, and `route_earliest` is
+    /// restored by the scan itself.
+    ///
+    /// Array by array rather than stop by stop: a stop's entries are spread
+    /// over a dozen tables, so visiting them together misses the cache on
+    /// every write. Past a fraction of the network, a plain fill (memset) is
+    /// cheaper still than following the touched list.
+    fn reset(&mut self) {
+        let dense = self.touched.len() * DENSE_RESET_RATIO >= self.best.len();
+        let touched = &self.touched;
+        let clear = |table: &mut [u32]| {
+            if dense {
+                table.fill(INFINITY);
+            } else {
+                touched.iter().for_each(|&stop| table[stop] = INFINITY);
+            }
+        };
+        self.tau.iter_mut().for_each(|table| clear(table));
+        clear(&mut self.best);
+        for table in &mut self.labels {
+            if dense {
+                table.fill(None);
+            } else {
+                touched.iter().for_each(|&stop| table[stop] = None);
+            }
+        }
+        for flags in [&mut self.marked, &mut self.new_marked] {
+            if dense {
+                flags.fill(false);
+            } else {
+                touched.iter().for_each(|&stop| flags[stop] = false);
+            }
+        }
+        self.touched.clear();
+        self.active_routes.clear();
+        self.trip_improved.clear();
+        self.cutoff = INFINITY;
     }
 }
 
@@ -1018,7 +1173,7 @@ pub fn raptor_query_bounded(
         .saturating_add(options.max_duration)
         .saturating_add(1);
 
-    let mut buf = RaptorBuffers::new(n, data.patterns.len(), rounds);
+    let mut buf = acquire_buffers(n, data.patterns.len(), rounds);
     buf.cutoff = horizon;
     init_source_stops(data, sources, departure_time, options, &mut buf);
 
@@ -1042,8 +1197,7 @@ pub fn raptor_query_bounded(
 
     let source_set: FxHashSet<usize> = sources.iter().map(|&(idx, _)| idx).collect();
     RaptorResult {
-        tau: buf.tau,
-        labels: buf.labels,
+        buf,
         sources: source_set,
     }
 }
@@ -1077,8 +1231,7 @@ fn init_source_stops(
         }
         let arr = departure_time.saturating_add(walk_time);
         if arr < buf.tau[0][source] {
-            buf.tau[0][source] = arr;
-            buf.best[source] = arr;
+            buf.set_arrival(0, source, arr);
             buf.marked[source] = true;
         }
         for &(to_stop, duration) in &data.stop_transfers[source] {
@@ -1087,10 +1240,9 @@ fn init_source_stops(
             }
             let total = arr.saturating_add(duration);
             if total < buf.tau[0][to_stop] {
-                buf.tau[0][to_stop] = total;
-                buf.best[to_stop] = total;
+                buf.set_arrival(0, to_stop, total);
                 buf.labels[0][to_stop] = Some(Label::Transfer {
-                    from_stop: source,
+                    from_stop: label_idx(source),
                     duration,
                 });
                 buf.marked[to_stop] = true;
@@ -1184,6 +1336,9 @@ fn scan_pattern(
 ) {
     let pattern = &data.patterns[pat_idx];
     let rt = options.pattern_deltas(pat_idx);
+    // Real-time offsets can make vehicles overtake, so the FIFO shortcut
+    // below only holds on the published schedule.
+    let fifo = pattern.fifo && rt.is_none();
     let mut current_trip: Option<usize> = None;
     let mut board_pos: usize = 0;
 
@@ -1205,7 +1360,11 @@ fn scan_pattern(
         let stop_blocked = options.stop_blocked(stop_idx);
 
         // Try to board an earlier trip at this stop
-        if !stop_blocked && buf.tau[k - 1][stop_idx] != INFINITY {
+        if !stop_blocked
+            && buf.tau[k - 1][stop_idx] != INFINITY
+            && (!fifo
+                || can_catch_earlier_trip(pattern, current_trip, pos, buf.tau[k - 1][stop_idx]))
+        {
             let board_time = buf.tau[k - 1][stop_idx];
             if let Some(trip_idx) = find_earliest_trip(pattern, pos, board_time, options, rt) {
                 match current_trip {
@@ -1249,18 +1408,34 @@ fn scan_pattern(
         // re-board an earlier trip and bring the arrival back under the bound —
         // so we only skip the relaxation (and thus the marking + transfers).
         if arr < buf.best[stop_idx] && arr < buf.cutoff {
-            buf.tau[k][stop_idx] = arr;
-            buf.best[stop_idx] = arr;
+            buf.set_arrival(k, stop_idx, arr);
             buf.labels[k][stop_idx] = Some(Label::Trip {
-                pattern_idx: pat_idx,
-                trip_idx,
-                board_pos,
-                alight_pos: pos,
+                pattern_idx: label_idx(pat_idx),
+                trip_idx: label_idx(trip_idx),
+                board_pos: label_idx(board_pos),
+                alight_pos: label_idx(pos),
             });
             buf.new_marked[stop_idx] = true;
             buf.trip_improved.push(stop_idx);
         }
     }
+}
+
+/// Whether boarding at `pos` from `board_time` might beat `current_trip`, on a
+/// FIFO pattern.
+///
+/// Any trip found departs at or after `board_time`. If that is strictly after
+/// the held trip's departure here, the trip comes later in FIFO order and
+/// reaches every following stop no earlier — so the search is skipped. This
+/// is the standard RAPTOR pruning; without it every stop of every scanned
+/// pattern ran a binary search.
+fn can_catch_earlier_trip(
+    pattern: &Pattern,
+    current_trip: Option<usize>,
+    pos: usize,
+    board_time: u32,
+) -> bool {
+    current_trip.is_none_or(|trip_idx| board_time <= pattern.trips[trip_idx].stop_times[pos].1)
 }
 
 /// Apply transfers ONLY from stops improved by trips (not by other transfers)
@@ -1279,10 +1454,9 @@ fn apply_transfers_after_trips(
             }
             let arr = buf.tau[k][stop_idx].saturating_add(duration);
             if arr < buf.best[to_stop] && arr < buf.cutoff {
-                buf.tau[k][to_stop] = arr;
-                buf.best[to_stop] = arr;
+                buf.set_arrival(k, to_stop, arr);
                 buf.labels[k][to_stop] = Some(Label::Transfer {
-                    from_stop: stop_idx,
+                    from_stop: label_idx(stop_idx),
                     duration,
                 });
                 buf.new_marked[to_stop] = true;
@@ -1316,7 +1490,7 @@ fn find_earliest_trip(
 ) -> Option<usize> {
     let trips = &pattern.trips;
     let slack = i64::from(rt.map_or(0, PatternDeltas::max_abs_delta));
-    let first_departure = |trip: &PatternTrip| i64::from(trip.stop_times[0].1);
+    let first_departure = |trip: &PatternTrip| i64::from(trip.first_departure);
     let bounds = pattern.departure_offsets.get(pos).map(|range| OffsetRange {
         min: range.min.saturating_sub(slack),
         max: range.max.saturating_add(slack),
@@ -1424,16 +1598,16 @@ pub fn reconstruct_journeys(
     let mut journeys = Vec::new();
     let mut best_time = INFINITY;
 
-    for k in 0..result.tau.len() {
+    for k in 0..result.buf.tau.len() {
         // Pick the target stop with the best effective arrival (PT arrival + walk)
         let best_target = targets
             .iter()
-            .filter(|&&(t, _)| result.tau[k][t] < INFINITY)
-            .min_by_key(|&&(t, walk)| result.tau[k][t].saturating_add(walk));
+            .filter(|&&(t, _)| result.buf.tau[k][t] < INFINITY)
+            .min_by_key(|&&(t, walk)| result.buf.tau[k][t].saturating_add(walk));
         let Some(&(target, walk_to_dest)) = best_target else {
             continue;
         };
-        let time = result.tau[k][target].saturating_add(walk_to_dest);
+        let time = result.buf.tau[k][target].saturating_add(walk_to_dest);
         if time < best_time {
             best_time = time;
             if let Some(sections) = reconstruct_for_round(data, result, target, k, realtime)
@@ -1555,7 +1729,7 @@ fn reconstruct_for_round(
     round: usize,
     realtime: Option<&RealtimeIndex>,
 ) -> Option<Vec<JourneySection>> {
-    if result.tau[round][target] == INFINITY {
+    if result.buf.tau[round][target] == INFINITY {
         return None;
     }
 
@@ -1568,31 +1742,33 @@ fn reconstruct_for_round(
             break;
         }
 
-        match &result.labels[current_round][current_stop] {
+        match result.buf.labels[current_round][current_stop] {
             Some(Label::Trip {
                 pattern_idx,
                 trip_idx,
                 board_pos,
                 alight_pos,
             }) => {
-                let pattern = &data.patterns[*pattern_idx];
-                let rt = realtime.and_then(|index| index.pattern(*pattern_idx));
-                let leg = leg_times(pattern, rt, *trip_idx, *board_pos, *alight_pos);
+                let (pattern_idx, trip_idx) = (pattern_idx as usize, trip_idx as usize);
+                let (board_pos, alight_pos) = (board_pos as usize, alight_pos as usize);
+                let pattern = &data.patterns[pattern_idx];
+                let rt = realtime.and_then(|index| index.pattern(pattern_idx));
+                let leg = leg_times(pattern, rt, trip_idx, board_pos, alight_pos);
 
                 sections.push(JourneySection {
                     section_type: SectionType::PublicTransport,
-                    from_stop: pattern.stops[*board_pos],
-                    to_stop: pattern.stops[*alight_pos],
+                    from_stop: pattern.stops[board_pos],
+                    to_stop: pattern.stops[alight_pos],
                     departure_time: leg.departure_time,
                     arrival_time: leg.arrival_time,
                     delay: leg.delay,
-                    pattern_idx: Some(*pattern_idx),
-                    trip_idx: Some(*trip_idx),
-                    board_pos: Some(*board_pos),
-                    alight_pos: Some(*alight_pos),
+                    pattern_idx: Some(pattern_idx),
+                    trip_idx: Some(trip_idx),
+                    board_pos: Some(board_pos),
+                    alight_pos: Some(alight_pos),
                 });
 
-                current_stop = pattern.stops[*board_pos];
+                current_stop = pattern.stops[board_pos];
                 if current_round == 0 {
                     break;
                 }
@@ -1602,12 +1778,13 @@ fn reconstruct_for_round(
                 from_stop,
                 duration,
             }) => {
-                let arr = result.tau[current_round][current_stop];
+                let from_stop = from_stop as usize;
+                let arr = result.buf.tau[current_round][current_stop];
                 sections.push(JourneySection {
                     section_type: SectionType::Transfer,
-                    from_stop: *from_stop,
+                    from_stop,
                     to_stop: current_stop,
-                    departure_time: arr.saturating_sub(*duration),
+                    departure_time: arr.saturating_sub(duration),
                     arrival_time: arr,
                     delay: None,
                     pattern_idx: None,
@@ -1615,7 +1792,7 @@ fn reconstruct_for_round(
                     board_pos: None,
                     alight_pos: None,
                 });
-                current_stop = *from_stop;
+                current_stop = from_stop;
             }
             None => break,
         }
@@ -2294,6 +2471,7 @@ mod tests {
             .enumerate()
             .map(|(i, &(first, second))| PatternTrip {
                 service_idx: 0,
+                first_departure: first,
                 stop_times: vec![(first, first), (second, second)],
                 trip_id: format!("T{i}"),
                 headsign: String::new(),
@@ -2305,6 +2483,7 @@ mod tests {
             stops: vec![0, 1],
             trips,
             departure_offsets: Vec::new(),
+            fifo: false,
         };
         finalize_patterns(std::slice::from_mut(&mut pattern));
         pattern
@@ -2406,7 +2585,7 @@ mod tests {
             false,
         );
         // Source is already at target → tau[0][source] == departure_time
-        assert_eq!(result.tau[0][source], 28000);
+        assert_eq!(result.buf.tau[0][source], 28000);
     }
 
     #[test]
@@ -2439,6 +2618,74 @@ mod tests {
         let result = raptor_query(&data, &[(source, 0)], 28000, &active, 3, &excluded, false);
         let journeys = reconstruct_journeys(&data, &result, &[(target, 0)], None);
         assert!(journeys.is_empty());
+    }
+
+    #[test]
+    fn pooled_buffers_leave_no_trace_between_queries() {
+        let data = build_test_data();
+        let active = data.active_services("20260406");
+        let no_exclusion = FxHashSet::default();
+        let query = |source: &str, departure: u32| {
+            let result = raptor_query(
+                &data,
+                &[(data.stop_index[source], 0)],
+                departure,
+                &active,
+                3,
+                &no_exclusion,
+                false,
+            );
+            result.buf.tau.clone()
+        };
+
+        let fresh = query("S3", 28000);
+        // A different query on the same thread fills the pooled buffers with
+        // other arrivals; the next one must not see any of them.
+        let _other = query("S1", 27000);
+        let reused = query("S3", 28000);
+        assert_eq!(fresh, reused);
+    }
+
+    #[test]
+    fn pooled_buffers_are_replaced_when_the_round_count_changes() {
+        let data = build_test_data();
+        let active = data.active_services("20260406");
+        let no_exclusion = FxHashSet::default();
+        let source = [(data.stop_index["S1"], 0)];
+        let rounds = |max_transfers| {
+            raptor_query(
+                &data,
+                &source,
+                28000,
+                &active,
+                max_transfers,
+                &no_exclusion,
+                false,
+            )
+            .buf
+            .tau
+            .len()
+        };
+        assert_eq!(rounds(3), 5);
+        assert_eq!(rounds(1), 3);
+    }
+
+    #[test]
+    fn is_fifo_detects_overtaking() {
+        assert!(two_stop_pattern(&[(100, 200), (160, 260), (220, 320)]).fifo);
+        // Same terminus departure order, but the second trip arrives first.
+        assert!(!two_stop_pattern(&[(100, 400), (160, 260)]).fifo);
+    }
+
+    #[test]
+    fn can_catch_earlier_trip_only_when_boarding_before_held_departure() {
+        let pattern = two_stop_pattern(&[(100, 200), (160, 260)]);
+        assert!(can_catch_earlier_trip(&pattern, None, 1, 999));
+        // Held trip 1 departs pos 1 at 260: arriving by 260 may catch trip 0
+        // or trip 1 itself; arriving later can only find later trips.
+        assert!(can_catch_earlier_trip(&pattern, Some(1), 1, 200));
+        assert!(can_catch_earlier_trip(&pattern, Some(1), 1, 260));
+        assert!(!can_catch_earlier_trip(&pattern, Some(1), 1, 261));
     }
 
     // -----------------------------------------------------------------------
