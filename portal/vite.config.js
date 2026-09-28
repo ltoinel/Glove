@@ -1,5 +1,6 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import process from 'node:process'
 
 // Host name the portal is served under behind Caddy (bin/start.sh). Vite
 // rejects requests for unknown hosts, so the dev server must be told about it.
