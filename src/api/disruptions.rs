@@ -71,7 +71,7 @@ pub async fn get_disruptions(
         .collect();
 
     // Newest first: the back office lists what was just entered at the top.
-    disruptions.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    disruptions.sort_by_key(|d| std::cmp::Reverse(d.created_at));
     HttpResponse::Ok().json(DisruptionsResponse { disruptions })
 }
 
