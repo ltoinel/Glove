@@ -187,24 +187,68 @@ function saveRecentPlace(place) {
   const recent = getRecentPlaces().filter(p => p.id !== place.id)
   recent.unshift(place)
   if (recent.length > MAX_RECENT_PLACES) recent.length = MAX_RECENT_PLACES
-  localStorage.setItem(RECENT_PLACES_KEY, JSON.stringify(recent))
+  try {
+    localStorage.setItem(RECENT_PLACES_KEY, JSON.stringify(recent))
+  } catch (e) {
+    // Quota exceeded or storage disabled (private mode): history is a convenience.
+    console.warn('Saving recent place failed:', e)
+  }
+}
+
+// --- Fetch helpers ---
+
+/** True for the rejection a fetch raises when its AbortController fires. */
+function isAbortError(err) {
+  return err?.name === 'AbortError'
+}
+
+/**
+ * Parse a fetch Response as JSON, rejecting on a non-2xx status. The backend's
+ * `{ error: { message } }` body is surfaced when present, so the caller sees
+ * the server's explanation rather than a JSON parse error on an HTML page.
+ */
+async function readJsonResponse(res) {
+  if (res.ok) return res.json()
+  const body = await res.json().catch(() => null)
+  throw new Error(body?.error?.message || `HTTP ${res.status}`)
 }
 
 // --- Autocomplete ---
 
+const MIN_QUERY_LENGTH = 2
+
+// Debounced /api/places lookup. Each keystroke cancels both the pending timer
+// and the request still in flight, so an older, slower response can never
+// overwrite the suggestions for what the user has typed since.
 function useDebouncedFetch(delay = 250) {
   const timerRef = useRef(null)
-  return useCallback((query, callback) => {
+  const controllerRef = useRef(null)
+
+  const cancelPending = useCallback(() => {
     clearTimeout(timerRef.current)
-    if (!query || query.length < 2) { callback([]); return }
+    controllerRef.current?.abort()
+    controllerRef.current = null
+  }, [])
+
+  useEffect(() => cancelPending, [cancelPending])
+
+  return useCallback((query, callback) => {
+    cancelPending()
+    if (!query || query.length < MIN_QUERY_LENGTH) { callback([]); return }
     timerRef.current = setTimeout(async () => {
+      const controller = new AbortController()
+      controllerRef.current = controller
       try {
-        const res = await fetch(`/api/places?q=${encodeURIComponent(query)}&limit=10`)
-        const data = await res.json()
-        callback(data.places || [])
-      } catch { callback([]) }
+        const res = await fetch(`/api/places?q=${encodeURIComponent(query)}&limit=10`, { signal: controller.signal })
+        const data = await readJsonResponse(res)
+        if (!controller.signal.aborted) callback(data.places || [])
+      } catch (e) {
+        if (isAbortError(e)) return
+        console.warn('Place search failed:', e)
+        callback([])
+      }
     }, delay)
-  }, [delay])
+  }, [delay, cancelPending])
 }
 
 function PlaceAutocomplete({ label, value, onChange, icon, placeholder }) {
@@ -212,22 +256,25 @@ function PlaceAutocomplete({ label, value, onChange, icon, placeholder }) {
   const [inputValue, setInputValue] = useState('')
   const [options, setOptions] = useState([])
   const [loading, setLoading] = useState(false)
+  // Bumped when the list opens, so places saved by a search since the last
+  // render show up without re-reading localStorage on every render.
+  const [recentVersion, setRecentVersion] = useState(0)
   const fetchPlaces = useDebouncedFetch()
 
   const handleInputChange = useCallback((_, newInput) => {
     setInputValue(newInput)
-    if (!newInput || newInput.length < 2) {
-      const recent = getRecentPlaces()
-      setOptions(value ? [value, ...recent.filter(p => p.id !== value.id)] : recent)
-      setLoading(false)
-      return
-    }
-    setLoading(true)
+    setLoading(Boolean(newInput) && newInput.length >= MIN_QUERY_LENGTH)
     fetchPlaces(newInput, (results) => { setOptions(results); setLoading(false) })
-  }, [fetchPlaces, value])
+  }, [fetchPlaces])
 
-  const displayOptions = (!inputValue || inputValue.length < 2)
-    ? (() => { const recent = getRecentPlaces(); return value ? [value, ...recent.filter(p => p.id !== value.id)] : recent })()
+  const handleOpen = useCallback(() => setRecentVersion(v => v + 1), [])
+
+  const showRecent = !inputValue || inputValue.length < MIN_QUERY_LENGTH
+  // recentVersion is a deliberate cache-buster: it is not read, only depended on.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const recentPlaces = useMemo(() => (showRecent ? getRecentPlaces() : []), [showRecent, recentVersion])
+  const displayOptions = showRecent
+    ? (value ? [value, ...recentPlaces.filter(p => p.id !== value.id)] : recentPlaces)
     : options
 
   return (
@@ -239,6 +286,7 @@ function PlaceAutocomplete({ label, value, onChange, icon, placeholder }) {
       value={value}
       onChange={(_, newVal) => onChange(newVal)}
       onInputChange={handleInputChange}
+      onOpen={handleOpen}
       loading={loading}
       noOptionsText={t('typeToSearch')}
       loadingText={t('loadingSearch')}
@@ -255,7 +303,7 @@ function PlaceAutocomplete({ label, value, onChange, icon, placeholder }) {
         />
       )}
       groupBy={(option) => {
-        if (!inputValue || inputValue.length < 2) return 'recent'
+        if (showRecent) return 'recent'
         return option.type === 'stop' ? 'stops' : 'addresses'
       }}
       renderGroup={(params) => (
@@ -380,44 +428,82 @@ const TRAFFIC_EVENT_LABELS = {
   weather: 'trafficEventWeather', event: 'trafficEventEvent',
 }
 
+// Poll a JSON endpoint every `intervalMs` while `active`. Polling pauses while
+// the tab is hidden (no point refreshing an overlay nobody sees) and resumes
+// with an immediate refresh when it comes back. The in-flight request is
+// aborted on cleanup so a late response never lands after the overlay is off.
+// `fallback` replaces the data on error; pass a module constant so the effect
+// is not restarted on every render. Returns null until the first response.
+function usePolledJson(url, { active, intervalMs, fallback, label }) {
+  const [data, setData] = useState(null)
+
+  useEffect(() => {
+    if (!active) return
+    let controller = null
+    let timer = null
+    const load = () => {
+      controller?.abort()
+      controller = new AbortController()
+      const { signal } = controller
+      fetch(url, { signal })
+        .then(readJsonResponse)
+        .then(body => { if (!signal.aborted) setData(body) })
+        .catch(e => {
+          if (isAbortError(e)) return
+          console.warn(`${label} fetch failed:`, e)
+          if (!signal.aborted) setData(fallback)
+        })
+    }
+    const start = () => {
+      if (timer !== null) return
+      load()
+      timer = setInterval(load, intervalMs)
+    }
+    const stop = () => {
+      clearInterval(timer)
+      timer = null
+      controller?.abort()
+    }
+    const handleVisibilityChange = () => (document.hidden ? stop() : start())
+
+    if (!document.hidden) start()
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+      stop()
+    }
+  }, [url, active, intervalMs, fallback, label])
+
+  return data
+}
+
+const TRAFFIC_STATES_FALLBACK = { enabled: false, states: {}, events: [] }
+
 // Fetch the traffic data while `active`: the road geometry once (it never
 // changes and the browser caches it for a day), then the states on a timer.
 // Returns `null` fields until the first responses land.
 function useTrafficData(active) {
   const [geometry, setGeometry] = useState(null)
-  const [snapshot, setSnapshot] = useState(null)
 
   // Geometry: fetched on first activation only, then kept for the session.
   useEffect(() => {
     if (!active || geometry) return
-    let cancelled = false
-    fetch('/api/traffic/geometry')
-      .then(r => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-      .then(data => { if (!cancelled) setGeometry(data.segments || {}) })
+    const controller = new AbortController()
+    fetch('/api/traffic/geometry', { signal: controller.signal })
+      .then(readJsonResponse)
+      .then(data => { if (!controller.signal.aborted) setGeometry(data.segments || {}) })
       .catch(e => {
+        if (isAbortError(e)) return
         console.warn('Traffic geometry fetch failed:', e)
-        if (!cancelled) setGeometry({})
+        if (!controller.signal.aborted) setGeometry({})
       })
-    return () => { cancelled = true }
+    return () => controller.abort()
   }, [active, geometry])
 
   // States: refreshed while the overlay is displayed.
-  useEffect(() => {
-    if (!active) return
-    let cancelled = false
-    const load = () => {
-      fetch('/api/traffic/states')
-        .then(r => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-        .then(data => { if (!cancelled) setSnapshot(data) })
-        .catch(e => {
-          console.warn('Traffic states fetch failed:', e)
-          if (!cancelled) setSnapshot({ enabled: false, states: {}, events: [] })
-        })
-    }
-    load()
-    const timer = setInterval(load, TRAFFIC_REFRESH_MS)
-    return () => { cancelled = true; clearInterval(timer) }
-  }, [active])
+  const snapshot = usePolledJson('/api/traffic/states', {
+    active, intervalMs: TRAFFIC_REFRESH_MS, fallback: TRAFFIC_STATES_FALLBACK, label: 'Traffic states',
+  })
 
   return { geometry, snapshot }
 }
@@ -504,29 +590,14 @@ const DISRUPTION_REFRESH_MS = 60000
 
 const DISRUPTION_COLOR = '#ff5252'
 
+const BLOCKED_DISRUPTIONS_FALLBACK = { disruptions: [] }
+
 // Poll the blocking disruptions in force while `active`. Returns null until the
 // first response lands, so callers can tell "loading" from "nothing blocked".
 function useBlockedDisruptions(active) {
-  const [snapshot, setSnapshot] = useState(null)
-
-  useEffect(() => {
-    if (!active) return
-    let cancelled = false
-    const load = () => {
-      fetch('/api/disruptions/active')
-        .then(r => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-        .then(data => { if (!cancelled) setSnapshot(data) })
-        .catch(e => {
-          console.warn('Blocked disruptions fetch failed:', e)
-          if (!cancelled) setSnapshot({ disruptions: [] })
-        })
-    }
-    load()
-    const timer = setInterval(load, DISRUPTION_REFRESH_MS)
-    return () => { cancelled = true; clearInterval(timer) }
-  }, [active])
-
-  return snapshot
+  return usePolledJson('/api/disruptions/active', {
+    active, intervalMs: DISRUPTION_REFRESH_MS, fallback: BLOCKED_DISRUPTIONS_FALLBACK, label: 'Blocked disruptions',
+  })
 }
 
 // One tooltip body, shared by the markers and the segments so a closed stop and
@@ -1352,8 +1423,9 @@ function GtfsValidationPanel() {
   const [elapsed, setElapsed] = useState(0)
   const timerRef = useRef(null)
 
-  const lastDuration = useRef(
-    parseFloat(localStorage.getItem('glove_gtfs_validate_duration')) || 0
+  // State, not a ref: the progress bar renders from it.
+  const [lastDuration, setLastDuration] = useState(
+    () => parseFloat(localStorage.getItem('glove_gtfs_validate_duration')) || 0
   )
 
   const runValidation = async () => {
@@ -1367,7 +1439,7 @@ function GtfsValidationPanel() {
       const json = await res.json()
       const duration = (performance.now() - t0) / 1000
       localStorage.setItem('glove_gtfs_validate_duration', duration.toFixed(1))
-      lastDuration.current = duration
+      setLastDuration(duration)
       if (json.error) { setError(json.error.message); return }
       setData(json)
       setExpanded({})
@@ -1418,8 +1490,8 @@ function GtfsValidationPanel() {
       {loading && (
         <Box sx={{ px: 2.5, pt: 1.5, pb: 1, flexShrink: 0 }}>
           <LinearProgress
-            variant={lastDuration.current > 0 ? 'determinate' : 'indeterminate'}
-            value={lastDuration.current > 0 ? Math.min(100, (elapsed / lastDuration.current) * 100) : undefined}
+            variant={lastDuration > 0 ? 'determinate' : 'indeterminate'}
+            value={lastDuration > 0 ? Math.min(100, (elapsed / lastDuration) * 100) : undefined}
             sx={{
               height: 6, borderRadius: 3,
               bgcolor: 'rgba(0, 229, 255, 0.08)',
@@ -1433,9 +1505,9 @@ function GtfsValidationPanel() {
             <Typography variant="caption" color="text.secondary">
               {t('elapsed')}: {elapsed}s
             </Typography>
-            {lastDuration.current > 0 && (
+            {lastDuration > 0 && (
               <Typography variant="caption" color="text.secondary">
-                {t('estimated')}: ~{Math.ceil(lastDuration.current)}s
+                {t('estimated')}: ~{Math.ceil(lastDuration)}s
               </Typography>
             )}
           </Stack>
@@ -1766,7 +1838,16 @@ export default function App() {
   }, [])
   useEffect(() => { refreshStatus() }, [refreshStatus])
 
-  const clearResults = useCallback(() => { setJourneys(null); setWalkJourney(null); setBikeJourneys(null); setCarJourney(null); setSelectedJourney(0); setResultTab('pt'); setError(null); setPtTime(null); setWalkTime(null); setBikeTime(null); setCarTime(null) }, [])
+  // One controller per journey search: a new search, a cleared form or an
+  // unmount aborts the previous one so its responses can never set state for a
+  // newer query.
+  const searchAbortRef = useRef(null)
+  const abortSearch = useCallback(() => {
+    searchAbortRef.current?.abort()
+    searchAbortRef.current = null
+  }, [])
+  useEffect(() => abortSearch, [abortSearch])
+  const clearResults = useCallback(() => { abortSearch(); setLoading(false); setJourneys(null); setWalkJourney(null); setBikeJourneys(null); setCarJourney(null); setSelectedJourney(0); setResultTab('pt'); setError(null); setPtTime(null); setWalkTime(null); setBikeTime(null); setCarTime(null) }, [abortSearch])
   const handleFromChange = useCallback((v) => { setFrom(v); clearResults() }, [clearResults])
   const handleToChange = useCallback((v) => { setTo(v); clearResults() }, [clearResults])
   const swap = useCallback(() => { const tmp = from; setFrom(to); setTo(tmp); clearResults() }, [from, to, clearResults])
@@ -1816,6 +1897,10 @@ export default function App() {
     if (!from || !to) return
     saveRecentPlace(from)
     saveRecentPlace(to)
+    abortSearch()
+    const controller = new AbortController()
+    searchAbortRef.current = controller
+    const { signal } = controller
     setLoading(true); setError(null); setJourneys(null); setWalkJourney(null); setBikeJourneys(null); setCarJourney(null); setSelectedJourney(0); setResultTab('pt'); setPtTime(null); setWalkTime(null); setBikeTime(null); setCarTime(null)
     try {
       let effectiveDatetime
@@ -1842,9 +1927,9 @@ export default function App() {
       const forbidden = ['metro', 'rail', 'bus', 'tramway'].filter(m => !modes[m])
       if (forbidden.length > 0) ptParams.set('forbidden_modes', forbidden.join(','))
       const ptT0 = performance.now()
-      const ptFetch = fetch(`/api/journeys/public_transport?${ptParams}`)
-        .then(r => r.json())
-        .then(data => { setPtTime(Math.round(performance.now() - ptT0)); return data })
+      const ptFetch = fetch(`/api/journeys/public_transport?${ptParams}`, { signal })
+        .then(readJsonResponse)
+        .then(data => { if (!signal.aborted) setPtTime(Math.round(performance.now() - ptT0)); return data })
 
       // Walk, bike and car requests use lon;lat coordinates
       let walkFetch = null
@@ -1861,32 +1946,33 @@ export default function App() {
           walkParams.set('language', lang === 'fr' ? 'fr-FR' : 'en-US')
           if (wheelchair) walkParams.set('wheelchair', 'true')
           const walkT0 = performance.now()
-          walkFetch = fetch(`/api/journeys/walk?${walkParams}`)
-            .then(r => r.ok ? r.json() : null)
-            .then(data => { setWalkTime(Math.round(performance.now() - walkT0)); return data })
-            .catch(err => { console.warn('Walk fetch failed:', err.message); return null })
+          walkFetch = fetch(`/api/journeys/walk?${walkParams}`, { signal })
+            .then(readJsonResponse)
+            .then(data => { if (!signal.aborted) setWalkTime(Math.round(performance.now() - walkT0)); return data })
+            .catch(err => { if (!isAbortError(err)) console.warn('Walk fetch failed:', err.message); return null })
         }
         if (modes.bike && !wheelchair) {
           const bikeT0 = performance.now()
           const bikeParams = new URLSearchParams(coordParams)
           bikeParams.set('language', lang === 'fr' ? 'fr-FR' : 'en-US')
-          bikeFetch = fetch(`/api/journeys/bike?${bikeParams}`)
-            .then(r => r.ok ? r.json() : null)
-            .then(data => { setBikeTime(Math.round(performance.now() - bikeT0)); return data })
-            .catch(err => { console.warn('Bike fetch failed:', err.message); return null })
+          bikeFetch = fetch(`/api/journeys/bike?${bikeParams}`, { signal })
+            .then(readJsonResponse)
+            .then(data => { if (!signal.aborted) setBikeTime(Math.round(performance.now() - bikeT0)); return data })
+            .catch(err => { if (!isAbortError(err)) console.warn('Bike fetch failed:', err.message); return null })
         }
         if (modes.car) {
           const carT0 = performance.now()
           const carParams = new URLSearchParams(coordParams)
           carParams.set('language', lang === 'fr' ? 'fr-FR' : 'en-US')
-          carFetch = fetch(`/api/journeys/car?${carParams}`)
-            .then(r => r.ok ? r.json() : null)
-            .then(data => { setCarTime(Math.round(performance.now() - carT0)); return data })
-            .catch(err => { console.warn('Car fetch failed:', err.message); return null })
+          carFetch = fetch(`/api/journeys/car?${carParams}`, { signal })
+            .then(readJsonResponse)
+            .then(data => { if (!signal.aborted) setCarTime(Math.round(performance.now() - carT0)); return data })
+            .catch(err => { if (!isAbortError(err)) console.warn('Car fetch failed:', err.message); return null })
         }
       }
 
       const [ptData, walkData, bikeData, carData] = await Promise.all([ptFetch, walkFetch, bikeFetch, carFetch])
+      if (signal.aborted) return
 
       if (ptData.error) setError(ptData.error.message)
       else setJourneys(ptData.journeys)
@@ -1895,8 +1981,15 @@ export default function App() {
       if (bikeData?.journeys?.length > 0) setBikeJourneys(bikeData.journeys)
       if (carData?.journeys?.[0]) setCarJourney(carData.journeys[0])
     } catch (err) {
+      if (isAbortError(err) || signal.aborted) return
       setError(err.message)
-    } finally { setLoading(false) }
+    } finally {
+      // A newer search owns the loading flag; only the current one may clear it.
+      if (searchAbortRef.current === controller) {
+        searchAbortRef.current = null
+        setLoading(false)
+      }
+    }
   }
 
   const isWalkSelected = resultTab === 'walk'

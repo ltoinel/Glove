@@ -1,7 +1,11 @@
 //! Shared utilities.
 
 use sha2::{Digest, Sha256};
+use std::collections::BinaryHeap;
+use std::fs::Metadata;
 use std::path::Path;
+use std::time::UNIX_EPOCH;
+use tracing::debug;
 
 /// Strip a URL's query string, replacing it with `?…` when one was present.
 ///
@@ -15,17 +19,38 @@ pub fn redact_query(url: &str) -> String {
     }
 }
 
-/// Compute a SHA-256 fingerprint of a directory based on file sizes.
+/// Feed one file's identity into a fingerprint: name, size and modification time.
 ///
-/// Hashes each listed file's name and size. Files that don't exist are skipped.
-/// Returns a hex-encoded hash string.
+/// Size alone misses a same-size rewrite (a GTFS export whose times shifted but
+/// whose byte count did not), so the mtime is hashed too, to the nanosecond.
+/// A platform without usable mtimes only loses that extra signal: the error is
+/// logged and name + size are still hashed.
+fn hash_file_metadata(hasher: &mut Sha256, name: &str, meta: &Metadata) {
+    hasher.update(name.as_bytes());
+    hasher.update(meta.len().to_le_bytes());
+    let mtime = meta
+        .modified()
+        .map_err(|e| e.to_string())
+        .and_then(|t| t.duration_since(UNIX_EPOCH).map_err(|e| e.to_string()));
+    match mtime {
+        Ok(since_epoch) => {
+            hasher.update(since_epoch.as_secs().to_le_bytes());
+            hasher.update(since_epoch.subsec_nanos().to_le_bytes());
+        }
+        Err(e) => debug!("no usable mtime for {name}, fingerprinting size only: {e}"),
+    }
+}
+
+/// Compute a SHA-256 fingerprint of a directory based on file metadata.
+///
+/// Hashes each listed file's name, size and modification time. Files that
+/// don't exist are skipped. Returns a hex-encoded hash string.
 pub fn dir_fingerprint(dir: &Path, files: &[&str]) -> String {
     let mut hasher = Sha256::new();
     for name in files {
         let path = dir.join(name);
         if let Ok(meta) = std::fs::metadata(&path) {
-            hasher.update(name.as_bytes());
-            hasher.update(meta.len().to_le_bytes());
+            hash_file_metadata(&mut hasher, name, &meta);
         }
     }
     format!("{:x}", hasher.finalize())
@@ -34,7 +59,7 @@ pub fn dir_fingerprint(dir: &Path, files: &[&str]) -> String {
 /// Compute a SHA-256 fingerprint by scanning a directory for matching files.
 ///
 /// Finds files matching `prefix` and `suffix`, sorts them by name, and hashes
-/// each file's name and size.
+/// each file's name, size and modification time.
 pub fn dir_fingerprint_glob(dir: &Path, prefix: &str, suffix: &str) -> String {
     let mut hasher = Sha256::new();
     if let Ok(entries) = std::fs::read_dir(dir) {
@@ -49,15 +74,63 @@ pub fn dir_fingerprint_glob(dir: &Path, prefix: &str, suffix: &str) -> String {
         files.sort_by_key(|e| e.file_name());
         for f in &files {
             if let Ok(meta) = f.metadata() {
-                hasher.update(f.file_name().to_string_lossy().as_bytes());
-                hasher.update(meta.len().to_le_bytes());
+                hash_file_metadata(&mut hasher, &f.file_name().to_string_lossy(), &meta);
             }
         }
     }
     format!("{:x}", hasher.finalize())
 }
 
-/// Parse a `"lon;lat"` string into `(lon, lat)`.
+/// Keeps the `capacity` smallest keys offered, in a bounded max-heap.
+///
+/// Autocomplete indexes are scanned in alphabetical order, not by relevance,
+/// so a scan that stops after N hits can drop an exact match sorted after N
+/// substring hits. Offering every hit to a `BestK` keeps memory bounded by the
+/// limit while guaranteeing the best-ranked keys survive.
+pub struct BestK<K: Ord> {
+    capacity: usize,
+    heap: BinaryHeap<K>,
+}
+
+impl<K: Ord> BestK<K> {
+    /// Create an empty selector keeping at most `capacity` keys.
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            heap: BinaryHeap::with_capacity(capacity.saturating_add(1)),
+        }
+    }
+
+    /// The worst key still kept, once the selector is full.
+    ///
+    /// `None` while there is room left: any key would then be accepted.
+    pub fn worst_kept(&self) -> Option<&K> {
+        if self.heap.len() < self.capacity {
+            None
+        } else {
+            self.heap.peek()
+        }
+    }
+
+    /// Offer a key; it is kept if there is room or it beats the current worst.
+    pub fn offer(&mut self, key: K) {
+        if self.capacity == 0 {
+            return;
+        }
+        if self.heap.len() < self.capacity {
+            self.heap.push(key);
+        } else if self.heap.peek().is_some_and(|worst| key < *worst) {
+            self.heap.pop();
+            self.heap.push(key);
+        }
+    }
+
+    /// The kept keys, best (smallest) first.
+    pub fn into_sorted_vec(self) -> Vec<K> {
+        self.heap.into_sorted_vec()
+    }
+}
+
 /// Parse a `"lon;lat"` string into `(lon, lat)`.
 pub fn parse_coord(s: &str) -> Option<(f64, f64)> {
     let (lon_str, lat_str) = s.split_once(';')?;
@@ -150,6 +223,48 @@ mod tests {
         std::fs::remove_file(dir.path().join("data-02.csv")).unwrap();
         let fp2 = dir_fingerprint_glob(dir.path(), "data-", ".csv");
         assert_ne!(fp, fp2);
+    }
+
+    #[test]
+    fn dir_fingerprint_changes_when_mtime_changes_at_same_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, b"hello").unwrap();
+        let file = std::fs::File::options().write(true).open(&path).unwrap();
+        let set_mtime = |secs: u64| {
+            file.set_modified(UNIX_EPOCH + std::time::Duration::from_secs(secs))
+                .unwrap();
+        };
+
+        set_mtime(1_000);
+        let fp_before = dir_fingerprint(dir.path(), &["a.txt"]);
+        let glob_before = dir_fingerprint_glob(dir.path(), "a", ".txt");
+
+        set_mtime(2_000);
+        let fp_after = dir_fingerprint(dir.path(), &["a.txt"]);
+        let glob_after = dir_fingerprint_glob(dir.path(), "a", ".txt");
+
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 5);
+        assert_ne!(fp_before, fp_after, "same size, new mtime must change it");
+        assert_ne!(glob_before, glob_after, "glob variant must track mtime too");
+    }
+
+    #[test]
+    fn best_k_keeps_smallest_keys_in_order() {
+        let mut best = BestK::new(3);
+        assert!(best.worst_kept().is_none());
+        for key in [9, 4, 7, 1, 8, 0, 5] {
+            best.offer(key);
+        }
+        assert_eq!(best.worst_kept(), Some(&4));
+        assert_eq!(best.into_sorted_vec(), vec![0, 1, 4]);
+    }
+
+    #[test]
+    fn best_k_with_zero_capacity_keeps_nothing() {
+        let mut best = BestK::new(0);
+        best.offer(1);
+        assert!(best.into_sorted_vec().is_empty());
     }
 
     #[test]

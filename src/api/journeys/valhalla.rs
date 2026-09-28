@@ -118,6 +118,10 @@ pub struct WalkLeg {
 // Pedestrian route helper
 // ---------------------------------------------------------------------------
 
+/// Budget for one pedestrian leg. A journey is enriched with several of them,
+/// so a slow Valhalla degrades to missing shapes rather than a stalled search.
+const PEDESTRIAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Compute a pedestrian route between two coordinates via Valhalla.
 ///
 /// When `indoor_friendly` is true, step and elevator penalties are removed
@@ -195,17 +199,24 @@ pub async fn pedestrian_route(
     };
 
     let url = format!("{valhalla_base}/route");
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
+    let resp = crate::shared::http::client()
+        .post(&url)
+        .timeout(PEDESTRIAN_TIMEOUT)
+        .json(&req)
+        .send()
+        .await
+        .inspect_err(|e| tracing::debug!("Valhalla pedestrian route unreachable: {e}"))
         .ok()?;
-
-    let resp = client.post(&url).json(&req).send().await.ok()?;
     if !resp.status().is_success() {
+        tracing::debug!("Valhalla pedestrian route returned {}", resp.status());
         return None;
     }
 
-    let route: RouteResponse = resp.json().await.ok()?;
+    let route: RouteResponse = resp
+        .json()
+        .await
+        .inspect_err(|e| tracing::debug!("Invalid Valhalla pedestrian response: {e}"))
+        .ok()?;
     let leg = route.trip.legs.first()?;
 
     let maneuvers = leg

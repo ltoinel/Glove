@@ -115,19 +115,19 @@ fn build_upstream_url(template: &str, z: u32, x: u32, y: u32) -> String {
         .replace("{r}", "")
 }
 
-async fn fetch_upstream_tile(url: &str) -> Result<Vec<u8>, HttpResponse> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| {
-            tracing::error!("Failed to create HTTP client: {e}");
-            tile_error("Internal error".into())
-        })?;
+/// Upstream budget for one tile; the map shows a gap rather than waiting.
+const TILE_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-    let resp = client.get(url).send().await.map_err(|e| {
-        tracing::warn!("Failed to fetch tile from upstream: {e}");
-        tile_error(format!("Upstream tile server unreachable: {e}"))
-    })?;
+async fn fetch_upstream_tile(url: &str) -> Result<Vec<u8>, HttpResponse> {
+    let resp = crate::shared::http::client()
+        .get(url)
+        .timeout(TILE_FETCH_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| {
+            tracing::warn!("Failed to fetch tile from upstream: {e}");
+            tile_error(format!("Upstream tile server unreachable: {e}"))
+        })?;
 
     if !resp.status().is_success() {
         return Err(tile_error(format!("Upstream returned {}", resp.status())));

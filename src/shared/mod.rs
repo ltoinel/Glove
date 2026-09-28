@@ -5,9 +5,11 @@
 //! depend on it.
 //!
 //! - [`config`] — `config.yaml` deserialization and defaults
+//! - [`http`]   — pooled outbound HTTP client (Valhalla, tiles)
 //! - [`text`]   — French diacritics normalization for fuzzy search
 //! - [`util`]   — coordinate parsing, directory fingerprints, log redaction
 
 pub mod config;
+pub mod http;
 pub mod text;
 pub mod util;

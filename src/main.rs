@@ -278,6 +278,10 @@ async fn run_http_server(
 
     let mut server = HttpServer::new(move || {
         App::new()
+            // Journeys and the ~860 kB traffic geometry are JSON and shrink
+            // several-fold; tiles are left alone (images are skipped by the
+            // default predicate).
+            .wrap(middleware::Compress::default())
             .wrap(build_cors(&cors_origins))
             .wrap(middleware::from_fn(metrics_middleware))
             .app_data(shared_data.clone())

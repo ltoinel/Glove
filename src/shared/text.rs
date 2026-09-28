@@ -27,9 +27,69 @@ pub fn normalize(s: &str) -> String {
         .replace('\u{2018}', " ")
 }
 
+/// Relevance tier of an exact match: the name equals the query.
+pub const RANK_EXACT: usize = 0;
+/// Relevance tier of a prefix match: the name starts with the query.
+pub const RANK_PREFIX: usize = 1;
+/// Relevance tier of a word-prefix match: one word of the name starts with the query.
+pub const RANK_WORD_PREFIX: usize = 2;
+/// Relevance tier of a substring match: the query appears anywhere in the name.
+pub const RANK_SUBSTRING: usize = 3;
+
+/// A relevance tier and the test deciding whether a name falls into it.
+type RankTier = (usize, fn(&str, &str) -> bool);
+
+/// Tiers from best to worst, so the first that matches is the rank.
+const RANK_TIERS: [RankTier; 4] = [
+    (RANK_EXACT, |name, query| name == query),
+    (RANK_PREFIX, |name, query| name.starts_with(query)),
+    (RANK_WORD_PREFIX, |name, query| {
+        name.split_whitespace().any(|word| word.starts_with(query))
+    }),
+    (RANK_SUBSTRING, |name, query| name.contains(query)),
+];
+
+/// Rank how well an already-normalized `name` matches a normalized `query`.
+///
+/// Returns the best tier that applies (lower is better), or `None` when none
+/// does or when the best tier is worse than `worst_useful`. The cut-off lets
+/// callers whose result buffer is already full of good hits skip the costlier
+/// word-split and substring checks.
+pub fn match_rank(name: &str, query: &str, worst_useful: usize) -> Option<usize> {
+    RANK_TIERS
+        .iter()
+        .take_while(|(rank, _)| *rank <= worst_useful)
+        .find(|(_, matches)| matches(name, query))
+        .map(|(rank, _)| *rank)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::normalize;
+    use super::*;
+
+    #[test]
+    fn match_rank_orders_tiers() {
+        assert_eq!(match_rank("gare", "gare", usize::MAX), Some(RANK_EXACT));
+        assert_eq!(
+            match_rank("gare de lyon", "gare", usize::MAX),
+            Some(RANK_PREFIX)
+        );
+        assert_eq!(
+            match_rank("paris gare", "gare", usize::MAX),
+            Some(RANK_WORD_PREFIX)
+        );
+        assert_eq!(
+            match_rank("lagare", "gare", usize::MAX),
+            Some(RANK_SUBSTRING)
+        );
+        assert_eq!(match_rank("station", "gare", usize::MAX), None);
+    }
+
+    #[test]
+    fn match_rank_honours_cut_off() {
+        assert_eq!(match_rank("lagare", "gare", RANK_WORD_PREFIX), None);
+        assert_eq!(match_rank("gare", "gare", RANK_EXACT), Some(RANK_EXACT));
+    }
 
     // Basic lowercase
     #[test]

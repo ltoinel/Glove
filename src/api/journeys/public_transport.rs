@@ -154,7 +154,7 @@ pub async fn get_journeys(
     realtime: web::Data<RealtimeService>,
     disruptions: web::Data<DisruptionStore>,
 ) -> HttpResponse {
-    let raptor_data = shared.load();
+    let raptor_data = shared.load_full();
 
     let overlays = Overlays {
         realtime: realtime.index(),
@@ -168,13 +168,10 @@ pub async fn get_journeys(
         Err(resp) => return resp,
     };
 
-    let mut journeys = run_iterative_search(&raptor_data, &resolved);
-
-    // Added before enrichment so the blocked journey gets the same first and
-    // last-mile walking legs as the others, and sorts among them by duration.
-    if let Some(blocked) = find_blocked_alternative(&raptor_data, &resolved, &journeys) {
-        journeys.push(blocked);
-    }
+    let (resolved, mut journeys) = match search_off_executor(&raptor_data, resolved).await {
+        Ok(found) => found,
+        Err(resp) => return resp,
+    };
 
     if !journeys.is_empty() {
         enrich_journeys(&mut journeys, &query, &config, &raptor_data, &resolved).await;
@@ -187,6 +184,36 @@ pub async fn get_journeys(
     tag_journeys(&mut journeys, resolved.wheelchair);
 
     HttpResponse::Ok().json(JourneysResponse { journeys })
+}
+
+/// Run the RAPTOR passes on the blocking thread pool.
+///
+/// A search is several full RAPTOR runs (diverse alternatives, rail tier,
+/// blocked-journey pass): tens to hundreds of milliseconds of pure CPU. On the
+/// async worker it would stall every other request that worker multiplexes —
+/// tiles, autocomplete, the Valhalla awaits of concurrent searches.
+async fn search_off_executor(
+    raptor_data: &Arc<RaptorData>,
+    resolved: ResolvedQuery,
+) -> Result<(ResolvedQuery, Vec<Journey>), HttpResponse> {
+    let raptor_data = Arc::clone(raptor_data);
+    web::block(move || {
+        let mut journeys = run_iterative_search(&raptor_data, &resolved);
+        // Added before enrichment so the blocked journey gets the same first
+        // and last-mile walking legs as the others, and sorts among them by
+        // duration.
+        if let Some(blocked) = find_blocked_alternative(&raptor_data, &resolved, &journeys) {
+            journeys.push(blocked);
+        }
+        (resolved, journeys)
+    })
+    .await
+    .map_err(|e| {
+        tracing::error!("Journey search failed on the blocking pool: {e}");
+        HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": { "id": "internal_error", "message": "Journey search failed" }
+        }))
+    })
 }
 
 const EARLY_MORNING_THRESHOLD: u32 = 4 * 3600; // 04:00
@@ -681,23 +708,29 @@ struct Endpoints {
     to: Option<(f64, f64)>,
 }
 
-type WalkLegCache = rustc_hash::FxHashMap<usize, Option<Arc<valhalla::WalkLeg>>>;
+/// Walking legs keyed by the stop they reach or leave from.
+type WalkLegs = rustc_hash::FxHashMap<usize, Arc<valhalla::WalkLeg>>;
 
-/// Compute a cached pedestrian route between a coordinate and a stop.
-async fn cached_pedestrian_route(
+/// Which way a first/last-mile leg is walked.
+#[derive(Copy, Clone)]
+enum WalkDirection {
+    /// From the traveller's coordinate to the stop (first mile).
+    ToStop,
+    /// From the stop to the traveller's coordinate (last mile).
+    FromStop,
+}
+
+/// Pedestrian leg between two coordinates, or `None` when they coincide (the
+/// address *is* the stop) or Valhalla has no answer.
+async fn pedestrian_leg(
     ctx: &EnrichmentCtx<'_>,
-    cache: &WalkLegCache,
     from: (f64, f64),
     to: (f64, f64),
-    stop_idx: usize,
-) -> (usize, Option<Arc<valhalla::WalkLeg>>) {
+) -> Option<Arc<valhalla::WalkLeg>> {
     if (from.0 - to.0).abs() < 1e-6 && (from.1 - to.1).abs() < 1e-6 {
-        return (stop_idx, None);
+        return None;
     }
-    if let Some(cached) = cache.get(&stop_idx) {
-        return (stop_idx, cached.clone());
-    }
-    let result = valhalla::pedestrian_route(
+    valhalla::pedestrian_route(
         ctx.valhalla_base,
         from,
         to,
@@ -707,8 +740,36 @@ async fn cached_pedestrian_route(
         ctx.wheelchair_config,
     )
     .await
-    .map(Arc::new);
-    (stop_idx, result)
+    .map(Arc::new)
+}
+
+/// Walking legs between `coord` and every distinct stop in `stop_idxs`.
+///
+/// Alternatives often share their first or last stop, so each stop is asked
+/// once, and all of them concurrently: the enrichment costs one Valhalla
+/// round trip rather than one per journey.
+async fn fetch_walk_legs(
+    ctx: &EnrichmentCtx<'_>,
+    coord: (f64, f64),
+    stop_idxs: rustc_hash::FxHashSet<usize>,
+    direction: WalkDirection,
+) -> WalkLegs {
+    let futs = stop_idxs.into_iter().map(|stop_idx| async move {
+        let stop = &ctx.raptor_data.stops[stop_idx];
+        let stop_coord = (stop.stop_lon, stop.stop_lat);
+        let (from, to) = match direction {
+            WalkDirection::ToStop => (coord, stop_coord),
+            WalkDirection::FromStop => (stop_coord, coord),
+        };
+        pedestrian_leg(ctx, from, to)
+            .await
+            .map(|leg| (stop_idx, leg))
+    });
+    futures_util::future::join_all(futs)
+        .await
+        .into_iter()
+        .flatten()
+        .collect()
 }
 
 /// Find the first/last PT stop indices within a journey, if any.
@@ -889,56 +950,34 @@ async fn enrich_first_last_mile(
     endpoints: Endpoints,
     date: &str,
 ) {
-    let mut first_mile_cache: WalkLegCache = WalkLegCache::default();
-    let mut last_mile_cache: WalkLegCache = WalkLegCache::default();
+    let stops: Vec<(Option<usize>, Option<usize>)> = journeys
+        .iter()
+        .map(|j| endpoint_stop_indices(ctx.raptor_data, j))
+        .collect();
 
-    for journey in journeys.iter_mut() {
-        let (first_stop_idx, last_stop_idx) = endpoint_stop_indices(ctx.raptor_data, journey);
-
-        let first_mile_fut = async {
-            if let (Some(from_c), Some(stop_idx)) = (endpoints.from, first_stop_idx) {
-                let stop = &ctx.raptor_data.stops[stop_idx];
-                cached_pedestrian_route(
-                    ctx,
-                    &first_mile_cache,
-                    from_c,
-                    (stop.stop_lon, stop.stop_lat),
-                    stop_idx,
-                )
-                .await
-            } else {
-                (0, None)
+    let first_mile = async {
+        match endpoints.from {
+            Some(from_c) => {
+                let idxs = stops.iter().filter_map(|(first, _)| *first).collect();
+                fetch_walk_legs(ctx, from_c, idxs, WalkDirection::ToStop).await
             }
-        };
-
-        let last_mile_fut = async {
-            if let (Some(to_c), Some(stop_idx)) = (endpoints.to, last_stop_idx) {
-                let stop = &ctx.raptor_data.stops[stop_idx];
-                cached_pedestrian_route(
-                    ctx,
-                    &last_mile_cache,
-                    (stop.stop_lon, stop.stop_lat),
-                    to_c,
-                    stop_idx,
-                )
-                .await
-            } else {
-                (0, None)
+            None => WalkLegs::default(),
+        }
+    };
+    let last_mile = async {
+        match endpoints.to {
+            Some(to_c) => {
+                let idxs = stops.iter().filter_map(|(_, last)| *last).collect();
+                fetch_walk_legs(ctx, to_c, idxs, WalkDirection::FromStop).await
             }
-        };
-
-        let ((fm_idx, first_mile), (lm_idx, last_mile)) =
-            futures_util::future::join(first_mile_fut, last_mile_fut).await;
-
-        if endpoints.from.is_some() && first_stop_idx.is_some() {
-            first_mile_cache.insert(fm_idx, first_mile.clone());
+            None => WalkLegs::default(),
         }
-        if endpoints.to.is_some() && last_stop_idx.is_some() {
-            last_mile_cache.insert(lm_idx, last_mile.clone());
-        }
+    };
+    let (first_legs, last_legs) = futures_util::future::join(first_mile, last_mile).await;
 
-        if let (Some(walk), Some(stop_idx), Some(from_c)) =
-            (&first_mile, first_stop_idx, endpoints.from)
+    for (journey, (first_stop, last_stop)) in journeys.iter_mut().zip(stops) {
+        if let (Some(from_c), Some(stop_idx)) = (endpoints.from, first_stop)
+            && let Some(walk) = first_legs.get(&stop_idx)
         {
             prepend_first_mile(
                 journey,
@@ -950,8 +989,8 @@ async fn enrich_first_last_mile(
                 ctx.include_maneuvers,
             );
         }
-
-        if let (Some(walk), Some(stop_idx), Some(to_c)) = (&last_mile, last_stop_idx, endpoints.to)
+        if let (Some(to_c), Some(stop_idx)) = (endpoints.to, last_stop)
+            && let Some(walk) = last_legs.get(&stop_idx)
         {
             append_last_mile(
                 journey,
@@ -1016,22 +1055,34 @@ async fn enrich_transfers(journeys: &mut [Journey], ctx: &EnrichmentCtx<'_>) {
     // Always call Valhalla for all transfers (outdoor and indoor) to get
     // shape/distance. Indoor transfers will be filtered post-hoc based on
     // whether Valhalla returns indoor-specific maneuver types.
-    let futs: Vec<_> = transfer_requests
+    //
+    // Alternatives repeat the same transfer (same interchange, same side), so
+    // each distinct walk is asked once and its result shared.
+    let mut unique: Vec<TransferWalk> = Vec::new();
+    let mut slot_of: rustc_hash::FxHashMap<TransferWalk, usize> = Default::default();
+    let slots: Vec<usize> = transfer_requests
         .iter()
-        .map(|(_, _, from, to, is_outdoor)| {
-            let indoor_friendly = !is_outdoor;
-            valhalla::pedestrian_route(
-                ctx.valhalla_base,
-                *from,
-                *to,
-                ctx.walking_speed,
-                indoor_friendly,
-                ctx.language,
-                ctx.wheelchair_config,
-            )
+        .map(|&(_, _, from, to, is_outdoor)| {
+            let key = TransferWalk::new(from, to, is_outdoor);
+            *slot_of.entry(key).or_insert_with(|| {
+                unique.push(key);
+                unique.len() - 1
+            })
         })
         .collect();
-    let results = futures_util::future::join_all(futs).await;
+    let futs = unique.iter().map(|walk| {
+        valhalla::pedestrian_route(
+            ctx.valhalla_base,
+            walk.from(),
+            walk.to(),
+            ctx.walking_speed,
+            !walk.is_outdoor,
+            ctx.language,
+            ctx.wheelchair_config,
+        )
+    });
+    let unique_results = futures_util::future::join_all(futs).await;
+    let results = slots.iter().map(|&slot| unique_results[slot].clone());
 
     for ((j_idx, s_idx, _, _, is_outdoor), walk) in transfer_requests.iter().zip(results) {
         let section = &mut journeys[*j_idx].sections[*s_idx];
@@ -1043,6 +1094,34 @@ async fn enrich_transfers(journeys: &mut [Journey], ctx: &EnrichmentCtx<'_>) {
                 section.maneuvers = Some(walk.maneuvers);
             }
         }
+    }
+}
+
+/// A transfer walk as sent to Valhalla, hashable so identical transfers across
+/// alternatives share one request. Coordinates are keyed by their bit pattern:
+/// they come verbatim from the stop table, so equal stops give equal bits.
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+struct TransferWalk {
+    from: (u64, u64),
+    to: (u64, u64),
+    is_outdoor: bool,
+}
+
+impl TransferWalk {
+    fn new(from: (f64, f64), to: (f64, f64), is_outdoor: bool) -> Self {
+        Self {
+            from: (from.0.to_bits(), from.1.to_bits()),
+            to: (to.0.to_bits(), to.1.to_bits()),
+            is_outdoor,
+        }
+    }
+
+    fn from(&self) -> (f64, f64) {
+        (f64::from_bits(self.from.0), f64::from_bits(self.from.1))
+    }
+
+    fn to(&self) -> (f64, f64) {
+        (f64::from_bits(self.to.0), f64::from_bits(self.to.1))
     }
 }
 
@@ -1137,13 +1216,18 @@ fn resolve_stops(
 }
 
 /// GTFS route_type code to commercial mode name.
+///
+/// Covers both the basic codes (0-12) and the extended "Hierarchical Vehicle
+/// Type" ranges some feeds publish (100 railway, 400 urban railway, 700 bus,
+/// 900 tram, ...). Missing the extended ranges would let a forbidden mode
+/// slip through `forbidden_modes` and `prefer_rail`.
 pub(crate) fn route_type_to_mode(route_type: u16) -> &'static str {
     match route_type {
-        0 => "tramway",
-        1 => "metro",
-        2 => "rail",
-        3 => "bus",
-        7 => "funicular",
+        0 | 900..=999 => "tramway",
+        1 | 401 | 402 => "metro",
+        2 | 100..=199 | 400 | 403..=404 => "rail",
+        3 | 11 | 200..=299 | 700..=799 | 800 => "bus",
+        7 | 1400 => "funicular",
         _ => "other",
     }
 }
@@ -1169,24 +1253,15 @@ fn compute_mode_exclusions(
     if forbidden_modes_str.is_empty() {
         return rustc_hash::FxHashSet::default();
     }
-    let forbidden_types: rustc_hash::FxHashSet<u16> = forbidden_modes_str
-        .split(',')
-        .filter_map(|m| match m.trim() {
-            "tramway" => Some(0),
-            "metro" => Some(1),
-            "rail" => Some(2),
-            "bus" => Some(3),
-            "funicular" => Some(7),
-            _ => None,
-        })
-        .collect();
+    let forbidden: rustc_hash::FxHashSet<&str> =
+        forbidden_modes_str.split(',').map(str::trim).collect();
     data.patterns
         .iter()
         .enumerate()
         .filter(|(_, p)| {
             data.routes
                 .get(&p.route_id)
-                .is_some_and(|r| forbidden_types.contains(&r.route_type))
+                .is_some_and(|r| forbidden.contains(route_type_to_mode(r.route_type)))
         })
         .map(|(i, _)| i)
         .collect()
@@ -2217,6 +2292,18 @@ mod tests {
     }
 
     #[test]
+    fn route_type_to_mode_maps_extended_route_types() {
+        assert_eq!(route_type_to_mode(3), "bus");
+        assert_eq!(route_type_to_mode(700), "bus");
+        assert_eq!(route_type_to_mode(715), "bus");
+        assert_eq!(route_type_to_mode(109), "rail");
+        assert_eq!(route_type_to_mode(401), "metro");
+        assert_eq!(route_type_to_mode(900), "tramway");
+        assert_eq!(route_type_to_mode(1400), "funicular");
+        assert_eq!(route_type_to_mode(1000), "other");
+    }
+
+    #[test]
     fn compute_mode_exclusions_multiple_modes() {
         let data = make_test_raptor_data();
         let excluded = compute_mode_exclusions(&data, "bus,metro,tramway");
@@ -2508,67 +2595,55 @@ mod tests {
 
     // ----- tag_journeys wheelchair branch ---------------------------------
 
-    // ----- cached_pedestrian_route ----------------------------------------
+    // ----- pedestrian_leg / fetch_walk_legs --------------------------------
 
-    #[actix_web::test]
-    async fn cached_pedestrian_route_skips_identical_coords() {
-        let cfg = AppConfig::default();
-        let data = make_test_raptor_data();
-        let ctx = EnrichmentCtx {
-            raptor_data: &data,
-            valhalla_base: "http://127.0.0.1:1",
-            walking_speed: None,
-            include_maneuvers: false,
-            language: None,
-            wheelchair_config: Some(&cfg.wheelchair),
-        };
-        let cache = WalkLegCache::default();
-        let (idx, leg) = cached_pedestrian_route(&ctx, &cache, (2.3, 48.8), (2.3, 48.8), 7).await;
-        assert_eq!(idx, 7);
-        assert!(leg.is_none());
-    }
-
-    #[actix_web::test]
-    async fn cached_pedestrian_route_returns_cache_hit() {
-        let data = make_test_raptor_data();
-        let ctx = EnrichmentCtx {
-            raptor_data: &data,
-            valhalla_base: "http://127.0.0.1:1",
-            walking_speed: None,
-            include_maneuvers: false,
-            language: None,
-            wheelchair_config: None,
-        };
-        let mut cache = WalkLegCache::default();
-        let cached_leg = Arc::new(valhalla::WalkLeg {
-            duration: 99,
-            distance: 100,
-            shape: "x".into(),
-            maneuvers: vec![],
-        });
-        cache.insert(3, Some(cached_leg.clone()));
-        let (idx, leg) = cached_pedestrian_route(&ctx, &cache, (2.3, 48.8), (2.4, 48.9), 3).await;
-        assert_eq!(idx, 3);
-        let l = leg.expect("cache hit");
-        assert_eq!(l.duration, 99);
-    }
-
-    #[actix_web::test]
-    async fn cached_pedestrian_route_calls_valhalla_on_miss() {
-        let data = make_test_raptor_data();
-        let ctx = EnrichmentCtx {
-            raptor_data: &data,
+    fn unreachable_valhalla_ctx(data: &RaptorData) -> EnrichmentCtx<'_> {
+        EnrichmentCtx {
+            raptor_data: data,
             valhalla_base: "http://127.0.0.1:1",
             walking_speed: Some(5.0),
             include_maneuvers: false,
             language: None,
             wheelchair_config: None,
+        }
+    }
+
+    #[actix_web::test]
+    async fn pedestrian_leg_skips_identical_coords() {
+        let data = make_test_raptor_data();
+        let ctx = unreachable_valhalla_ctx(&data);
+        assert!(
+            pedestrian_leg(&ctx, (2.3, 48.8), (2.3, 48.8))
+                .await
+                .is_none()
+        );
+    }
+
+    #[actix_web::test]
+    async fn fetch_walk_legs_omits_stops_valhalla_cannot_route() {
+        let data = make_test_raptor_data();
+        let ctx = unreachable_valhalla_ctx(&data);
+        let idxs = [data.stop_index["S1"], data.stop_index["S3"]]
+            .into_iter()
+            .collect();
+        let legs = fetch_walk_legs(&ctx, (2.0, 48.0), idxs, WalkDirection::ToStop).await;
+        assert!(legs.is_empty());
+    }
+
+    #[actix_web::test]
+    async fn fetch_walk_legs_asks_each_distinct_stop_once() {
+        let base = super::super::valhalla::test_support::spawn_mock_valhalla();
+        let data = make_test_raptor_data();
+        let ctx = EnrichmentCtx {
+            valhalla_base: &base,
+            ..unreachable_valhalla_ctx(&data)
         };
-        let cache = WalkLegCache::default();
-        // Valhalla unreachable → returns None, but the call path is exercised
-        let (idx, leg) = cached_pedestrian_route(&ctx, &cache, (2.3, 48.8), (2.4, 48.9), 5).await;
-        assert_eq!(idx, 5);
-        assert!(leg.is_none());
+        let idxs = [data.stop_index["S1"], data.stop_index["S3"]]
+            .into_iter()
+            .collect();
+        let legs = fetch_walk_legs(&ctx, (2.0, 48.0), idxs, WalkDirection::FromStop).await;
+        assert_eq!(legs.len(), 2);
+        assert!(legs.contains_key(&data.stop_index["S1"]));
     }
 
     // ----- enrich_transfers / enrich_first_last_mile ----------------------

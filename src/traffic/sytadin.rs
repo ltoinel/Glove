@@ -532,7 +532,7 @@ mod tests {
         assert_eq!(states.len(), 2);
         assert!(matches!(states.get(&10), Some(SegState::Fluid)));
         assert!(matches!(states.get(&20), Some(SegState::Jam)));
-        assert!(states.get(&30).is_none());
+        assert!(!states.contains_key(&30));
     }
 
     #[test]

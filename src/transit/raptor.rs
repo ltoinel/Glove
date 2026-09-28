@@ -71,7 +71,24 @@ pub struct Pattern {
     pub stops: Vec<usize>,
     /// Trips sorted by departure at the first stop.
     pub trips: Vec<PatternTrip>,
+    /// For each position, the spread of `departure(pos) - departure(0)` across
+    /// all trips. Filled by [`finalize_patterns`]; see [`find_earliest_trip`].
+    pub departure_offsets: Vec<OffsetRange>,
 }
+
+/// Smallest and largest value of a time offset, in seconds.
+///
+/// Signed because malformed GTFS can depart a later stop before the first one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OffsetRange {
+    pub min: i64,
+    pub max: i64,
+}
+
+/// Version of the on-disk `raptor.bin` layout, written next to the GTFS
+/// fingerprint. Bump it whenever a serialized struct changes shape, so a cache
+/// written by an older binary is rebuilt instead of mis-decoded.
+const CACHE_FORMAT_VERSION: u32 = 2;
 
 /// Aggregate statistics captured during GTFS loading and RAPTOR index build.
 #[derive(Serialize, Deserialize)]
@@ -262,11 +279,51 @@ fn build_patterns(
                 route_id: trip.route_id.clone(),
                 stops: stop_seq,
                 trips: vec![pattern_trip],
+                departure_offsets: Vec::new(),
             });
         }
     }
 
     patterns
+}
+
+/// Cache key combining the GTFS fingerprint with the binary layout version.
+fn versioned_fingerprint(fingerprint: &str) -> String {
+    format!("v{CACHE_FORMAT_VERSION}:{fingerprint}")
+}
+
+/// Sort each pattern's trips by first-stop departure and record, per position,
+/// how far a departure there can lie from the trip's first-stop departure.
+///
+/// Those bounds are what makes the trip search exact on lines boarded far from
+/// their terminus, including patterns where trips overtake each other.
+fn finalize_patterns(patterns: &mut [Pattern]) {
+    for pattern in patterns {
+        pattern.trips.sort_by_key(|t| t.stop_times[0].1);
+        pattern.departure_offsets = departure_offset_ranges(&pattern.trips, pattern.stops.len());
+    }
+}
+
+/// Per-position range of `departure(pos) - departure(0)` over `trips`.
+fn departure_offset_ranges(trips: &[PatternTrip], num_positions: usize) -> Vec<OffsetRange> {
+    let mut ranges = vec![
+        OffsetRange {
+            min: i64::MAX,
+            max: i64::MIN,
+        };
+        num_positions
+    ];
+    for trip in trips {
+        let Some(&(_, first_dep)) = trip.stop_times.first() else {
+            continue;
+        };
+        for (range, &(_, dep)) in ranges.iter_mut().zip(&trip.stop_times) {
+            let offset = i64::from(dep) - i64::from(first_dep);
+            range.min = range.min.min(offset);
+            range.max = range.max.max(offset);
+        }
+    }
+    ranges
 }
 
 /// Build the reverse index: stop_idx → Vec<(pattern_idx, position_in_pattern)>.
@@ -463,10 +520,7 @@ impl RaptorData {
         let (service_index, service_ids) = intern_services(&gtfs);
 
         let mut patterns = build_patterns(&gtfs, &stop_index, &service_index);
-        // Sort trips within each pattern by departure at first stop
-        for pat in &mut patterns {
-            pat.trips.sort_by_key(|t| t.stop_times[0].1);
-        }
+        finalize_patterns(&mut patterns);
         info!("{} route patterns", patterns.len());
 
         // Build stop → patterns reverse index
@@ -527,7 +581,7 @@ impl RaptorData {
 
         let encoded = bincode::serialize(self)?;
         std::fs::write(&bin_path, &encoded)?;
-        std::fs::write(&fp_path, fingerprint)?;
+        std::fs::write(&fp_path, versioned_fingerprint(fingerprint))?;
 
         info!(
             "RAPTOR index saved to {} ({:.1} MB)",
@@ -539,13 +593,14 @@ impl RaptorData {
 
     /// Load the RAPTOR index from cache if the fingerprint matches.
     ///
-    /// Returns `None` if the cache does not exist or the fingerprint is stale.
+    /// Returns `None` if the cache does not exist, the fingerprint is stale, or
+    /// it was written with another [`CACHE_FORMAT_VERSION`].
     pub fn load_cached(cache_dir: &Path, fingerprint: &str) -> Option<Self> {
         let bin_path = cache_dir.join("raptor.bin");
         let fp_path = cache_dir.join("raptor.fingerprint");
 
         let cached_fp = std::fs::read_to_string(&fp_path).ok()?;
-        if cached_fp.trim() != fingerprint {
+        if cached_fp.trim() != versioned_fingerprint(fingerprint) {
             info!("RAPTOR cache fingerprint mismatch, rebuilding");
             return None;
         }
@@ -612,46 +667,37 @@ impl RaptorData {
     /// Search stops by name for autocomplete.
     ///
     /// Returns up to `limit` results as `(stop_idx, stop_name, stop_id)` tuples,
-    /// ranked by relevance: exact match > prefix > word-prefix > substring.
+    /// ranked by relevance: exact match > prefix > word-prefix > substring,
+    /// then by name length (shorter = more specific), then alphabetically.
+    ///
+    /// The whole index is scanned: it is sorted alphabetically, so the best
+    /// match can sit anywhere in it. Only the `limit` best keys are kept.
     pub fn search_stops(&self, query: &str, limit: usize) -> Vec<(usize, &str, &str)> {
         if query.is_empty() {
             return Vec::new();
         }
 
         let q = normalize(query);
-        let mut results: Vec<(usize, &str, &str, usize)> = Vec::new();
+        // Key: (rank, name length, index position). The position breaks ties
+        // in index (alphabetical) order, keeping results deterministic.
+        let mut best: BestK<(usize, usize, usize)> = BestK::new(limit);
 
-        for entry in &self.search_index {
-            let rank = if entry.name_lower == q {
-                0 // exact match
-            } else if entry.name_lower.starts_with(&q) {
-                1 // prefix
-            } else if entry
-                .name_lower
-                .split_whitespace()
-                .any(|w| w.starts_with(&q))
-            {
-                2 // word starts with
-            } else if entry.name_lower.contains(&q) {
-                3 // substring
-            } else {
+        for (entry_pos, entry) in self.search_index.iter().enumerate() {
+            let worst_useful = best.worst_kept().map_or(RANK_SUBSTRING, |worst| worst.0);
+            let Some(rank) = match_rank(&entry.name_lower, &q, worst_useful) else {
                 continue;
             };
-
-            let stop = &self.stops[entry.stop_idx];
-            results.push((entry.stop_idx, &stop.stop_name, &stop.stop_id, rank));
-
-            if results.len() >= limit * 10 {
-                break;
-            }
+            let name_len = self.stops[entry.stop_idx].stop_name.len();
+            best.offer((rank, name_len, entry_pos));
         }
 
-        // Sort by relevance, then by name length (shorter = more specific)
-        results.sort_by_key(|r| (r.3, r.1.len()));
-        results.truncate(limit);
-        results
+        best.into_sorted_vec()
             .into_iter()
-            .map(|(idx, name, id, _)| (idx, name, id))
+            .map(|(_, _, entry_pos)| {
+                let stop_idx = self.search_index[entry_pos].stop_idx;
+                let stop = &self.stops[stop_idx];
+                (stop_idx, stop.stop_name.as_str(), stop.stop_id.as_str())
+            })
             .collect()
     }
 
@@ -780,7 +826,8 @@ impl RaptorData {
     }
 }
 
-use crate::shared::text::normalize;
+use crate::shared::text::{RANK_SUBSTRING, match_rank, normalize};
+use crate::shared::util::BestK;
 
 /// Approximate squared distance between two points (sufficient for ranking).
 fn haversine_approx(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
@@ -1244,22 +1291,22 @@ fn apply_transfers_after_trips(
     }
 }
 
-/// Look-back window covering trips whose first-stop departure precedes
-/// `min_departure` but which are still boardable further along the pattern.
-const LOOK_BACK_TRIPS: usize = 8;
-
 /// Find the earliest active trip departing at or after `min_departure`
 /// at position `pos` within a pattern.
 ///
-/// Trips are sorted by departure at the first stop. We use binary search
-/// on the first-stop departure to skip trips that depart too early, then
-/// scan forward for the best match at `pos`.
+/// Trips are sorted by departure at the first stop, and a trip's departure at
+/// `pos` is its first-stop departure plus an offset bounded by
+/// [`Pattern::departure_offsets`]. So the actual departure at `pos` of a trip
+/// leaving the terminus at `d0` lies within `[d0 + min, d0 + max]`, which turns
+/// both ends of the scan into exact tests — however far along the line `pos`
+/// is, and even when trips overtake each other:
+/// - every trip with `d0 + max < min_departure` is too early (binary search);
+/// - once `d0 + min > best`, no later trip can improve on `best` (early break).
 ///
-/// Real-time offsets break that sort order — a trip scheduled before
-/// `min_departure` can be delayed past it, and one scheduled after can run
-/// early. The window is therefore widened by the pattern's largest published
-/// offset, so a delayed vehicle is not missed simply because its *scheduled*
-/// departure fell outside the search window.
+/// Real-time offsets move a departure by at most the pattern's largest
+/// published offset (`slack`), so both bounds are widened by it — otherwise a
+/// delayed vehicle would be skipped because its *scheduled* departure was too
+/// early. A pattern without offset bounds is scanned in full.
 fn find_earliest_trip(
     pattern: &Pattern,
     pos: usize,
@@ -1268,23 +1315,27 @@ fn find_earliest_trip(
     rt: Option<&PatternDeltas>,
 ) -> Option<usize> {
     let trips = &pattern.trips;
-    let slack = rt.map_or(0, PatternDeltas::max_abs_delta);
+    let slack = i64::from(rt.map_or(0, PatternDeltas::max_abs_delta));
+    let first_departure = |trip: &PatternTrip| i64::from(trip.stop_times[0].1);
+    let bounds = pattern.departure_offsets.get(pos).map(|range| OffsetRange {
+        min: range.min.saturating_sub(slack),
+        max: range.max.saturating_add(slack),
+    });
 
-    // Binary search: find first trip whose first-stop departure >= min_departure.
-    // Trips departing before this at stop 0 *might* still be valid at `pos` due to
-    // travel time, so we look back a small window for safety.
-    let pivot = trips.partition_point(|t| t.stop_times[0].1 < min_departure);
-    let widened = if slack == 0 {
-        pivot
-    } else {
-        trips.partition_point(|t| t.stop_times[0].1.saturating_add(slack) < min_departure)
-    };
-    let start = widened.min(pivot).saturating_sub(LOOK_BACK_TRIPS);
+    let start = bounds.map_or(0, |b| {
+        trips.partition_point(|t| {
+            first_departure(t).saturating_add(b.max) < i64::from(min_departure)
+        })
+    });
 
     let mut best_dep = INFINITY;
     let mut best_idx = None;
 
     for (idx, trip) in trips.iter().enumerate().skip(start) {
+        if bounds.is_some_and(|b| first_departure(trip).saturating_add(b.min) > i64::from(best_dep))
+        {
+            break;
+        }
         if is_boardable(trip, idx, options, rt)
             && let Some(dep) = trip_departure(pattern, rt, idx, pos)
             && dep >= min_departure
@@ -1292,12 +1343,6 @@ fn find_earliest_trip(
         {
             best_dep = dep;
             best_idx = Some(idx);
-        }
-        // Once past the pivot, trips are roughly ordered: if the first-stop
-        // departure is already past our best — even allowing for a vehicle
-        // running `slack` seconds early — nothing later can improve on it.
-        if idx > pivot && trip.stop_times[0].1.saturating_sub(slack) > best_dep {
-            break;
         }
     }
 
@@ -2141,6 +2186,40 @@ mod tests {
         assert!(results.is_empty());
     }
 
+    #[test]
+    fn search_stops_exact_match_survives_many_earlier_substring_hits() {
+        let mut data = build_test_data();
+        // 100 substring hits sort alphabetically before the exact "Opera".
+        let names = (0..100)
+            .map(|i| format!("Abc Xopera {i:03}"))
+            .chain(std::iter::once("Opera".to_string()));
+        data.search_index.clear();
+        for name in names {
+            data.search_index.push(SearchEntry {
+                stop_idx: data.stops.len(),
+                name_lower: normalize(&name),
+            });
+            data.stops.push(gtfs::Stop {
+                stop_id: name.clone(),
+                stop_name: name,
+                stop_lon: 0.0,
+                stop_lat: 0.0,
+                parent_station: String::new(),
+                wheelchair_boarding: 0,
+            });
+        }
+        data.search_index
+            .sort_by(|a, b| a.name_lower.cmp(&b.name_lower));
+
+        let results = data.search_stops("opera", 5);
+        assert_eq!(results.len(), 5);
+        assert_eq!(results[0].1, "Opera", "exact match must rank first");
+        assert_eq!(
+            results[1].1, "Abc Xopera 000",
+            "then substring hits, in order"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // resolve_stop
     // -----------------------------------------------------------------------
@@ -2204,6 +2283,89 @@ mod tests {
         let options = QueryOptions::new(&active, 3, &excluded, false);
         let result = find_earliest_trip(pattern, 0, 0, &options, None);
         assert!(result.is_none());
+    }
+
+    /// Two-stop pattern whose trips depart the terminus and the next stop at
+    /// the given `(first_departure, second_departure)` times, finalized as
+    /// the index build does.
+    fn two_stop_pattern(departures: &[(u32, u32)]) -> Pattern {
+        let trips = departures
+            .iter()
+            .enumerate()
+            .map(|(i, &(first, second))| PatternTrip {
+                service_idx: 0,
+                stop_times: vec![(first, first), (second, second)],
+                trip_id: format!("T{i}"),
+                headsign: String::new(),
+                wheelchair_accessible: 0,
+            })
+            .collect();
+        let mut pattern = Pattern {
+            route_id: "R".to_string(),
+            stops: vec![0, 1],
+            trips,
+            departure_offsets: Vec::new(),
+        };
+        finalize_patterns(std::slice::from_mut(&mut pattern));
+        pattern
+    }
+
+    #[test]
+    fn find_earliest_trip_on_frequent_line_boarded_far_from_terminus() {
+        // Metro every 2 min from 08:00, 40 min from the terminus to `pos`.
+        // Boarding at 09:00 must take the 08:20 departure (09:00 at `pos`),
+        // twenty trips before the first one leaving the terminus at 09:00.
+        const HEADWAY: u32 = 120;
+        const TRAVEL: u32 = 40 * 60;
+        let departures: Vec<(u32, u32)> = (0..60)
+            .map(|i| (28_800 + i * HEADWAY, 28_800 + i * HEADWAY + TRAVEL))
+            .collect();
+        let pattern = two_stop_pattern(&departures);
+        let active = vec![true];
+        let excluded = FxHashSet::default();
+        let options = QueryOptions::new(&active, 3, &excluded, false);
+
+        let found = find_earliest_trip(&pattern, 1, 32_400, &options, None);
+        assert_eq!(found, Some(10), "08:20 departure reaches pos at 09:00");
+        let found = find_earliest_trip(&pattern, 1, 32_401, &options, None);
+        assert_eq!(found, Some(11), "one second later: the next train");
+    }
+
+    #[test]
+    fn find_earliest_trip_handles_overtaking_trips() {
+        // The 08:05 express overtakes the 08:00 stopping service before `pos`.
+        let pattern = two_stop_pattern(&[(28_800, 33_000), (29_100, 30_600), (29_400, 31_800)]);
+        let active = vec![true];
+        let excluded = FxHashSet::default();
+        let options = QueryOptions::new(&active, 3, &excluded, false);
+
+        assert_eq!(
+            find_earliest_trip(&pattern, 1, 30_000, &options, None),
+            Some(1)
+        );
+        assert_eq!(
+            find_earliest_trip(&pattern, 1, 32_000, &options, None),
+            Some(0)
+        );
+        assert_eq!(
+            find_earliest_trip(&pattern, 1, 33_001, &options, None),
+            None
+        );
+    }
+
+    #[test]
+    fn departure_offsets_span_every_trip() {
+        let pattern = two_stop_pattern(&[(28_800, 33_000), (29_100, 30_600)]);
+        assert_eq!(
+            pattern.departure_offsets,
+            vec![
+                OffsetRange { min: 0, max: 0 },
+                OffsetRange {
+                    min: 1_500,
+                    max: 4_200
+                }
+            ]
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2618,10 +2780,24 @@ mod tests {
     #[test]
     fn load_cache_corrupted_data() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("raptor.fingerprint"), "fp1").unwrap();
+        std::fs::write(
+            dir.path().join("raptor.fingerprint"),
+            versioned_fingerprint("fp1"),
+        )
+        .unwrap();
         std::fs::write(dir.path().join("raptor.bin"), b"not valid bincode").unwrap();
         let loaded = RaptorData::load_cached(dir.path(), "fp1");
         assert!(loaded.is_none());
+    }
+
+    #[test]
+    fn load_cache_rejects_other_format_version() {
+        let data = build_test_data();
+        let dir = tempfile::tempdir().unwrap();
+        data.save(dir.path(), "fp1").unwrap();
+        // A cache written before format versioning stored the bare fingerprint.
+        std::fs::write(dir.path().join("raptor.fingerprint"), "fp1").unwrap();
+        assert!(RaptorData::load_cached(dir.path(), "fp1").is_none());
     }
 
     // -----------------------------------------------------------------------

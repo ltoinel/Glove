@@ -8,7 +8,14 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-use crate::shared::text::normalize;
+use crate::shared::text::{RANK_SUBSTRING, match_rank, normalize};
+use crate::shared::util::BestK;
+
+/// Relevance tier below substring: every alphabetic query word prefixes some
+/// word of the label, in any order ("rivoli rue" finds "Rue de Rivoli").
+const RANK_ALL_WORDS: usize = RANK_SUBSTRING + 1;
+/// Fewest alphabetic query words for the any-order tier to apply.
+const MIN_ALL_WORDS: usize = 2;
 
 // ---------------------------------------------------------------------------
 // Data structures
@@ -310,61 +317,66 @@ impl BanData {
     /// Search addresses by name for autocomplete.
     ///
     /// Returns up to `limit` results ranked by relevance:
-    /// exact match > prefix > word-prefix > substring.
+    /// exact match > prefix > word-prefix > substring > all words in any
+    /// order, then by label length (shorter = more specific).
+    ///
+    /// Every entry is considered: the best match can sit anywhere in the
+    /// index, so stopping after N hits could drop it. Only the `limit` best
+    /// keys are kept, and once they are all good the costlier tiers are skipped.
     pub fn search(&self, query: &str, limit: usize) -> Vec<&BanEntry> {
         if query.is_empty() {
             return Vec::new();
         }
 
         let q = normalize(query);
-        let q_words: Vec<&str> = q.split_whitespace().collect();
-        let mut results: Vec<(&BanEntry, usize)> = Vec::new();
+        let alpha_words = alphabetic_words(&q);
+        // Key: (rank, label length, entry position); the position keeps ties
+        // in index order, so results are deterministic.
+        let mut best: BestK<(usize, usize, usize)> = BestK::new(limit);
 
-        for entry in &self.entries {
-            let rank = if entry.name_lower == q {
-                0
-            } else if entry.name_lower.starts_with(&q) {
-                1
-            } else if entry
-                .name_lower
-                .split_whitespace()
-                .any(|w| w.starts_with(&q))
-            {
-                2
-            } else if entry.name_lower.contains(&q) {
-                3
-            } else if q_words.len() >= 2 && {
-                // Multi-word matching: all non-numeric query words must match
-                // as prefix of some entry word. Numbers (street numbers) are
-                // ignored since BAN labels don't include them.
-                let alpha_words: Vec<&&str> = q_words
-                    .iter()
-                    .filter(|w| !w.chars().all(|c| c.is_ascii_digit() || c == ','))
-                    .collect();
-                alpha_words.len() >= 2
-                    && alpha_words.iter().all(|qw| {
-                        entry
-                            .name_lower
-                            .split_whitespace()
-                            .any(|ew| ew.starts_with(**qw))
-                    })
-            } {
-                4
-            } else {
-                continue;
-            };
-
-            results.push((entry, rank));
-
-            if results.len() >= limit * 10 {
-                break;
+        for (entry_pos, entry) in self.entries.iter().enumerate() {
+            let worst_useful = best.worst_kept().map_or(RANK_ALL_WORDS, |worst| worst.0);
+            let rank = match_rank(&entry.name_lower, &q, worst_useful).or_else(|| {
+                (worst_useful >= RANK_ALL_WORDS
+                    && all_words_prefix(&entry.name_lower, &alpha_words))
+                .then_some(RANK_ALL_WORDS)
+            });
+            if let Some(rank) = rank {
+                best.offer((rank, entry.label.len(), entry_pos));
             }
         }
 
-        results.sort_by_key(|r| (r.1, r.0.label.len()));
-        results.truncate(limit);
-        results.into_iter().map(|(entry, _)| entry).collect()
+        best.into_sorted_vec()
+            .into_iter()
+            .map(|(_, _, entry_pos)| &self.entries[entry_pos])
+            .collect()
     }
+}
+
+/// Query words that are not street numbers, or an empty list when fewer than
+/// [`MIN_ALL_WORDS`] remain.
+///
+/// BAN labels carry no house number, so "12 rue rivoli" must match on "rue"
+/// and "rivoli" alone.
+fn alphabetic_words(normalized_query: &str) -> Vec<&str> {
+    let words: Vec<&str> = normalized_query
+        .split_whitespace()
+        .filter(|w| !w.chars().all(|c| c.is_ascii_digit() || c == ','))
+        .collect();
+    if words.len() >= MIN_ALL_WORDS {
+        words
+    } else {
+        Vec::new()
+    }
+}
+
+/// Whether every query word prefixes at least one word of `name`.
+/// An empty word list never matches.
+fn all_words_prefix(name: &str, query_words: &[&str]) -> bool {
+    !query_words.is_empty()
+        && query_words
+            .iter()
+            .all(|qw| name.split_whitespace().any(|word| word.starts_with(qw)))
 }
 
 #[cfg(test)]
@@ -457,6 +469,29 @@ mod tests {
         let ban = make_test_ban();
         let results = ban.search("paris", 1);
         assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn search_exact_match_survives_many_earlier_substring_hits() {
+        // 100 substring hits sit before the exact match in index order.
+        let mut entries: Vec<BanEntry> = (0..100)
+            .map(|i| make_entry(&format!("Rue Xrivoli {i:03}"), 2.0, 48.0))
+            .collect();
+        entries.push(make_entry("Rivoli", 2.0, 48.0));
+        let ban = BanData { entries };
+
+        let results = ban.search("rivoli", 5);
+        assert_eq!(results.len(), 5);
+        assert_eq!(results[0].label, "Rivoli", "exact match must rank first");
+        assert_eq!(results[1].label, "Rue Xrivoli 000");
+    }
+
+    #[test]
+    fn search_all_words_tier_ignores_street_numbers() {
+        let ban = make_test_ban();
+        let results = ban.search("12 rivoli rue", 10);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].label.contains("Rivoli"));
     }
 
     // -----------------------------------------------------------------------

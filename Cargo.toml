@@ -10,7 +10,9 @@ serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
 bincode = "1"
 sha2 = "0.10"
-actix-web = "4"
+# zstd left out: its C build (zstd-sys) would undo the "no C toolchain" goal
+# below, and browsers negotiate brotli or gzip anyway.
+actix-web = { version = "4", default-features = false, features = ["macros", "compress-brotli", "compress-gzip", "cookies", "unicode", "compat"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde_yaml = "0.9"

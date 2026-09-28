@@ -187,8 +187,7 @@ fn build_walk_request(
 /// Send a routing request to Valhalla and decode its response, converting
 /// transport-level failures into HTTP 502 error responses.
 async fn call_valhalla(url: &str, req: &RouteRequest) -> Result<RouteResponse, HttpResponse> {
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = crate::shared::http::client()
         .post(url)
         .json(req)
         .send()

@@ -271,7 +271,7 @@ pub async fn get_bike(query: web::Query<BikeQuery>, config: web::Data<AppConfig>
         },
     ];
 
-    let client = reqwest::Client::new();
+    let client = crate::shared::http::client();
     let include_maneuvers = config.routing.maneuvers;
 
     let profiles = [
@@ -280,9 +280,10 @@ pub async fn get_bike(query: web::Query<BikeQuery>, config: web::Data<AppConfig>
         (&config.bike.road, BIKE_PROFILES[2]),
     ];
 
-    let mut journeys = Vec::with_capacity(profiles.len());
-
-    for (profile, type_name) in &profiles {
+    // The three profiles are independent Valhalla round trips (route, then
+    // elevation): running them concurrently makes the endpoint cost one
+    // profile's latency instead of three.
+    let profile_futs = profiles.iter().map(|(profile, type_name)| {
         let req = RouteRequest {
             locations: locations.clone(),
             costing: "bicycle".to_string(),
@@ -292,13 +293,23 @@ pub async fn get_bike(query: web::Query<BikeQuery>, config: web::Data<AppConfig>
                 language: query.language.clone(),
             },
         };
-
-        let resp = client.post(&valhalla_url).json(&req).send().await;
-        match process_response(resp, type_name, &client, &valhalla_base, include_maneuvers).await {
-            Ok(j) => journeys.push(j),
-            Err(e) => return e,
+        let client = &client;
+        let valhalla_url = &valhalla_url;
+        let valhalla_base = &valhalla_base;
+        async move {
+            let resp = client.post(valhalla_url).json(&req).send().await;
+            process_response(resp, type_name, client, valhalla_base, include_maneuvers).await
         }
-    }
+    });
+
+    let journeys = match futures_util::future::join_all(profile_futs)
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(j) => j,
+        Err(e) => return e,
+    };
 
     HttpResponse::Ok().json(BikeResponse { journeys })
 }

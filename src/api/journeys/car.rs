@@ -127,8 +127,12 @@ pub async fn get_car(query: web::Query<CarQuery>, config: web::Data<AppConfig>) 
         },
     };
 
-    let client = reqwest::Client::new();
-    let resp = match client.post(&valhalla_url).json(&valhalla_req).send().await {
+    let resp = match crate::shared::http::client()
+        .post(&valhalla_url)
+        .json(&valhalla_req)
+        .send()
+        .await
+    {
         Ok(r) => r,
         Err(e) => {
             return HttpResponse::BadGateway().json(serde_json::json!({
