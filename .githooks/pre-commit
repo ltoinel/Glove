@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Pre-commit lint: the same checks as the CI lint steps (.github/workflows/ci.yml),
+# run only for the parts of the tree the commit touches.
+#
+# Enable once per clone:   git config core.hooksPath .githooks
+# Bypass in an emergency:  git commit --no-verify
+#
+# Checks run on the working tree, not on the staged snapshot: with partially
+# staged files, the result may differ from what CI sees.
+set -e
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+log()  { echo -e "${CYAN}[pre-commit]${NC} $1"; }
+fail() { echo -e "${RED}[pre-commit]${NC} $1"; exit 1; }
+
+STAGED="$(git diff --cached --name-only --diff-filter=ACMR)"
+
+staged_matches() { grep -qE "$1" <<<"$STAGED"; }
+
+if staged_matches '^(src/.*\.rs|Cargo\.(toml|lock))$'; then
+    log "cargo fmt --check"
+    cargo fmt -- --check || fail "Formatting differs. Run 'cargo fmt' and stage the result."
+
+    log "cargo clippy -- -D warnings"
+    cargo clippy --quiet -- -D warnings || fail "Clippy reported warnings (CI denies them)."
+fi
+
+if staged_matches '^portal/'; then
+    [ -d portal/node_modules ] || fail "portal/node_modules missing. Run 'npm ci' in portal/ first."
+    log "npm run lint (portal)"
+    (cd portal && npm run --silent lint) || fail "ESLint failed. 'npx eslint . --fix' fixes some of it."
+fi
+
+echo -e "${GREEN}[pre-commit]${NC} Lint OK."
