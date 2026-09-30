@@ -88,14 +88,17 @@ function StopPicker({ label, value, onChange, required }) {
           label={label}
           required={required}
           onChange={(e) => search(e.target.value)}
-          InputProps={{
-            ...params.InputProps,
-            endAdornment: (
-              <>
-                {loading ? <CircularProgress size={16} /> : null}
-                {params.InputProps.endAdornment}
-              </>
-            ),
+          slotProps={{
+            ...params.slotProps,
+            input: {
+              ...params.slotProps.input,
+              endAdornment: (
+                <>
+                  {loading ? <CircularProgress size={16} /> : null}
+                  {params.slotProps.input.endAdornment}
+                </>
+              ),
+            },
           }}
         />
       )}
@@ -125,14 +128,17 @@ function LinePicker({ label, value, onChange, required }) {
           label={label}
           required={required}
           onChange={(e) => search(e.target.value)}
-          InputProps={{
-            ...params.InputProps,
-            endAdornment: (
-              <>
-                {loading ? <CircularProgress size={16} /> : null}
-                {params.InputProps.endAdornment}
-              </>
-            ),
+          slotProps={{
+            ...params.slotProps,
+            input: {
+              ...params.slotProps.input,
+              endAdornment: (
+                <>
+                  {loading ? <CircularProgress size={16} /> : null}
+                  {params.slotProps.input.endAdornment}
+                </>
+              ),
+            },
           }}
         />
       )}
@@ -436,7 +442,7 @@ export default function DisruptionsPanel() {
 
             <TextField
               size="small" required type="datetime-local" label={t('disruptionStartsAt')}
-              InputLabelProps={{ shrink: true }} value={form.startsAt}
+              slotProps={{ inputLabel: { shrink: true } }} value={form.startsAt}
               onChange={(e) => setForm({ ...form, startsAt: e.target.value })}
             />
             <FormControlLabel
@@ -451,7 +457,7 @@ export default function DisruptionsPanel() {
             {!form.ongoing && (
               <TextField
                 size="small" required type="datetime-local" label={t('disruptionEndsAt')}
-                InputLabelProps={{ shrink: true }} value={form.endsAt}
+                slotProps={{ inputLabel: { shrink: true } }} value={form.endsAt}
                 onChange={(e) => setForm({ ...form, endsAt: e.target.value })}
               />
             )}
