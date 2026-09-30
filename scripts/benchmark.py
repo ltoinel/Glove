@@ -7,7 +7,7 @@ origin/destination pairs across Ile-de-France, measures response times,
 and generates a performance report image.
 
 Usage:
-    python3 bin/benchmark.py [--host HOST] [--port PORT] [--rounds ROUNDS]
+    python3 scripts/benchmark.py [--host HOST] [--port PORT] [--rounds ROUNDS] [--datetime YYYYMMDDTHHMMSS]
 
 Requires: matplotlib (pip install matplotlib)
 """
@@ -229,7 +229,7 @@ def main():
     parser.add_argument("--rounds", type=int, default=5, help="Number of rounds (default: 5)")
     parser.add_argument("--concurrency", type=int, default=4, help="Concurrent threads (default: 4)")
     parser.add_argument("--datetime", default="20260406T083000", help="Departure datetime")
-    parser.add_argument("--output", default="docs/benchmark.png", help="Output image path")
+    parser.add_argument("--output", default="book/src/images/benchmark.png", help="Output image path")
     args = parser.parse_args()
 
     base_url = f"http://{args.host}:{args.port}"
