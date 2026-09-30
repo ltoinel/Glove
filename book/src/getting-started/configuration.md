@@ -24,7 +24,7 @@ server:
 | `workers` | Actix worker threads. `0` = one per CPU core | `1` |
 | `log_level` | Minimum log level | `info` |
 | `shutdown_timeout` | Seconds to wait for in-flight requests on shutdown | `30` |
-| `api_key` | API key for the reload endpoint. Empty disables the endpoint | `""` |
+| `api_key` | API key (`X-Api-Key`) for `POST /api/gtfs/reload` and disruption writes. Empty disables them. Overridden by `GLOVE_API_KEY` | `""` |
 | `cors_origins` | List of allowed CORS origins. `["*"]` allows all. `bin/start.sh` serves the portal on its own domain, so its origin must be listed (see [Custom domains and ports](./installation.md#custom-domains-and-ports)) | `[]` (the shipped `config.yaml` lists `https://portal.glove`) |
 | `rate_limit` | Maximum requests per second per IP address | `20` |
 
@@ -86,12 +86,13 @@ valhalla:
 
 The Valhalla routing engine is used for walking, cycling, and driving directions. It runs as a separate Docker container. When OSM data includes indoor information, Valhalla provides indoor maneuvers (elevator, stairs, escalator, enter/exit building) in transfer and walking sections.
 
-Two environment variables override these settings without editing the file — used by Docker Compose, where Valhalla is the `valhalla` service rather than `localhost`:
+Environment variables override a few settings without editing the file — used by Docker Compose, where Valhalla is the `valhalla` service rather than `localhost`, and to keep the API key out of files and images:
 
 | Variable | Overrides |
 |----------|-----------|
 | `GLOVE_VALHALLA_HOST` | `valhalla.host` (ignored when empty) |
 | `GLOVE_VALHALLA_PORT` | `valhalla.port` (ignored, with a warning, when not a valid port) |
+| `GLOVE_API_KEY` | `server.api_key` (applied even when empty, which disables the protected endpoints) |
 
 ## Traffic
 

@@ -7,6 +7,7 @@ use std::sync::Arc;
 use utoipa::ToSchema;
 
 use crate::shared::config::AppConfig;
+use crate::shared::util::constant_time_eq;
 use crate::transit::gtfs::GtfsData;
 use crate::transit::raptor::RaptorData;
 
@@ -664,7 +665,7 @@ pub async fn post_reload(
         .get("X-Api-Key")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if provided_key != expected_key {
+    if !constant_time_eq(provided_key, expected_key) {
         return HttpResponse::Unauthorized().json(serde_json::json!({
             "error": { "id": "unauthorized", "message": "Invalid or missing X-Api-Key header" }
         }));

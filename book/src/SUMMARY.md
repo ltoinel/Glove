@@ -38,7 +38,6 @@
 - [GTFS Data Overview](./idfm/gtfs-overview.md)
 - [Routing Statistics](./idfm/routing-stats.md)
 - [Indoor Routing Coverage](./idfm/indoor-coverage.md)
-- [Pathway Time Gaps](./idfm/pathway-time-gaps.md)
 
 # Sytadin
 

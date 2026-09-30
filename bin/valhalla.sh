@@ -6,6 +6,8 @@ CONFIG="$ROOT/config.yaml"
 OSM_DIR="$ROOT/data/osm"
 VALHALLA_DIR="$ROOT/data/valhalla"
 CONTAINER_NAME="glove-valhalla"
+# Same digest as docker/docker-compose.yml: both share data/valhalla.
+VALHALLA_IMAGE="ghcr.io/gis-ops/docker-valhalla/valhalla:latest@sha256:060da5b92e6024a67f65135c236d918b021d63e73d1808a0d55b7e7cbd17240c"
 
 # Read Valhalla port from config.yaml (default: 8002)
 VALHALLA_PORT=8002
@@ -53,7 +55,7 @@ do_start() {
     fi
 
     log "Pulling latest Valhalla image..."
-    $DOCKER pull ghcr.io/gis-ops/docker-valhalla/valhalla:latest
+    $DOCKER pull "$VALHALLA_IMAGE"
 
     log "Starting Valhalla on port $VALHALLA_PORT..."
     mkdir -p "$VALHALLA_DIR"
@@ -71,7 +73,7 @@ do_start() {
         -e build_transit=False \
         -e server_threads=2 \
         -e include_platforms=True \
-        ghcr.io/gis-ops/docker-valhalla/valhalla:latest
+        "$VALHALLA_IMAGE"
 
     ok "Valhalla container started: $CONTAINER_NAME"
     log "Building tiles from OSM data (this may take a while)..."
