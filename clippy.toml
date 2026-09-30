@@ -1,0 +1,5 @@
+# actix-web 4.15 grew `HttpResponse` past clippy's default 128-byte threshold.
+# Handlers return it as an early-exit `Err` (`Result<T, HttpResponse>`) on cold,
+# per-request error paths, where the extra stack copy is irrelevant; boxing it
+# would only add noise at every call site.
+large-error-threshold = 256
