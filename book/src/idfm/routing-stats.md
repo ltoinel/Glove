@@ -8,36 +8,38 @@ After loading and pre-processing the GTFS data, Glove builds a RAPTOR index with
 
 | Metric | Value |
 |--------|------:|
-| Stops indexed | 53,705 |
-| Trips loaded | 390,650 |
-| Stop times | 8,367,732 |
-| Patterns (grouped trips) | ~10,000 |
-| Transfer pairs | 201,582 |
+| Stops indexed | 53,446 |
+| Trips loaded | 496,393 |
+| Stop times | 11,019,607 |
+| Patterns (grouped trips) | 10,001 |
+| Transfer pairs | 192,366 |
 | Index build time | 10-30 seconds |
-| RAM usage (resident) | ~265 MB |
+| RAM usage (resident) | ~405 MB |
 
 ```admonish info title="Pattern Grouping"
-Trips with identical stop sequences are grouped into **patterns**. For the IDFM dataset, ~391,000 trips are reduced to ~10,000 patterns — a **~39x** reduction that directly speeds up the RAPTOR scan phase.
+Trips with identical stop sequences are grouped into **patterns**. For the IDFM dataset, ~496,000 trips are reduced to ~10,000 patterns — a **~50x** reduction that directly speeds up the RAPTOR scan phase.
 ```
 
 ## Query Performance
 
-Benchmark across 12 representative origin/destination pairs covering Ile-de-France (10 rounds, single-threaded):
+Benchmark across 12 representative origin/destination pairs covering Ile-de-France (10 rounds, one request at a time, measured 2026-10-01 — end-to-end API time including Valhalla transfer enrichment):
 
 ![Benchmark](../images/benchmark.png)
 
 | Metric | Value |
 |--------|------:|
-| Min | 215 ms |
-| Average | 371 ms |
-| Median | 370 ms |
-| p95 | 515 ms |
-| Max | 531 ms |
+| Min | 10 ms |
+| Average | 166 ms |
+| Median | 192 ms |
+| p95 | 386 ms |
+| Max | 542 ms |
+
+Per-route figures, concurrent load and methodology: see [Performance](../operations/performance.md).
 
 Run the benchmark:
 
 ```bash
-python3 bin/benchmark.py --rounds 10 --concurrency 1
+python3 scripts/benchmark.py --rounds 10 --concurrency 1 --datetime 20261006T083000
 ```
 
 ## Indoor Routing Coverage

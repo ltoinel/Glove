@@ -294,10 +294,11 @@ function PlaceAutocomplete({ label, value, onChange, icon, placeholder }) {
       renderInput={(params) => (
         <TextField {...params} label={label} placeholder={placeholder || t('searchPlaceholder')}
           slotProps={{
+            ...params.slotProps,
             input: {
-              ...params.InputProps,
+              ...params.slotProps.input,
               startAdornment: (
-                <>{icon}<Box sx={{ mr: 0.5 }} />{params.InputProps.startAdornment}</>
+                <>{icon}<Box sx={{ mr: 0.5 }} />{params.slotProps.input.startAdornment}</>
               ),
             },
           }}

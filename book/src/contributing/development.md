@@ -92,7 +92,7 @@ All checks must pass before merging.
 RUST_LOG=debug cargo run
 
 # Run benchmarks
-python3 bin/benchmark.py --rounds 10
+python3 scripts/benchmark.py --rounds 10 --concurrency 1 --datetime <YYYYMMDDTHHMMSS in the GTFS window>
 
 # Start Valhalla for walk/bike/car routing
 bin/valhalla.sh

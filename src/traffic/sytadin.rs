@@ -305,8 +305,8 @@ fn parse_diffusion_date(xml: &[u8]) -> Option<String> {
                 return e
                     .attributes()
                     .flatten()
-                    .find(|a| a.key.as_ref() == b"DateDiffusion")
-                    .and_then(|a| String::from_utf8(a.value.to_vec()).ok())
+                    .find(|a| a.key.as_ref() == "DateDiffusion")
+                    .map(|a| a.value.into_owned())
                     .filter(|s| !s.trim().is_empty());
             }
             Ok(Event::Eof) | Err(_) => return None,
@@ -327,8 +327,8 @@ fn parse_segment_states(xml: &[u8]) -> HashMap<u32, SegState> {
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => match e.local_name().as_ref() {
-                b"SegmentDynamique" => current_id = attr_u32(&e, b"ID_SEGMENT"),
-                b"EtatTrafic" => etat = Some(String::new()),
+                "SegmentDynamique" => current_id = attr_u32(&e, "ID_SEGMENT"),
+                "EtatTrafic" => etat = Some(String::new()),
                 _ => {}
             },
             Ok(Event::Text(t)) => {
@@ -341,7 +341,7 @@ fn parse_segment_states(xml: &[u8]) -> HashMap<u32, SegState> {
                     push_reference(text, &r);
                 }
             }
-            Ok(Event::End(e)) if e.local_name().as_ref() == b"EtatTrafic" => {
+            Ok(Event::End(e)) if e.local_name().as_ref() == "EtatTrafic" => {
                 if let (Some(id), Some(text)) = (current_id, etat.take())
                     && let Some(state) = SegState::from_label(text.trim())
                 {
@@ -393,7 +393,7 @@ fn parse_events(xml: &[u8], geometry: &TrafficGeometry) -> Vec<TrafficEvent> {
     let mut buf = Vec::new();
     let mut events = Vec::new();
     let mut current: Option<EventBuilder> = None;
-    let mut tag: Vec<u8> = Vec::new();
+    let mut tag = String::new();
     // Text of the element just opened. Only that text counts: the indentation
     // between two closing tags must not overwrite a field already captured,
     // hence the reset on every start and end tag.
@@ -402,8 +402,8 @@ fn parse_events(xml: &[u8], geometry: &TrafficGeometry) -> Vec<TrafficEvent> {
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
-                let name = e.local_name().as_ref().to_vec();
-                if name == b"Evenement" {
+                let name = e.local_name().as_ref().to_string();
+                if name == "Evenement" {
                     current = Some(EventBuilder::default());
                 }
                 tag = name;
@@ -420,7 +420,7 @@ fn parse_events(xml: &[u8], geometry: &TrafficGeometry) -> Vec<TrafficEvent> {
                 }
                 tag.clear();
                 text.clear();
-                if e.local_name().as_ref() == b"Evenement"
+                if e.local_name().as_ref() == "Evenement"
                     && let Some(ev) = current.take()
                     && let Some(event) = ev.build(geometry)
                 {
@@ -440,14 +440,14 @@ fn parse_events(xml: &[u8], geometry: &TrafficGeometry) -> Vec<TrafficEvent> {
 }
 
 /// Route a text node to the matching [`EventBuilder`] field by its tag.
-fn assign_event_field(ev: &mut EventBuilder, tag: &[u8], text: &str) {
+fn assign_event_field(ev: &mut EventBuilder, tag: &str, text: &str) {
     match tag {
-        b"QualificationTypeEvenement" => ev.kind = text.to_string(),
-        b"NatureTravaux" => ev.detail = text.to_string(),
+        "QualificationTypeEvenement" => ev.kind = text.to_string(),
+        "NatureTravaux" => ev.detail = text.to_string(),
         // Keep an explicit comment only when no richer detail was captured.
-        b"Commentaire" if ev.detail.trim().is_empty() => ev.detail = text.to_string(),
-        b"DateFinPrevue" => ev.end = text.to_string(),
-        b"Segment" if ev.first_segment.is_none() => ev.first_segment = text.trim().parse().ok(),
+        "Commentaire" if ev.detail.trim().is_empty() => ev.detail = text.to_string(),
+        "DateFinPrevue" => ev.end = text.to_string(),
+        "Segment" if ev.first_segment.is_none() => ev.first_segment = text.trim().parse().ok(),
         _ => {}
     }
 }
@@ -478,12 +478,10 @@ fn midpoint(coords: &[[f64; 2]]) -> [f64; 2] {
 ///
 /// Since quick-xml 0.38 a text node stops at each entity reference, which
 /// arrives as its own [`Event::GeneralRef`]: element text is rebuilt from the
-/// pieces with [`push_reference`].
+/// pieces with [`push_reference`]. Since 0.42 the reader decodes as it goes,
+/// so the node is already a `str` (malformed UTF-8 surfaces as a reader error).
 fn push_text(out: &mut String, text: &quick_xml::events::BytesText) {
-    match text.decode() {
-        Ok(decoded) => out.push_str(&decoded),
-        Err(e) => debug!("Undecodable Sytadin text node skipped: {e}"),
-    }
+    out.push_str(text);
 }
 
 /// Append the character an entity reference stands for (`&amp;`, `&#233;`...).
@@ -491,24 +489,18 @@ fn push_text(out: &mut String, text: &quick_xml::events::BytesText) {
 fn push_reference(out: &mut String, reference: &BytesRef) {
     if let Ok(Some(c)) = reference.resolve_char_ref() {
         out.push(c);
-    } else if let Ok(name) = reference.decode()
-        && let Some(resolved) = quick_xml::escape::resolve_predefined_entity(&name)
-    {
+    } else if let Some(resolved) = quick_xml::escape::resolve_predefined_entity(reference) {
         out.push_str(resolved);
     } else {
         debug!("Unknown entity reference in Sytadin feed skipped");
     }
 }
 
-fn attr_u32(e: &BytesStart, key: &[u8]) -> Option<u32> {
+fn attr_u32(e: &BytesStart, key: &str) -> Option<u32> {
     e.attributes()
         .flatten()
         .find(|a| a.key.as_ref() == key)
-        .and_then(|a| {
-            std::str::from_utf8(&a.value)
-                .ok()
-                .and_then(|s| s.trim().parse().ok())
-        })
+        .and_then(|a| a.value.trim().parse().ok())
 }
 
 #[cfg(test)]

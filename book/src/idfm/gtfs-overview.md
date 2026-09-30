@@ -14,28 +14,28 @@ All GTFS data is loaded into memory at startup. There is no database — the ent
 
 | File | Records | What it contains |
 |------|--------:|-----------------|
-| **agencies** | 61 | Transit operators (RATP, SNCF, local bus companies...) |
-| **routes** | 2,011 | Transit lines — each bus line, metro line, or RER line is a route |
-| **stops** | 53,705 | Physical locations where passengers board or alight |
-| **trips** | 390,650 | Individual vehicle runs — one bus doing its morning route is one trip |
-| **stop_times** | 8,367,732 | The schedule: what time each trip arrives/departs at each stop |
-| **transfers** | 201,582 | Walking connections between nearby stops (for changing lines) |
-| **calendars** | 744 | Service patterns: which days each schedule runs (weekdays, weekends...) |
-| **calendar_dates** | 1,150 | Exceptions to the calendar (holidays, strikes, special events...) |
+| **agencies** | 62 | Transit operators (RATP, SNCF, local bus companies...) |
+| **routes** | 2,025 | Transit lines — each bus line, metro line, or RER line is a route |
+| **stops** | 53,446 | Physical locations where passengers board or alight |
+| **trips** | 496,393 | Individual vehicle runs — one bus doing its morning route is one trip |
+| **stop_times** | 11,019,607 | The schedule: what time each trip arrives/departs at each stop |
+| **transfers** | 192,366 | Walking connections between nearby stops (for changing lines) |
+| **calendars** | 1,010 | Service patterns: which days each schedule runs (weekdays, weekends...) |
+| **calendar_dates** | 2,140 | Exceptions to the calendar (holidays, strikes, special events...) |
 
 ### Understanding the scale
 
 To put these numbers in perspective:
 
-- **10.9 million stop times** means the dataset contains nearly 11 million individual "a vehicle stops here at this time" records. This is the bulk of the data.
-- **390,650 trips** represent every individual vehicle departure across all lines, all day, all week. A single metro line might have hundreds of trips per day.
-- **201,582 transfers** define where passengers can walk between stops to change lines. For example, walking from a metro platform to a nearby bus stop.
+- **11 million stop times** means the dataset contains nearly 11 million individual "a vehicle stops here at this time" records. This is the bulk of the data.
+- **496,393 trips** represent every individual vehicle departure across all lines, all day, all week. A single metro line might have hundreds of trips per day.
+- **192,366 transfers** define where passengers can walk between stops to change lines. For example, walking from a metro platform to a nearby bus stop.
 
 ## Understanding GTFS Objects
 
 ### Agencies
 
-An **agency** is a transit operator. Ile-de-France has 61 agencies, from large operators like RATP (Paris metro, buses, tramways) to small local bus companies covering specific towns.
+An **agency** is a transit operator. Ile-de-France has 62 agencies, from large operators like RATP (Paris metro, buses, tramways) to small local bus companies covering specific towns.
 
 ### Routes
 

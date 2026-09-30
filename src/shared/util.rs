@@ -68,6 +68,21 @@ fn hash_file_metadata(hasher: &mut Sha256, name: &str, meta: &Metadata) {
     }
 }
 
+/// Hex-encode a finished SHA-256 digest.
+///
+/// sha2 0.11 returns a `hybrid_array::Array`, which no longer implements
+/// `LowerHex`, so the digest is formatted byte by byte.
+fn hex_digest(hasher: Sha256) -> String {
+    use std::fmt::Write;
+    hasher
+        .finalize()
+        .iter()
+        .fold(String::with_capacity(64), |mut hex, byte| {
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        })
+}
+
 /// Compute a SHA-256 fingerprint of a directory based on file metadata.
 ///
 /// Hashes each listed file's name, size and modification time. Files that
@@ -80,7 +95,7 @@ pub fn dir_fingerprint(dir: &Path, files: &[&str]) -> String {
             hash_file_metadata(&mut hasher, name, &meta);
         }
     }
-    format!("{:x}", hasher.finalize())
+    hex_digest(hasher)
 }
 
 /// Compute a SHA-256 fingerprint by scanning a directory for matching files.
@@ -105,7 +120,7 @@ pub fn dir_fingerprint_glob(dir: &Path, prefix: &str, suffix: &str) -> String {
             }
         }
     }
-    format!("{:x}", hasher.finalize())
+    hex_digest(hasher)
 }
 
 /// Keeps the `capacity` smallest keys offered, in a bounded max-heap.

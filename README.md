@@ -10,7 +10,7 @@
 
 **A fast multi-modal journey planner for the whole Île-de-France network — one Rust binary, no database.**
 
-Glove loads GTFS into memory, builds a [RAPTOR](https://www.microsoft.com/en-us/research/wp-content/uploads/2012/01/raptor_alenex.pdf) index and answers journey searches in **~30 ms** (median, [benchmark](https://ltoinel.github.io/Glove/operations/performance.html)) over every metro, RER, train, tram and bus line of the region. Walking, cycling and driving come from [Valhalla](https://github.com/valhalla/valhalla); real-time delays, operator-declared disruptions and live road traffic are layered on top at query time. A React portal puts it all on a map.
+Glove loads GTFS into memory, builds a [RAPTOR](https://www.microsoft.com/en-us/research/wp-content/uploads/2012/01/raptor_alenex.pdf) index and answers journey searches in **~190 ms** end to end (median, alternatives and walking transfers included, [benchmark](https://ltoinel.github.io/Glove/operations/performance.html)) over every metro, RER, train, tram and bus line of the region. Walking, cycling and driving come from [Valhalla](https://github.com/valhalla/valhalla); real-time delays, operator-declared disruptions and live road traffic are layered on top at query time. A React portal puts it all on a map.
 
 ![Glove screenshot](book/src/images/screenshot.jpg)
 
