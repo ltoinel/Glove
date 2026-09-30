@@ -21,6 +21,11 @@
 	# HTTPS port, e.g. https://portal.glove:8443).
 	http_port {$GLOVE_HTTP_PORT:80}
 	https_port {$GLOVE_HTTPS_PORT:443}
+	# One IPv4 and one IPv6 socket instead of a single dual-stack one. Under
+	# WSL2 (NAT mode), localhost forwarding mirrors a dual-stack listener on
+	# Windows' ::1 only, so a browser resolving portal.glove to 127.0.0.1
+	# gets "connection refused"; an explicit IPv4 socket is relayed there.
+	default_bind tcp4/0.0.0.0 tcp6/[::]
 }
 
 (tls_local) {
