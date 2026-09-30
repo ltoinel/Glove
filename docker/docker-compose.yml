@@ -4,13 +4,30 @@
 #
 # Ports are published on loopback only: Caddy (or a local browser) reaches them,
 # the network does not.
+#
+# Hardening shared by the services we build: no privilege escalation (setuid binaries
+# stay inert) and no Linux capabilities — none of them binds a port < 1024 or
+# changes file ownership. The api and portal root filesystems are read-only;
+# only their data volume and a tmpfs /tmp are writable.
+x-hardening: &hardening
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
 
 services:
   # REST API. The service name is what docker/nginx.conf proxies /api to.
   api:
+    <<: *hardening
     build:
       context: ..
       dockerfile: docker/Dockerfile.api
+    # Run as the owner of the bind-mounted data/ (caches, tiles, disruptions
+    # are written there); bin/start.sh exports both from `id -u` / `id -g`.
+    user: "${GLOVE_UID:-1000}:${GLOVE_GID:-1000}"
+    read_only: true
+    tmpfs:
+      - /tmp
     ports:
       - "127.0.0.1:8080:8080"
     volumes:
@@ -20,6 +37,9 @@ services:
       # The host's config.yaml says localhost; here Valhalla is a service.
       - GLOVE_VALHALLA_HOST=valhalla
       - GLOVE_VALHALLA_PORT=8002
+      # Passed through only when set in the caller's environment; otherwise
+      # the api_key of the mounted config.yaml applies.
+      - GLOVE_API_KEY
     depends_on:
       - valhalla
     restart: unless-stopped
@@ -27,11 +47,16 @@ services:
   # Static portal + /api reverse proxy (nginx): the SPA calls the API on its
   # own origin, so no CORS setup is needed.
   portal:
+    <<: *hardening
     build:
       context: ..
       dockerfile: docker/Dockerfile.portal
+    # nginx-unprivileged keeps its pid file and temp paths under /tmp.
+    read_only: true
+    tmpfs:
+      - /tmp
     ports:
-      - "127.0.0.1:3000:80"
+      - "127.0.0.1:3000:8080"
     depends_on:
       - api
     restart: unless-stopped
@@ -39,8 +64,14 @@ services:
   # Same image, data and options as bin/valhalla.sh, so both share the tiles in
   # data/valhalla instead of rebuilding them. Not published: the api reaches it
   # over the Compose network, and port 8002 stays free for bin/valhalla.sh.
+  #
+  # Pinned by digest: `latest` of a third-party image would change under us
+  # silently. This is the last upstream build (2024-10-12, Valhalla 3.5.1).
+  # No hardening anchor: its entrypoint runs as the `valhalla` user but calls
+  # sudo to fix volume ownership, which no-new-privileges / cap_drop break.
+  # It publishes no port and is only reachable over the Compose network.
   valhalla:
-    image: ghcr.io/gis-ops/docker-valhalla/valhalla:latest
+    image: ghcr.io/gis-ops/docker-valhalla/valhalla:latest@sha256:060da5b92e6024a67f65135c236d918b021d63e73d1808a0d55b7e7cbd17240c
     volumes:
       - ../data/osm:/custom_files
       - ../data/valhalla:/custom_files/valhalla_tiles

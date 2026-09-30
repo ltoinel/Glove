@@ -240,6 +240,18 @@ run_prod() {
     print_banner "Glove is running"
 }
 
+# `docker compose up` with the variables docker-compose.yml reads: the api
+# container runs as the owner of data/ (it writes there), and GLOVE_API_KEY,
+# when set, replaces the key of config.yaml. Passed through `env` because a
+# `sudo docker` would otherwise strip them from the environment.
+compose_up() {
+    local vars=("GLOVE_UID=$(id -u)" "GLOVE_GID=$(id -g)")
+    [ -n "${GLOVE_API_KEY+set}" ] && vars+=("GLOVE_API_KEY=$GLOVE_API_KEY")
+    local sudo=""
+    [ "$DOCKER" = "sudo docker" ] && sudo="sudo"
+    $sudo env "${vars[@]}" docker compose -f "$COMPOSE_FILE" up -d --build
+}
+
 # The images are rebuilt on every start; Docker's layer cache makes that
 # cheap when nothing changed. The portal container proxies /api to the api
 # container itself, so the SPA is same-origin and needs no CORS setup;
@@ -248,7 +260,7 @@ run_docker() {
     log "Starting in DOCKER mode (api, portal, valhalla images)..."
     log "Building and starting containers..."
     COMPOSE_STARTED=true
-    $DOCKER compose -f "$COMPOSE_FILE" up -d --build
+    compose_up
 
     start_caddy proxy
     wait_for_backend api_container_alive

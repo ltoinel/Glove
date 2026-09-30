@@ -708,10 +708,16 @@ impl AppConfig {
     ///
     /// Only what differs between a host and a container: in Docker Compose
     /// Valhalla is another service (`valhalla`), not `localhost`, while the
-    /// mounted `config.yaml` stays the one used on the host.
+    /// mounted `config.yaml` stays the one used on the host. The API key is
+    /// a secret, so it can come from the environment instead of a file baked
+    /// into an image; set but empty, it disables the protected endpoints.
     /// `lookup` stands in for `std::env::var` so tests need not mutate the
     /// process environment.
     fn apply_env_overrides(&mut self, lookup: impl Fn(&str) -> Option<String>) {
+        if let Some(key) = lookup("GLOVE_API_KEY") {
+            info!("server.api_key overridden by GLOVE_API_KEY");
+            self.server.api_key = key;
+        }
         if let Some(host) = lookup("GLOVE_VALHALLA_HOST").filter(|h| !h.is_empty()) {
             info!("valhalla.host overridden by GLOVE_VALHALLA_HOST: {host}");
             self.valhalla.host = host;
@@ -740,6 +746,17 @@ mod tests {
         });
         assert_eq!(cfg.valhalla.host, "valhalla");
         assert_eq!(cfg.valhalla.port, 8003);
+    }
+
+    #[test]
+    fn env_override_replaces_api_key_even_when_empty() {
+        let mut cfg = AppConfig::default();
+        cfg.server.api_key = "from-file".into();
+        cfg.apply_env_overrides(|key| (key == "GLOVE_API_KEY").then(|| "from-env".into()));
+        assert_eq!(cfg.server.api_key, "from-env");
+
+        cfg.apply_env_overrides(|key| (key == "GLOVE_API_KEY").then(String::new));
+        assert!(cfg.server.api_key.is_empty());
     }
 
     #[test]

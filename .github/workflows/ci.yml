@@ -230,5 +230,19 @@ jobs:
           context: .
           file: ${{ matrix.dockerfile }}
           push: false
+          # Loaded into the runner's daemon so the scan below sees the image.
+          load: true
+          tags: glove-${{ matrix.image }}:ci
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+
+      # Fails on HIGH/CRITICAL vulnerabilities that have a fix available, in
+      # the OS packages and the bundled binaries alike. Unfixed ones are
+      # reported upstream's problem, not a reason to block every PR.
+      - name: Scan image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: glove-${{ matrix.image }}:ci
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'

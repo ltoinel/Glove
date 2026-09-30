@@ -64,6 +64,10 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Attach an SBOM and a full SLSA provenance attestation to the pushed
+          # image, so users can audit what it contains and how it was built.
+          sbom: true
+          provenance: mode=max
           # Same cache scopes as the CI build, so a release reuses PR layers.
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}

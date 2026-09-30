@@ -1,25 +1,43 @@
 # Glove backend (REST API) image.
 # The React portal is built and served by a SEPARATE image (docker/Dockerfile.portal),
 # which proxies /api requests to this backend. The two processes stay fully decoupled.
+#
+# Base images are pinned by digest (tag kept for readability): a rebuild gets
+# exactly the layers that were reviewed, and Dependabot bumps both together.
 
 # Stage 1: Build backend
-FROM rust:1.98-bookworm AS backend
+FROM rust:1.98-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS backend
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src/ src/
-RUN cargo build --release
+# --locked: build the exact dependency set cargo-deny checked, never a fresh resolve.
+RUN cargo build --release --locked
 
 # Stage 2: Runtime
-FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/*
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
+# ca-certificates only: the API calls HTTPS upstreams (tiles, real-time feeds,
+# Sytadin). No curl: the health check below needs nothing but bash.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Unprivileged runtime user. Compose overrides the uid/gid to match the owner
+# of the bind-mounted data/ (see docker-compose.yml).
+RUN groupadd --system --gid 10001 glove \
+    && useradd --system --uid 10001 --gid glove --home-dir /app --shell /usr/sbin/nologin glove
 
 WORKDIR /app
 COPY --from=backend /app/target/release/glove /app/glove
 COPY config.yaml /app/config.yaml
+# The image is published: never ship the repository's development API key.
+# Empty = reload and disruption writes disabled until GLOVE_API_KEY is set.
+RUN sed -i -E 's/^([[:space:]]*api_key:).*/\1 ""/' /app/config.yaml \
+    && grep -qE '^[[:space:]]*api_key: ""$' /app/config.yaml \
+    && mkdir -p /app/data && chown glove:glove /app/data
 
+USER glove:glove
 EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-  CMD curl -sf http://localhost:8080/api/status || exit 1
+  CMD ["bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /api/status HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n' >&3 && head -n1 <&3 | grep -q ' 200 '"]
 
 ENTRYPOINT ["/app/glove"]

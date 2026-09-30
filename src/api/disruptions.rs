@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
 use crate::shared::config::AppConfig;
+use crate::shared::util::constant_time_eq;
 use crate::transit::disruptions::model::{Cause, Disruption, DisruptionInput};
 use crate::transit::disruptions::overlay;
 use crate::transit::disruptions::store::{DisruptionStore, StoreError};
@@ -320,7 +321,7 @@ fn authorize(req: &actix_web::HttpRequest, config: &AppConfig) -> Result<(), Htt
         .get("X-Api-Key")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if provided != expected {
+    if !constant_time_eq(provided, expected) {
         return Err(HttpResponse::Unauthorized().json(serde_json::json!({
             "error": { "id": "unauthorized", "message": "Invalid or missing X-Api-Key header" }
         })));

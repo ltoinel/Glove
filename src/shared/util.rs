@@ -68,6 +68,19 @@ fn hash_file_metadata(hasher: &mut Sha256, name: &str, meta: &Metadata) {
     }
 }
 
+/// Compare two secrets in time independent of where they first differ.
+///
+/// A plain `==` returns at the first mismatching byte, which lets a client
+/// guess an API key byte by byte from response timings. Only the length can
+/// still leak, which says nothing about the key's content.
+pub fn constant_time_eq(a: &str, b: &str) -> bool {
+    a.len() == b.len()
+        && a.bytes()
+            .zip(b.bytes())
+            .fold(0u8, |diff, (x, y)| diff | (x ^ y))
+            == 0
+}
+
 /// Hex-encode a finished SHA-256 digest.
 ///
 /// sha2 0.11 returns a `hybrid_array::Array`, which no longer implements
@@ -202,6 +215,15 @@ pub fn parse_from_to(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn constant_time_eq_matches_only_identical_strings() {
+        assert!(constant_time_eq("glove-secret", "glove-secret"));
+        assert!(!constant_time_eq("glove-secret", "glove-secreT"));
+        assert!(!constant_time_eq("glove", "glove-secret"));
+        assert!(!constant_time_eq("", "x"));
+        assert!(constant_time_eq("", ""));
+    }
 
     #[test]
     fn parse_coord_valid() {
