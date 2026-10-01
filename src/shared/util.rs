@@ -68,6 +68,16 @@ fn hash_file_metadata(hasher: &mut Sha256, name: &str, meta: &Metadata) {
     }
 }
 
+/// Great-circle (haversine) distance in meters between two WGS84 points.
+pub fn haversine_meters(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+    const EARTH_RADIUS_M: f64 = 6_371_000.0;
+    let dlat = (lat2 - lat1).to_radians();
+    let dlon = (lon2 - lon1).to_radians();
+    let a = (dlat / 2.0).sin().powi(2)
+        + lat1.to_radians().cos() * lat2.to_radians().cos() * (dlon / 2.0).sin().powi(2);
+    2.0 * EARTH_RADIUS_M * a.sqrt().asin()
+}
+
 /// Compare two secrets in time independent of where they first differ.
 ///
 /// A plain `==` returns at the first mismatching byte, which lets a client

@@ -868,23 +868,13 @@ impl RaptorData {
 }
 
 use crate::shared::text::{RANK_SUBSTRING, match_rank, normalize};
-use crate::shared::util::BestK;
+use crate::shared::util::{BestK, haversine_meters};
 
 /// Approximate squared distance between two points (sufficient for ranking).
 fn haversine_approx(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
     let dlat = lat2 - lat1;
     let dlon = (lon2 - lon1) * lat1.to_radians().cos();
     dlat * dlat + dlon * dlon
-}
-
-/// Haversine distance in meters between two points.
-fn haversine_meters(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
-    const R: f64 = 6_371_000.0; // Earth radius in meters
-    let dlat = (lat2 - lat1).to_radians();
-    let dlon = (lon2 - lon1).to_radians();
-    let a = (dlat / 2.0).sin().powi(2)
-        + lat1.to_radians().cos() * lat2.to_radians().cos() * (dlon / 2.0).sin().powi(2);
-    2.0 * R * a.sqrt().asin()
 }
 
 // ---------------------------------------------------------------------------
@@ -1981,6 +1971,7 @@ pub mod test_support {
                 departure_time: "08:01:00".to_string(),
                 stop_id: "S1".to_string(),
                 stop_sequence: 0,
+                ..Default::default()
             },
             gtfs::StopTime {
                 trip_id: "T1".to_string(),
@@ -1988,6 +1979,7 @@ pub mod test_support {
                 departure_time: "08:11:00".to_string(),
                 stop_id: "S2".to_string(),
                 stop_sequence: 1,
+                ..Default::default()
             },
             gtfs::StopTime {
                 trip_id: "T1".to_string(),
@@ -1995,6 +1987,7 @@ pub mod test_support {
                 departure_time: "08:21:00".to_string(),
                 stop_id: "S3".to_string(),
                 stop_sequence: 2,
+                ..Default::default()
             },
             gtfs::StopTime {
                 trip_id: "T2".to_string(),
@@ -2002,6 +1995,7 @@ pub mod test_support {
                 departure_time: "09:01:00".to_string(),
                 stop_id: "S1".to_string(),
                 stop_sequence: 0,
+                ..Default::default()
             },
             gtfs::StopTime {
                 trip_id: "T2".to_string(),
@@ -2009,6 +2003,7 @@ pub mod test_support {
                 departure_time: "09:11:00".to_string(),
                 stop_id: "S2".to_string(),
                 stop_sequence: 1,
+                ..Default::default()
             },
             gtfs::StopTime {
                 trip_id: "T2".to_string(),
@@ -2016,6 +2011,7 @@ pub mod test_support {
                 departure_time: "09:21:00".to_string(),
                 stop_id: "S3".to_string(),
                 stop_sequence: 2,
+                ..Default::default()
             },
         ];
 
@@ -2058,6 +2054,7 @@ pub mod test_support {
             calendar_dates,
             transfers,
             pathways: vec![],
+            ..Default::default()
         }
     }
 
@@ -2107,6 +2104,7 @@ pub mod test_support {
                     departure_time: hms(arrival + 60),
                     stop_id: (*stop_id).to_string(),
                     stop_sequence: position as u32,
+                    ..Default::default()
                 });
             }
         }

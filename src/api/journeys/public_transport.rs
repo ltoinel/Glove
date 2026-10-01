@@ -1720,6 +1720,7 @@ mod tests {
                 departure_time: "08:01:00".into(),
                 stop_id: "S1".into(),
                 stop_sequence: 0,
+                ..Default::default()
             },
             gtfs::StopTime {
                 trip_id: "T1".into(),
@@ -1727,6 +1728,7 @@ mod tests {
                 departure_time: "08:11:00".into(),
                 stop_id: "S2".into(),
                 stop_sequence: 1,
+                ..Default::default()
             },
             gtfs::StopTime {
                 trip_id: "T1".into(),
@@ -1734,6 +1736,7 @@ mod tests {
                 departure_time: "08:21:00".into(),
                 stop_id: "S3".into(),
                 stop_sequence: 2,
+                ..Default::default()
             },
         ];
         let mut calendars = FxHashMap::default();
@@ -1762,6 +1765,7 @@ mod tests {
             calendar_dates: vec![],
             transfers: vec![],
             pathways: vec![],
+            ..Default::default()
         };
         Arc::new(raptor::RaptorData::build(gtfs_data, 120))
     }
@@ -3032,6 +3036,7 @@ mod tests {
                 departure_time: "08:01:00".into(),
                 stop_id: "P1".into(),
                 stop_sequence: 0,
+                ..Default::default()
             },
             gtfs::StopTime {
                 trip_id: "T1".into(),
@@ -3039,6 +3044,7 @@ mod tests {
                 departure_time: "08:11:00".into(),
                 stop_id: "FAR".into(),
                 stop_sequence: 1,
+                ..Default::default()
             },
         ];
         let mut calendars = FxHashMap::default();
@@ -3068,6 +3074,7 @@ mod tests {
                 calendar_dates: vec![],
                 transfers: vec![],
                 pathways: vec![],
+                ..Default::default()
             },
             120,
         ))
@@ -3148,6 +3155,7 @@ mod tests {
                 departure_time: "08:01:00".into(),
                 stop_id: "S1".into(),
                 stop_sequence: 0,
+                ..Default::default()
             },
             gtfs::StopTime {
                 trip_id: "T_A".into(),
@@ -3155,6 +3163,7 @@ mod tests {
                 departure_time: "08:06:00".into(),
                 stop_id: "S2".into(),
                 stop_sequence: 1,
+                ..Default::default()
             },
             gtfs::StopTime {
                 trip_id: "T_B".into(),
@@ -3162,6 +3171,7 @@ mod tests {
                 departure_time: "08:08:00".into(),
                 stop_id: "S2".into(),
                 stop_sequence: 0,
+                ..Default::default()
             },
             gtfs::StopTime {
                 trip_id: "T_B".into(),
@@ -3169,6 +3179,7 @@ mod tests {
                 departure_time: "08:13:00".into(),
                 stop_id: "S3".into(),
                 stop_sequence: 1,
+                ..Default::default()
             },
         ];
         let mut calendars = FxHashMap::default();
@@ -3198,6 +3209,7 @@ mod tests {
                 calendar_dates: vec![],
                 transfers: vec![],
                 pathways: vec![],
+                ..Default::default()
             },
             120,
         ))

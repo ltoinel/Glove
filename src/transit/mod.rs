@@ -4,6 +4,7 @@
 //! - [`raptor`]      — RAPTOR index construction and journey search
 //! - [`realtime`]    — delays and cancellations published by the operator's feeds
 //! - [`disruptions`] — works and closures authored by hand in the back office
+//! - [`validation`]  — quality rules run over the raw feed, before indexing
 //!
 //! `realtime` and `disruptions` sit inside this domain rather than beside it:
 //! both name stops and lines of the loaded GTFS, neither means anything
@@ -14,3 +15,4 @@ pub mod disruptions;
 pub mod gtfs;
 pub mod raptor;
 pub mod realtime;
+pub mod validation;

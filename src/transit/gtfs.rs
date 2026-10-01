@@ -5,7 +5,7 @@
 //! to tolerate minor format variations in real-world feeds.
 
 use rustc_hash::FxHashMap;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::path::Path;
 use tracing::{info, warn};
 
@@ -73,6 +73,9 @@ pub struct Trip {
 }
 
 /// A scheduled arrival/departure at a stop within a trip.
+///
+/// The four `u8`/`bool` fields after `stop_sequence` fit in the struct's
+/// alignment padding: with ~11 M rows, they cost nothing at load time.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct StopTime {
     pub trip_id: String,
@@ -83,6 +86,91 @@ pub struct StopTime {
     pub stop_id: String,
     /// Position of this stop in the trip sequence (0-based).
     pub stop_sequence: u32,
+    /// 0 = regular boarding, 1 = none, 2 = phone the agency, 3 = ask the driver.
+    #[serde(default, deserialize_with = "u8_or_zero")]
+    pub pickup_type: u8,
+    /// Same codes as `pickup_type`, for alighting.
+    #[serde(default, deserialize_with = "u8_or_zero")]
+    pub drop_off_type: u8,
+    /// 1 = exact times, 0 = approximate. GTFS reads an empty value as exact.
+    #[serde(default = "exact_timepoint", deserialize_with = "u8_or_one")]
+    pub timepoint: u8,
+    /// On-demand (GTFS-Flex) call: served within a pickup/drop-off window
+    /// instead of at scheduled times, which are then legitimately empty.
+    #[serde(
+        rename = "start_pickup_drop_off_window",
+        default,
+        deserialize_with = "is_non_empty"
+    )]
+    pub has_pickup_window: bool,
+}
+
+impl Default for StopTime {
+    fn default() -> Self {
+        Self {
+            trip_id: String::new(),
+            arrival_time: String::new(),
+            departure_time: String::new(),
+            stop_id: String::new(),
+            stop_sequence: 0,
+            pickup_type: 0,
+            drop_off_type: 0,
+            timepoint: exact_timepoint(),
+            has_pickup_window: false,
+        }
+    }
+}
+
+fn exact_timepoint() -> u8 {
+    1
+}
+
+/// Reads a small integer column without allocating, falling back to a
+/// default when the cell is empty or malformed: a bad optional flag must not
+/// discard the whole stop_times row.
+struct U8OrDefault(u8);
+
+impl serde::de::Visitor<'_> for U8OrDefault {
+    type Value = u8;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a small integer or an empty cell")
+    }
+
+    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<u8, E> {
+        Ok(v.trim().parse().unwrap_or(self.0))
+    }
+
+    fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<u8, E> {
+        Ok(u8::try_from(v).unwrap_or(self.0))
+    }
+}
+
+fn u8_or_zero<'de, D: Deserializer<'de>>(d: D) -> Result<u8, D::Error> {
+    d.deserialize_str(U8OrDefault(0))
+}
+
+fn u8_or_one<'de, D: Deserializer<'de>>(d: D) -> Result<u8, D::Error> {
+    d.deserialize_str(U8OrDefault(exact_timepoint()))
+}
+
+/// Whether a cell holds anything, without allocating a `String` per row.
+struct NonEmpty;
+
+impl serde::de::Visitor<'_> for NonEmpty {
+    type Value = bool;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("any cell")
+    }
+
+    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<bool, E> {
+        Ok(!v.trim().is_empty())
+    }
+}
+
+fn is_non_empty<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    d.deserialize_str(NonEmpty)
 }
 
 /// Weekly service pattern with validity period.
@@ -138,7 +226,18 @@ pub struct Pathway {
     pub traversal_time: Option<u32>,
 }
 
+/// What the loader had to drop or overwrite. Invisible once the data is in
+/// maps, so it is recorded here for the validator to report.
+#[derive(Debug, Default)]
+pub struct LoadReport {
+    /// Rows that did not deserialize and were skipped, per file.
+    pub malformed_rows: Vec<(&'static str, u64)>,
+    /// IDs found on several rows, per file. The last row wins.
+    pub duplicate_ids: Vec<(&'static str, Vec<String>)>,
+}
+
 /// Container for all raw GTFS data loaded from CSV files.
+#[derive(Default)]
 pub struct GtfsData {
     pub agencies: Vec<Agency>,
     pub routes: FxHashMap<String, Route>,
@@ -149,14 +248,18 @@ pub struct GtfsData {
     pub calendar_dates: Vec<CalendarDate>,
     pub transfers: Vec<Transfer>,
     pub pathways: Vec<Pathway>,
+    pub load_report: LoadReport,
 }
 
-/// Load a CSV file into a vector of deserialized records.
-/// Malformed rows are skipped and counted.
+/// Load `data_dir/file` into a vector of deserialized records.
+/// Malformed rows are skipped, logged and counted in `report`.
 fn load_csv<T: for<'de> Deserialize<'de>>(
-    path: &Path,
+    data_dir: &Path,
+    file: &'static str,
+    report: &mut LoadReport,
 ) -> Result<Vec<T>, Box<dyn std::error::Error>> {
-    let mut reader = csv::ReaderBuilder::new().flexible(true).from_path(path)?;
+    let path = data_dir.join(file);
+    let mut reader = csv::ReaderBuilder::new().flexible(true).from_path(&path)?;
     let mut records = Vec::new();
     let mut skipped = 0u64;
     for result in reader.deserialize() {
@@ -167,8 +270,55 @@ fn load_csv<T: for<'de> Deserialize<'de>>(
     }
     if skipped > 0 {
         warn!("{}: skipped {} malformed rows", path.display(), skipped);
+        report.malformed_rows.push((file, skipped));
     }
     Ok(records)
+}
+
+/// Key rows by their ID. Duplicates keep the last row, as a plain `collect`
+/// would, but are recorded in `report` instead of vanishing silently.
+fn index_by_id<T>(
+    rows: Vec<T>,
+    file: &'static str,
+    id: impl Fn(&T) -> &str,
+    report: &mut LoadReport,
+) -> FxHashMap<String, T> {
+    let mut map = FxHashMap::with_capacity_and_hasher(rows.len(), Default::default());
+    let mut duplicates = Vec::new();
+    for row in rows {
+        let key = id(&row).to_owned();
+        if map.contains_key(&key) {
+            duplicates.push(key.clone());
+        }
+        map.insert(key, row);
+    }
+    if !duplicates.is_empty() {
+        warn!("{file}: {} duplicate IDs (last row kept)", duplicates.len());
+        report.duplicate_ids.push((file, duplicates));
+    }
+    map
+}
+
+/// Read each stop's `location_type` (0 = platform, 1 = station, 2 = entrance,
+/// 3 = generic node, 4 = boarding area).
+///
+/// Separate from [`GtfsData::load`] because [`Stop`] is part of the serialized
+/// RAPTOR index: only validation needs this column, and stops.txt is small.
+pub fn load_location_types(
+    data_dir: &Path,
+) -> Result<FxHashMap<String, u8>, Box<dyn std::error::Error>> {
+    #[derive(Deserialize)]
+    struct StopKind {
+        stop_id: String,
+        #[serde(default, deserialize_with = "u8_or_zero")]
+        location_type: u8,
+    }
+    let mut report = LoadReport::default();
+    let kinds: Vec<StopKind> = load_csv(data_dir, "stops.txt", &mut report)?;
+    Ok(kinds
+        .into_iter()
+        .map(|k| (k.stop_id, k.location_type))
+        .collect())
 }
 
 impl GtfsData {
@@ -179,50 +329,45 @@ impl GtfsData {
     pub fn load(data_dir: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         info!("Loading GTFS data from {}", data_dir.display());
 
-        let agencies: Vec<Agency> = load_csv(&data_dir.join("agency.txt"))?;
+        let mut report = LoadReport::default();
+
+        let agencies: Vec<Agency> = load_csv(data_dir, "agency.txt", &mut report)?;
         info!("{} agencies", agencies.len());
 
-        let routes_vec: Vec<Route> = load_csv(&data_dir.join("routes.txt"))?;
+        let routes_vec: Vec<Route> = load_csv(data_dir, "routes.txt", &mut report)?;
         info!("{} routes", routes_vec.len());
-        let routes = routes_vec
-            .into_iter()
-            .map(|r| (r.route_id.clone(), r))
-            .collect();
+        let routes = index_by_id(routes_vec, "routes.txt", |r| &r.route_id, &mut report);
 
-        let stops_vec: Vec<Stop> = load_csv(&data_dir.join("stops.txt"))?;
+        let stops_vec: Vec<Stop> = load_csv(data_dir, "stops.txt", &mut report)?;
         info!("{} stops", stops_vec.len());
-        let stops = stops_vec
-            .into_iter()
-            .map(|s| (s.stop_id.clone(), s))
-            .collect();
+        let stops = index_by_id(stops_vec, "stops.txt", |s| &s.stop_id, &mut report);
 
-        let trips_vec: Vec<Trip> = load_csv(&data_dir.join("trips.txt"))?;
+        let trips_vec: Vec<Trip> = load_csv(data_dir, "trips.txt", &mut report)?;
         info!("{} trips", trips_vec.len());
-        let trips = trips_vec
-            .into_iter()
-            .map(|t| (t.trip_id.clone(), t))
-            .collect();
+        let trips = index_by_id(trips_vec, "trips.txt", |t| &t.trip_id, &mut report);
 
         info!("Loading stop_times...");
-        let stop_times: Vec<StopTime> = load_csv(&data_dir.join("stop_times.txt"))?;
+        let stop_times: Vec<StopTime> = load_csv(data_dir, "stop_times.txt", &mut report)?;
         info!("{} stop_times", stop_times.len());
 
-        let calendars_vec: Vec<Calendar> = load_csv(&data_dir.join("calendar.txt"))?;
+        let calendars_vec: Vec<Calendar> = load_csv(data_dir, "calendar.txt", &mut report)?;
         info!("{} calendars", calendars_vec.len());
-        let calendars = calendars_vec
-            .into_iter()
-            .map(|c| (c.service_id.clone(), c))
-            .collect();
+        let calendars = index_by_id(
+            calendars_vec,
+            "calendar.txt",
+            |c| &c.service_id,
+            &mut report,
+        );
 
-        let calendar_dates: Vec<CalendarDate> = load_csv(&data_dir.join("calendar_dates.txt"))?;
+        let calendar_dates: Vec<CalendarDate> =
+            load_csv(data_dir, "calendar_dates.txt", &mut report)?;
         info!("{} calendar_dates", calendar_dates.len());
 
-        let transfers: Vec<Transfer> = load_csv(&data_dir.join("transfers.txt"))?;
+        let transfers: Vec<Transfer> = load_csv(data_dir, "transfers.txt", &mut report)?;
         info!("{} transfers", transfers.len());
 
-        let pathways_path = data_dir.join("pathways.txt");
-        let pathways: Vec<Pathway> = if pathways_path.exists() {
-            let p = load_csv(&pathways_path)?;
+        let pathways: Vec<Pathway> = if data_dir.join("pathways.txt").exists() {
+            let p = load_csv(data_dir, "pathways.txt", &mut report)?;
             info!("{} pathways", p.len());
             p
         } else {
@@ -241,6 +386,7 @@ impl GtfsData {
             calendar_dates,
             transfers,
             pathways,
+            load_report: report,
         })
     }
 }
@@ -250,13 +396,15 @@ impl GtfsData {
 /// GTFS allows times beyond 24:00:00 for trips crossing midnight
 /// (e.g. "25:30:00" = 1:30 AM the next day).
 pub fn parse_time(time_str: &str) -> Option<u32> {
-    let parts: Vec<&str> = time_str.split(':').collect();
-    if parts.len() != 3 {
+    // Iterator, not a collected Vec: this runs on every one of the ~11 M
+    // stop times, at index build and again in validation.
+    let mut parts = time_str.split(':');
+    let h: u32 = parts.next()?.parse().ok()?;
+    let m: u32 = parts.next()?.parse().ok()?;
+    let s: u32 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
         return None;
     }
-    let h: u32 = parts[0].parse().ok()?;
-    let m: u32 = parts[1].parse().ok()?;
-    let s: u32 = parts[2].parse().ok()?;
     Some(h * 3600 + m * 60 + s)
 }
 

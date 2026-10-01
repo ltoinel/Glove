@@ -167,6 +167,7 @@ mod tests {
                 departure_time: "08:01:00".into(),
                 stop_id: "S1".into(),
                 stop_sequence: 0,
+                ..Default::default()
             },
             gtfs::StopTime {
                 trip_id: "T1".into(),
@@ -174,6 +175,7 @@ mod tests {
                 departure_time: "08:11:00".into(),
                 stop_id: "S2".into(),
                 stop_sequence: 1,
+                ..Default::default()
             },
         ];
         let mut calendars = FxHashMap::default();
@@ -215,6 +217,7 @@ mod tests {
             calendar_dates: vec![],
             transfers: vec![],
             pathways: vec![],
+            ..Default::default()
         };
         let raptor_data = Arc::new(raptor::RaptorData::build(gtfs_data, 120));
         let ban_data = Arc::new(ban::BanData {
