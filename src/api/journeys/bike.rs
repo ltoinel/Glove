@@ -466,7 +466,7 @@ mod tests {
 
     #[test]
     fn elevation_sample_limit_is_positive() {
-        assert!(ELEVATION_SAMPLE_LIMIT > 0);
+        const { assert!(ELEVATION_SAMPLE_LIMIT > 0) };
     }
 
     fn unreachable_config() -> AppConfig {
@@ -512,7 +512,7 @@ mod tests {
         assert_eq!(resp.status(), 200);
         let body: serde_json::Value = actix_web::test::read_body_json(resp).await;
         // Should return three bike profile variants
-        assert!(body["journeys"].as_array().unwrap().len() >= 1);
+        assert!(!body["journeys"].as_array().unwrap().is_empty());
     }
 
     #[actix_web::test]
