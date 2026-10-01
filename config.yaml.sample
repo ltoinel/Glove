@@ -22,15 +22,26 @@ routing:
   max_journeys: 5
   max_transfers: 4
   default_transfer_time: 120    # seconds
+  rail_change_time: 300         # seconds — train/RER/metro to train/RER/metro at one stop
   max_duration: 10800           # 3 hours in seconds
+  service_day_start: 14400      # seconds after midnight (04:00); earlier queries use the previous day's services
   max_nearest_stop_distance: 1500  # meters (~20 min walk at 5 km/h)
+  fallback_stop_distance: 2500  # meters — second search when an address finds nothing
+  walk_matrix_stops: 30         # nearest stops whose walk from an address is timed by Valhalla
   diverse_lines: false          # true = each alternative departs on a different line (line-level diversity)
   prefer_rail: true            # true = rail/metro/tram/train found first; bus only fills remaining slots
+  prefer_rail_max_walk: 600     # seconds — prefer_rail only when a rail stop is this close to both ends
   maneuvers: false             # true = include turn-by-turn directions (server-controlled, not per-request)
 
 valhalla:
   host: "localhost"
   port: 8002
+  pedestrian_timeout_secs: 5    # per walk matrix / first-last-mile leg during a transit search
+
+pedestrian:                     # default walker (wheelchair below replaces it when requested)
+  walking_speed: 5.0            # km/h when the request gives none
+  step_penalty: 30              # seconds per flight of stairs (luggage, pushchair)
+  elevator_penalty: 60          # seconds for taking an elevator
 
 traffic:                        # Real-time road traffic overlay (Sytadin / DiRIF)
   enabled: true                # true = load segment geometry + poll live states/events
@@ -63,6 +74,9 @@ map:
   bounds_ne_lat: 49.3          # North-east corner
   bounds_ne_lon: 3.6
   tile_url: "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png"
+  # Keyed provider: put {key} in tile_url, e.g.
+  # "https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png?key={key}"
+  tile_api_key: ""               # prefer GLOVE_TILE_API_KEY; stays server-side
   tile_cache_duration: 864000    # seconds — browser cache duration for map tiles
 
 wheelchair:

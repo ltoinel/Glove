@@ -7,7 +7,7 @@
 use actix_web::{HttpResponse, get, web};
 use std::path::{Path, PathBuf};
 
-use crate::shared::config::AppConfig;
+use crate::shared::config::{AppConfig, MapConfig};
 use crate::shared::util::{canonical_dir, reject_parent_traversal};
 
 /// Subdomains for load balancing across tile servers.
@@ -34,7 +34,7 @@ pub async fn get_tile(
         return resp;
     }
 
-    let url = build_upstream_url(&config.map.tile_url, z, x, y);
+    let url = build_upstream_url(&config.map, z, x, y);
     let bytes = match fetch_upstream_tile(&url).await {
         Ok(b) => b,
         Err(resp) => return resp,
@@ -97,14 +97,15 @@ fn serve_cached_tile(tile_path: &std::path::Path, cache_duration: u32) -> Option
     }
 }
 
-fn build_upstream_url(template: &str, z: u32, x: u32, y: u32) -> String {
+fn build_upstream_url(map: &MapConfig, z: u32, x: u32, y: u32) -> String {
     let subdomain = SUBDOMAINS[(x as usize + y as usize) % SUBDOMAINS.len()];
-    template
+    map.tile_url
         .replace("{s}", subdomain)
         .replace("{z}", &z.to_string())
         .replace("{x}", &x.to_string())
         .replace("{y}", &y.to_string())
         .replace("{r}", "")
+        .replace("{key}", &map.tile_api_key)
 }
 
 /// Upstream budget for one tile; the map shows a gap rather than waiting.
@@ -117,6 +118,9 @@ async fn fetch_upstream_tile(url: &str) -> Result<Vec<u8>, HttpResponse> {
         .send()
         .await
         .map_err(|e| {
+            // The URL may carry the provider's API key: keep it out of both
+            // the log and the response.
+            let e = e.without_url();
             tracing::warn!("Failed to fetch tile from upstream: {e}");
             tile_error(format!("Upstream tile server unreachable: {e}"))
         })?;
@@ -125,10 +129,12 @@ async fn fetch_upstream_tile(url: &str) -> Result<Vec<u8>, HttpResponse> {
         return Err(tile_error(format!("Upstream returned {}", resp.status())));
     }
 
-    resp.bytes()
-        .await
-        .map(|b| b.to_vec())
-        .map_err(|e| tile_error(format!("Failed to read upstream response: {e}")))
+    resp.bytes().await.map(|b| b.to_vec()).map_err(|e| {
+        tile_error(format!(
+            "Failed to read upstream response: {}",
+            e.without_url()
+        ))
+    })
 }
 
 /// Persist the tile to disk. Best-effort: caching failures are logged but
@@ -168,18 +174,35 @@ mod tests {
         assert!(validate_tile_coords(5, 0, 1 << 5).is_err());
     }
 
+    fn map_with_url(tile_url: &str) -> MapConfig {
+        MapConfig {
+            tile_url: tile_url.into(),
+            ..MapConfig::default()
+        }
+    }
+
     #[test]
     fn build_upstream_url_substitutes_placeholders() {
-        let url = build_upstream_url("https://{s}.tile.example/{z}/{x}/{y}{r}.png", 12, 3, 7);
+        let map = map_with_url("https://{s}.tile.example/{z}/{x}/{y}{r}.png");
+        let url = build_upstream_url(&map, 12, 3, 7);
         // subdomain = SUBDOMAINS[(3+7) % 4] = SUBDOMAINS[2] = "c"
         assert_eq!(url, "https://c.tile.example/12/3/7.png");
     }
 
     #[test]
+    fn build_upstream_url_substitutes_api_key() {
+        let mut map = map_with_url("https://tile.example/{z}/{x}/{y}.png?key={key}");
+        map.tile_api_key = "secret".into();
+        let url = build_upstream_url(&map, 1, 0, 0);
+        assert_eq!(url, "https://tile.example/1/0/0.png?key=secret");
+    }
+
+    #[test]
     fn build_upstream_url_subdomain_cycles() {
         // (x+y) % 4 selects the subdomain
-        let url0 = build_upstream_url("https://{s}.tile/{z}/{x}/{y}.png", 1, 0, 0);
-        let url1 = build_upstream_url("https://{s}.tile/{z}/{x}/{y}.png", 1, 0, 1);
+        let map = map_with_url("https://{s}.tile/{z}/{x}/{y}.png");
+        let url0 = build_upstream_url(&map, 1, 0, 0);
+        let url1 = build_upstream_url(&map, 1, 0, 1);
         assert!(url0.starts_with("https://a."));
         assert!(url1.starts_with("https://b."));
     }

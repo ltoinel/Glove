@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- [Rust](https://rustup.rs/) 1.85+ (with `cargo-watch` for dev mode)
+- [Rust](https://rustup.rs/) 1.88+ — the `rust-version` in `Cargo.toml` (with `cargo-watch` for dev mode)
 - [Node.js](https://nodejs.org/) 22+ with npm (required by `swagger-client`, a transitive dependency of the API docs viewer)
 - [Docker](https://www.docker.com/) (optional, for Valhalla)
 
@@ -76,7 +76,7 @@ GitHub Actions runs on every push to `master` and on pull requests (`.github/wor
 | **Supply chain** | Rust changes | `cargo deny check`: RustSec advisories, licenses, sources (`deny.toml`) |
 | **Coverage** | Rust changes | cargo-tarpaulin, uploaded to Codecov |
 | **Frontend** | `portal/` changes | `npm run lint`, `npm test`, `npm run build`, `npm audit` (production deps) |
-| **Docker** | Rust, portal or `docker/` changes | Builds both images (no push), with layer cache shared with releases |
+| **Docker** | Rust, portal or `docker/` changes | Builds both images (no push), with layer cache shared with releases, then scans them with Trivy (fails on fixable HIGH/CRITICAL vulnerabilities) |
 
 The documentation book is built on pull requests and deployed from `master` (`docs.yml`); both Docker images are published on each GitHub release (`docker.yml`).
 
@@ -94,11 +94,14 @@ RUST_LOG=debug cargo run
 # Run benchmarks
 python3 scripts/benchmark.py --rounds 10 --concurrency 1 --datetime <YYYYMMDDTHHMMSS in the GTFS window>
 
+# Compare journey quality with Hove (Navitia via PRIM) on random BAN addresses
+PRIM_API_KEY=... python3 scripts/compare_engines.py --pairs 100 --seed 42
+
 # Start Valhalla for walk/bike/car routing
 bin/valhalla.sh
 
 # Check which GTFS transfer pairs have indoor routing data in Valhalla
-python3 bin/check_indoor.py
+python3 scripts/check_indoor.py
 ```
 
 ```admonish info title="Indoor Coverage Analysis"

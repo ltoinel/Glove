@@ -18,6 +18,12 @@ RUN npx vite build --outDir /app/portal-dist --emptyOutDir
 # Stage 2: Serve with nginx, as the unprivileged `nginx` user (uid 101) — the
 # master process included, hence port 8080 instead of 80.
 FROM nginxinc/nginx-unprivileged:1.31-alpine@sha256:26b0bf6fbf07297983cb341998d79c831508787de26627dd2a112321b9c3a4af
+# Security fixes published by Alpine before the pinned base is rebuilt
+# (pcre2 10.49 for CVE-2026-103111). Root only for apk, then back to the
+# image's unprivileged user. Drop once a base digest ships the fix.
+USER root
+RUN apk upgrade --no-cache pcre2
+USER 101
 COPY docker/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /app/portal-dist /usr/share/nginx/html
 

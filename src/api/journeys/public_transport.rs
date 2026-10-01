@@ -11,7 +11,7 @@ use utoipa::{IntoParams, ToSchema};
 
 use std::sync::Arc;
 
-use crate::shared::config::{AppConfig, WheelchairConfig};
+use crate::shared::config::{AppConfig, ValhallaConfig};
 use crate::transit::disruptions::model::{Cause, Severity};
 use crate::transit::disruptions::overlay::{self, DisruptionIndex, Impact};
 use crate::transit::disruptions::store::{Catalog, DisruptionStore};
@@ -156,19 +156,29 @@ pub async fn get_journeys(
 ) -> HttpResponse {
     let raptor_data = shared.load_full();
 
-    let overlays = Overlays {
-        realtime: realtime.index(),
-        // Snapshotted once so every iteration of the diverse search, and the
-        // blocked-alternative pass below, see the same catalog.
-        disruptions: std::sync::Arc::clone(&disruptions.snapshot()),
+    let ctx = PlanContext {
+        query: &query,
+        raptor_data: &raptor_data,
+        config: &config,
+        overlays: Overlays {
+            realtime: realtime.index(),
+            // Snapshotted once so every iteration of the diverse search, the
+            // blocked-alternative pass and a widened retry see the same catalog.
+            disruptions: std::sync::Arc::clone(&disruptions.snapshot()),
+        },
     };
 
-    let resolved = match resolve_journey_query(&query, &raptor_data, &config, overlays) {
-        Ok(r) => r,
-        Err(resp) => return resp,
-    };
-
-    let (resolved, mut journeys) = match search_off_executor(&raptor_data, resolved).await {
+    let routing = &config.routing;
+    let mut planned = plan_journeys(&ctx, routing.max_nearest_stop_distance).await;
+    // An address far from any stop (rural Île-de-France) finds nothing within
+    // the usual radius: widen it once rather than answer with no journey.
+    if routing.fallback_stop_distance > routing.max_nearest_stop_distance
+        && found_nothing(&planned)
+        && has_address_endpoint(&query)
+    {
+        planned = plan_journeys(&ctx, routing.fallback_stop_distance).await;
+    }
+    let (resolved, mut journeys) = match planned {
         Ok(found) => found,
         Err(resp) => return resp,
     };
@@ -184,6 +194,208 @@ pub async fn get_journeys(
     tag_journeys(&mut journeys, resolved.wheelchair);
 
     HttpResponse::Ok().json(JourneysResponse { journeys })
+}
+
+/// Replace the straight-line walking estimates of address endpoints with
+/// Valhalla's pedestrian times, in one matrix call per endpoint.
+///
+/// RAPTOR picks the first and last stop on these times, and the walk drawn
+/// afterwards comes from Valhalla. A straight line undershoots real streets by
+/// a third or more, so on the estimate alone the traveller was routed onto a
+/// train they could not reach and the journey shown left before the requested
+/// time.
+async fn refine_walk_times(
+    q: &mut ResolvedQuery,
+    raptor_data: &RaptorData,
+    config: &AppConfig,
+    walking_speed: Option<f64>,
+) {
+    let timing = WalkTiming {
+        raptor_data,
+        valhalla: &config.valhalla,
+        walker: walker(config, walking_speed, q.wheelchair),
+        matrix_stops: config.routing.walk_matrix_stops,
+    };
+    // Both walks are independent: ask for them concurrently.
+    let (access, egress) = futures_util::join!(
+        timing.time_walks(q.from_coord, &q.sources, WalkDirection::ToStop),
+        timing.time_walks(q.to_coord, &q.targets, WalkDirection::FromStop),
+    );
+    if let Some(sources) = access {
+        q.sources = sources;
+    }
+    if let Some(targets) = egress {
+        q.targets = targets;
+    }
+}
+
+/// The walking profile of a request: the configured pedestrian (or wheelchair)
+/// costing, at the requested speed when there is one.
+fn walker(
+    config: &AppConfig,
+    requested_speed: Option<f64>,
+    wheelchair: bool,
+) -> valhalla::Walker<'_> {
+    valhalla::Walker {
+        pedestrian: &config.pedestrian,
+        wheelchair: wheelchair.then_some(&config.wheelchair),
+        requested_speed,
+    }
+}
+
+/// What timing first/last-mile walks with Valhalla needs.
+struct WalkTiming<'a> {
+    raptor_data: &'a RaptorData,
+    valhalla: &'a ValhallaConfig,
+    walker: valhalla::Walker<'a>,
+    /// Nearest stops sent to Valhalla (`routing.walk_matrix_stops`).
+    matrix_stops: usize,
+}
+
+impl WalkTiming<'_> {
+    /// `stops` with Valhalla walking times from or to `coord`, or `None` when
+    /// the endpoint is a stop id (no walk to time) or Valhalla has no answer.
+    ///
+    /// Only the nearest `matrix_stops` are sent: the matrix cost grows with
+    /// the stop count, and a dense city puts hundreds of stops within reach.
+    async fn time_walks(
+        &self,
+        coord: Option<(f64, f64)>,
+        stops: &[(usize, u32)],
+        direction: WalkDirection,
+    ) -> Option<Vec<(usize, u32)>> {
+        let coord = coord?;
+        let mut nearest: Vec<usize> = (0..stops.len()).collect();
+        nearest.sort_by_key(|&i| stops[i].1);
+        nearest.truncate(self.matrix_stops);
+        let points: Vec<(f64, f64)> = nearest
+            .iter()
+            .map(|&i| {
+                let stop = &self.raptor_data.stops[stops[i].0];
+                (stop.stop_lon, stop.stop_lat)
+            })
+            .collect();
+
+        let (from, to) = match direction {
+            WalkDirection::ToStop => (vec![coord], points),
+            WalkDirection::FromStop => (points, vec![coord]),
+        };
+        let matrix =
+            valhalla::pedestrian_durations(self.valhalla, &from, &to, &self.walker).await?;
+        // One row per source: the single row going out, one cell per row coming in.
+        let times: Vec<Option<u32>> = match direction {
+            WalkDirection::ToStop => matrix.into_iter().next().unwrap_or_default(),
+            WalkDirection::FromStop => matrix
+                .into_iter()
+                .map(|row| row.into_iter().next().flatten())
+                .collect(),
+        };
+        Some(apply_walk_times(stops, &nearest, &times))
+    }
+}
+
+/// `stops` with the walks Valhalla timed — `times[k]` belongs to
+/// `stops[timed[k]]`.
+///
+/// Stops left out (beyond the matrix, or with no Valhalla path) keep their
+/// straight-line estimate scaled by the largest detour Valhalla measured on the
+/// others: left raw, they would look a third closer than they are, and RAPTOR
+/// would favour exactly the stops nobody checked. The largest rather than a
+/// typical detour because the two errors are not alike — a walk overestimated
+/// costs a few minutes on the platform, one underestimated sends the traveller
+/// to a train that has already left.
+fn apply_walk_times(
+    stops: &[(usize, u32)],
+    timed: &[usize],
+    times: &[Option<u32>],
+) -> Vec<(usize, u32)> {
+    let mut walks = stops.to_vec();
+    if times.len() != timed.len() {
+        tracing::warn!(
+            "Valhalla matrix returned {} times for {} stops; keeping estimates",
+            times.len(),
+            timed.len()
+        );
+        return walks;
+    }
+
+    let mut refined = vec![false; walks.len()];
+    let mut detours: Vec<f64> = Vec::with_capacity(timed.len());
+    for (&i, time) in timed.iter().zip(times) {
+        let Some(seconds) = *time else { continue };
+        if walks[i].1 > 0 {
+            detours.push(f64::from(seconds) / f64::from(walks[i].1));
+        }
+        walks[i].1 = seconds;
+        refined[i] = true;
+    }
+
+    let detour = detours.iter().copied().fold(1.0, f64::max);
+    for (walk, _) in walks.iter_mut().zip(&refined).filter(|(_, done)| !**done) {
+        walk.1 = (f64::from(walk.1) * detour).ceil() as u32;
+    }
+    walks
+}
+
+/// Whether a rail, metro or tram stop lies within `max_walk` seconds among
+/// `endpoints` — i.e. whether forbidding buses still leaves a short way in.
+fn rail_within_walk(data: &RaptorData, endpoints: &[(usize, u32)], max_walk: u32) -> bool {
+    let route_types = data.pattern_route_types();
+    endpoints.iter().any(|&(stop_idx, walk)| {
+        walk <= max_walk
+            && data.stop_patterns[stop_idx]
+                .iter()
+                .any(|&(pattern_idx, _)| {
+                    route_types[pattern_idx].is_some_and(|rt| route_type_to_mode(rt) != "bus")
+                })
+    })
+}
+
+/// What a journey search reads, besides the radius it looks for stops in.
+struct PlanContext<'a> {
+    query: &'a JourneysQuery,
+    raptor_data: &'a Arc<RaptorData>,
+    config: &'a AppConfig,
+    overlays: Overlays,
+}
+
+/// Resolve the endpoints within `radius` metres, time their walks and run the
+/// search: everything but the Valhalla enrichment of the journeys found.
+async fn plan_journeys(
+    ctx: &PlanContext<'_>,
+    radius: u32,
+) -> Result<(ResolvedQuery, Vec<Journey>), HttpResponse> {
+    let raptor_data = ctx.raptor_data;
+    let mut resolved = resolve_journey_query(ctx, radius)?;
+    refine_walk_times(
+        &mut resolved,
+        raptor_data,
+        ctx.config,
+        ctx.query.walking_speed,
+    )
+    .await;
+    // Forbidding buses only helps when rail is a short walk away at both ends;
+    // otherwise it trades a feeder bus for a long walk.
+    let max_walk = ctx.config.routing.prefer_rail_max_walk;
+    resolved.prefer_rail &= rail_within_walk(raptor_data, &resolved.sources, max_walk)
+        && rail_within_walk(raptor_data, &resolved.targets, max_walk);
+    search_off_executor(raptor_data, resolved).await
+}
+
+/// Whether a search came back empty-handed: no journey, or no stop near an
+/// endpoint (a 400). A failure on the server side is not worth a retry.
+fn found_nothing(planned: &Result<(ResolvedQuery, Vec<Journey>), HttpResponse>) -> bool {
+    match planned {
+        Ok((_, journeys)) => journeys.is_empty(),
+        Err(resp) => resp.status() == actix_web::http::StatusCode::BAD_REQUEST,
+    }
+}
+
+/// Whether either endpoint is an address: only those have a radius to widen.
+fn has_address_endpoint(query: &JourneysQuery) -> bool {
+    [&query.from, &query.to]
+        .iter()
+        .any(|endpoint| endpoint.as_deref().and_then(parse_coord).is_some())
 }
 
 /// Run the RAPTOR passes on the blocking thread pool.
@@ -216,8 +428,6 @@ async fn search_off_executor(
     })
 }
 
-const EARLY_MORNING_THRESHOLD: u32 = 4 * 3600; // 04:00
-
 /// Resolved query parameters for a single journey search.
 struct ResolvedQuery {
     from_coord: Option<(f64, f64)>,
@@ -229,6 +439,9 @@ struct ResolvedQuery {
     active: Vec<bool>,
     max_transfers: usize,
     max_duration: u32,
+    /// Seconds to change vehicles at a single stop (`routing.default_transfer_time`,
+    /// `routing.rail_change_time` between two trains).
+    change_times: raptor::ChangeTimes,
     requested: usize,
     wheelchair: bool,
     mode_excluded: rustc_hash::FxHashSet<usize>,
@@ -245,8 +458,9 @@ struct ResolvedQuery {
 
 /// The overlays layered on the published schedule at query time.
 ///
-/// Bundled because they are always resolved together and would otherwise push
-/// [`resolve_journey_query`] to five parameters.
+/// Bundled because they are always resolved together. Cloned per resolution:
+/// both are shared snapshots, so a widened retry sees the same ones.
+#[derive(Clone)]
 struct Overlays {
     realtime: Option<Arc<RealtimeIndex>>,
     disruptions: Arc<Catalog>,
@@ -261,11 +475,11 @@ fn bad_request(id: &str, message: String) -> HttpResponse {
 /// Parse and validate every input parameter, resolving stops and dates.
 /// Returns an `HttpResponse` (400) on any validation failure.
 fn resolve_journey_query(
-    query: &JourneysQuery,
-    raptor_data: &RaptorData,
-    config: &AppConfig,
-    overlays: Overlays,
+    ctx: &PlanContext<'_>,
+    radius: u32,
 ) -> Result<ResolvedQuery, HttpResponse> {
+    let (query, raptor_data, config) = (ctx.query, ctx.raptor_data.as_ref(), ctx.config);
+    let overlays = ctx.overlays.clone();
     let from_str = query
         .from
         .as_deref()
@@ -278,8 +492,13 @@ fn resolve_journey_query(
     let from_coord = parse_coord(from_str);
     let to_coord = parse_coord(to_str);
 
-    let max_dist = config.routing.max_nearest_stop_distance;
-    let walking_speed = query.walking_speed.unwrap_or(5.0);
+    let max_dist = radius;
+    let walking_speed = walker(
+        config,
+        query.walking_speed,
+        query.wheelchair.unwrap_or(false),
+    )
+    .speed_kmh();
 
     let sources = resolve_stops(raptor_data, from_str, from_coord, max_dist, walking_speed);
     if sources.is_empty() {
@@ -302,7 +521,7 @@ fn resolve_journey_query(
     let instant = query_instant(&date, departure_time);
     let disruptions = overlay::resolve(raptor_data, &overlays.disruptions, instant);
     let (effective_date, effective_departure) =
-        shift_to_previous_day_if_early(date, departure_time);
+        shift_to_previous_day_if_early(date, departure_time, config.routing.service_day_start);
 
     let active = raptor_data.active_services(&effective_date);
     let mode_excluded =
@@ -322,6 +541,10 @@ fn resolve_journey_query(
             .max_duration
             .map(|n| n.max(0) as u32)
             .unwrap_or(config.routing.max_duration),
+        change_times: raptor::ChangeTimes {
+            default: config.routing.default_transfer_time,
+            rail: config.routing.rail_change_time,
+        },
         requested: config.routing.max_journeys,
         wheelchair: query.wheelchair.unwrap_or(false),
         mode_excluded,
@@ -363,11 +586,16 @@ fn parse_query_datetime(datetime: Option<&str>) -> Result<(String, u32), HttpRes
     }
 }
 
-/// Early-morning shift: queries before 4h use the previous day's services
+/// Early-morning shift: queries before `service_day_start` (seconds after
+/// midnight, `routing.service_day_start`) use the previous day's services
 /// with a +24h offset, because GTFS encodes after-midnight trips on the
 /// previous day (e.g. 25:30:00).
-fn shift_to_previous_day_if_early(date: String, departure_time: u32) -> (String, u32) {
-    if departure_time >= EARLY_MORNING_THRESHOLD {
+fn shift_to_previous_day_if_early(
+    date: String,
+    departure_time: u32,
+    service_day_start: u32,
+) -> (String, u32) {
+    if departure_time >= service_day_start {
         return (date, departure_time);
     }
     let y: i32 = date.get(0..4).and_then(|s| s.parse().ok()).unwrap_or(2026);
@@ -467,6 +695,7 @@ fn find_blocked_alternative(
             wheelchair: q.wheelchair,
             targets: &q.targets,
             max_duration: q.max_duration,
+            change_times: q.change_times,
             realtime: q.realtime.as_deref(),
             disruptions: None,
         },
@@ -575,6 +804,7 @@ fn collect_alternatives(
                 wheelchair: q.wheelchair,
                 targets: &q.targets,
                 max_duration: q.max_duration,
+                change_times: q.change_times,
                 realtime: q.realtime.as_deref(),
                 disruptions: q.disruptions.as_ref(),
             },
@@ -661,18 +891,12 @@ async fn enrich_journeys(
     raptor_data: &RaptorData,
     q: &ResolvedQuery,
 ) {
-    let valhalla_base = format!("http://{}:{}", config.valhalla.host, config.valhalla.port);
     let ctx = EnrichmentCtx {
         raptor_data,
-        valhalla_base: &valhalla_base,
-        walking_speed: query.walking_speed,
+        valhalla: &config.valhalla,
+        walker: walker(config, query.walking_speed, q.wheelchair),
         include_maneuvers: config.routing.maneuvers,
         language: query.language.as_deref(),
-        wheelchair_config: if q.wheelchair {
-            Some(&config.wheelchair)
-        } else {
-            None
-        },
     };
 
     // First/last mile: only when origin or destination are coordinates
@@ -694,11 +918,10 @@ async fn enrich_journeys(
 /// Shared parameters threaded through Valhalla enrichment helpers.
 struct EnrichmentCtx<'a> {
     raptor_data: &'a RaptorData,
-    valhalla_base: &'a str,
-    walking_speed: Option<f64>,
+    valhalla: &'a ValhallaConfig,
+    walker: valhalla::Walker<'a>,
     include_maneuvers: bool,
     language: Option<&'a str>,
-    wheelchair_config: Option<&'a WheelchairConfig>,
 }
 
 /// Origin/destination coordinates for a journey query.
@@ -730,17 +953,9 @@ async fn pedestrian_leg(
     if (from.0 - to.0).abs() < 1e-6 && (from.1 - to.1).abs() < 1e-6 {
         return None;
     }
-    valhalla::pedestrian_route(
-        ctx.valhalla_base,
-        from,
-        to,
-        ctx.walking_speed,
-        false,
-        ctx.language,
-        ctx.wheelchair_config,
-    )
-    .await
-    .map(Arc::new)
+    valhalla::pedestrian_route(ctx.valhalla, from, to, &ctx.walker, false, ctx.language)
+        .await
+        .map(Arc::new)
 }
 
 /// Walking legs between `coord` and every distinct stop in `stop_idxs`.
@@ -1072,13 +1287,12 @@ async fn enrich_transfers(journeys: &mut [Journey], ctx: &EnrichmentCtx<'_>) {
         .collect();
     let futs = unique.iter().map(|walk| {
         valhalla::pedestrian_route(
-            ctx.valhalla_base,
+            ctx.valhalla,
             walk.from(),
             walk.to(),
-            ctx.walking_speed,
+            &ctx.walker,
             !walk.is_outdoor,
             ctx.language,
-            ctx.wheelchair_config,
         )
     });
     let unique_results = futures_util::future::join_all(futs).await;
@@ -1836,6 +2050,69 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
+    fn apply_walk_times_takes_valhalla_times_and_scales_the_rest() {
+        // Stops 0 and 1 are timed (detours 1.4 and 1.2); stop 2 has no path and
+        // stop 3 was not sent: both are scaled by the larger detour, 1.4.
+        let stops = [(10, 600), (11, 500), (12, 300), (13, 1000)];
+        let walks = apply_walk_times(&stops, &[0, 1, 2], &[Some(840), Some(600), None]);
+        assert_eq!(walks, vec![(10, 840), (11, 600), (12, 420), (13, 1400)]);
+    }
+
+    #[test]
+    fn apply_walk_times_never_shortens_unchecked_walks() {
+        // Valhalla finds a shortcut (detour < 1): the others stay as estimated.
+        let walks = apply_walk_times(&[(10, 600), (11, 500)], &[0], &[Some(300)]);
+        assert_eq!(walks, vec![(10, 300), (11, 500)]);
+    }
+
+    #[test]
+    fn apply_walk_times_keeps_estimates_on_a_mismatched_answer() {
+        let stops = [(3, 600), (7, 900)];
+        assert_eq!(
+            apply_walk_times(&stops, &[0, 1], &[Some(840)]),
+            stops.to_vec()
+        );
+    }
+
+    #[test]
+    fn rail_within_walk_needs_a_rail_stop_close_enough() {
+        // The fixture's only line is a metro (route_type 1).
+        let data = make_test_raptor_data();
+        let s1 = data.stop_index["S1"];
+        assert!(rail_within_walk(&data, &[(s1, 300)], 600));
+        assert!(!rail_within_walk(&data, &[(s1, 900)], 600));
+        assert!(!rail_within_walk(&data, &[], 600));
+    }
+
+    #[actix_web::test]
+    async fn pedestrian_durations_reads_the_matrix() {
+        let mock =
+            valhalla::test_support::valhalla_at(&valhalla::test_support::spawn_mock_valhalla());
+        let cfg = &*UNREACHABLE_VALHALLA;
+        let matrix = valhalla::pedestrian_durations(
+            &mock,
+            &[(2.35, 48.85)],
+            &[(2.36, 48.86), (0.0, 48.86)],
+            &walker(cfg, None, false),
+        )
+        .await;
+        assert_eq!(matrix, Some(vec![vec![Some(300), None]]));
+    }
+
+    #[actix_web::test]
+    async fn pedestrian_durations_is_none_when_valhalla_is_down() {
+        let cfg = &*UNREACHABLE_VALHALLA;
+        let matrix = valhalla::pedestrian_durations(
+            &cfg.valhalla,
+            &[(2.35, 48.85)],
+            &[(2.36, 48.86)],
+            &walker(cfg, None, false),
+        )
+        .await;
+        assert_eq!(matrix, None);
+    }
+
+    #[test]
     fn tag_journeys_empty() {
         let mut journeys: Vec<Journey> = vec![];
         tag_journeys(&mut journeys, false);
@@ -2241,23 +2518,36 @@ mod tests {
 
     // ----- shift_to_previous_day_if_early ---------------------------------
 
+    /// The default `routing.service_day_start`.
+    const FOUR_AM: u32 = 4 * 3600;
+
     #[test]
     fn shift_returns_unchanged_when_after_threshold() {
-        let (date, secs) = shift_to_previous_day_if_early("20260406".into(), 30_000);
+        let (date, secs) = shift_to_previous_day_if_early("20260406".into(), 30_000, FOUR_AM);
         assert_eq!(date, "20260406");
         assert_eq!(secs, 30_000);
     }
 
     #[test]
     fn shift_to_previous_day_when_before_threshold() {
-        let (date, secs) = shift_to_previous_day_if_early("20260406".into(), 60); // 00:01
+        let (date, secs) = shift_to_previous_day_if_early("20260406".into(), 60, FOUR_AM); // 00:01
         assert_eq!(date, "20260405");
         assert_eq!(secs, 60 + 86400);
     }
 
     #[test]
+    fn shift_follows_the_configured_service_day_start() {
+        // 03:30 belongs to the previous service day at 04:00, not at 03:00.
+        let at_0330 = 3 * 3600 + 30 * 60;
+        let (date, _) = shift_to_previous_day_if_early("20260406".into(), at_0330, FOUR_AM);
+        assert_eq!(date, "20260405");
+        let (date, _) = shift_to_previous_day_if_early("20260406".into(), at_0330, 3 * 3600);
+        assert_eq!(date, "20260406");
+    }
+
+    #[test]
     fn shift_handles_month_boundary() {
-        let (date, _) = shift_to_previous_day_if_early("20260501".into(), 100);
+        let (date, _) = shift_to_previous_day_if_early("20260501".into(), 100, FOUR_AM);
         assert_eq!(date, "20260430");
     }
 
@@ -2599,14 +2889,21 @@ mod tests {
 
     // ----- pedestrian_leg / fetch_walk_legs --------------------------------
 
+    /// Default configuration with Valhalla on a closed port.
+    static UNREACHABLE_VALHALLA: std::sync::LazyLock<AppConfig> = std::sync::LazyLock::new(|| {
+        let mut cfg = AppConfig::default();
+        cfg.valhalla = valhalla::test_support::valhalla_at("http://127.0.0.1:1");
+        cfg
+    });
+
     fn unreachable_valhalla_ctx(data: &RaptorData) -> EnrichmentCtx<'_> {
+        let cfg = &*UNREACHABLE_VALHALLA;
         EnrichmentCtx {
             raptor_data: data,
-            valhalla_base: "http://127.0.0.1:1",
-            walking_speed: Some(5.0),
+            valhalla: &cfg.valhalla,
+            walker: walker(cfg, Some(5.0), false),
             include_maneuvers: false,
             language: None,
-            wheelchair_config: None,
         }
     }
 
@@ -2634,10 +2931,11 @@ mod tests {
 
     #[actix_web::test]
     async fn fetch_walk_legs_asks_each_distinct_stop_once() {
-        let base = super::super::valhalla::test_support::spawn_mock_valhalla();
+        let valhalla =
+            valhalla::test_support::valhalla_at(&valhalla::test_support::spawn_mock_valhalla());
         let data = make_test_raptor_data();
         let ctx = EnrichmentCtx {
-            valhalla_base: &base,
+            valhalla: &valhalla,
             ..unreachable_valhalla_ctx(&data)
         };
         let idxs = [data.stop_index["S1"], data.stop_index["S3"]]
@@ -2654,12 +2952,8 @@ mod tests {
     async fn enrich_transfers_marks_outdoor_indoor() {
         let data = make_test_raptor_data();
         let ctx = EnrichmentCtx {
-            raptor_data: &data,
-            valhalla_base: "http://127.0.0.1:1",
-            walking_speed: None,
-            include_maneuvers: false,
-            language: None,
-            wheelchair_config: None,
+            walker: walker(&UNREACHABLE_VALHALLA, None, false),
+            ..unreachable_valhalla_ctx(&data)
         };
         // Build a journey with one transfer section
         let mut journeys = vec![Journey {
@@ -2717,14 +3011,11 @@ mod tests {
     #[actix_web::test]
     async fn enrich_first_last_mile_runs_without_panic() {
         let data = make_test_raptor_data();
-        let cfg = AppConfig::default();
         let ctx = EnrichmentCtx {
-            raptor_data: &data,
-            valhalla_base: "http://127.0.0.1:1",
-            walking_speed: Some(5.0),
+            walker: walker(&UNREACHABLE_VALHALLA, Some(5.0), true),
             include_maneuvers: true,
             language: Some("fr-FR"),
-            wheelchair_config: Some(&cfg.wheelchair),
+            ..unreachable_valhalla_ctx(&data)
         };
         // Run a real RAPTOR query so we get realistic journeys
         let source = data.stop_index["S1"];
@@ -2781,6 +3072,62 @@ mod tests {
         assert_eq!(resp.status(), 200);
         let body: serde_json::Value = actix_web::test::read_body_json(resp).await;
         assert!(!body["journeys"].as_array().unwrap().is_empty());
+    }
+
+    /// Ask for a journey from an address 2 km north of S1 — beyond the default
+    /// 1500 m radius — to S3, with the given fallback radius. Valhalla is
+    /// pointed at a closed port so walks keep their straight-line estimate.
+    async fn journey_from_two_km_away(fallback_stop_distance: u32) -> (u16, serde_json::Value) {
+        let mut cfg = make_test_config();
+        cfg.valhalla.host = "127.0.0.1".into();
+        cfg.valhalla.port = 1;
+        cfg.routing.fallback_stop_distance = fallback_stop_distance;
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(web::Data::new(ArcSwap::from(make_test_raptor_data())))
+                .app_data(web::Data::new(cfg))
+                .app_data(web::Data::new(RealtimeService::disabled()))
+                .app_data(web::Data::new(DisruptionStore::for_tests(Vec::new())))
+                .service(get_journeys),
+        )
+        .await;
+        let req = actix_web::test::TestRequest::get()
+            .uri("/api/journeys/public_transport?from=2.347;48.876&to=2.395;48.848&datetime=20260406T073000")
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+        let status = resp.status().as_u16();
+        (status, actix_web::test::read_body_json(resp).await)
+    }
+
+    #[actix_web::test]
+    async fn an_address_beyond_the_radius_is_served_by_the_fallback_radius() {
+        let (status, body) = journey_from_two_km_away(2500).await;
+        assert_eq!(status, 200);
+        assert!(!body["journeys"].as_array().unwrap().is_empty());
+    }
+
+    #[actix_web::test]
+    async fn without_a_fallback_radius_a_distant_address_finds_no_stop() {
+        let (status, body) = journey_from_two_km_away(0).await;
+        assert_eq!(status, 400);
+        assert_eq!(body["error"]["id"], "unknown_object");
+    }
+
+    #[test]
+    fn has_address_endpoint_only_counts_coordinates() {
+        let query = |from: &str, to: &str| JourneysQuery {
+            from: Some(from.into()),
+            to: Some(to.into()),
+            datetime: None,
+            max_duration: None,
+            walking_speed: None,
+            wheelchair: None,
+            forbidden_modes: None,
+            language: None,
+        };
+        assert!(has_address_endpoint(&query("2.35;48.85", "S3")));
+        assert!(has_address_endpoint(&query("S1", "2.35;48.85")));
+        assert!(!has_address_endpoint(&query("S1", "S3")));
     }
 
     #[actix_web::test]

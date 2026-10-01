@@ -27,7 +27,7 @@ RUN groupadd --system --gid 10001 glove \
 
 WORKDIR /app
 COPY --from=backend /app/target/release/glove /app/glove
-COPY config.yaml /app/config.yaml
+COPY config.yaml.sample /app/config.yaml
 # The image is published: never ship the repository's development API key.
 # Empty = reload and disruption writes disabled until GLOVE_API_KEY is set.
 RUN sed -i -E 's/^([[:space:]]*api_key:).*/\1 ""/' /app/config.yaml \

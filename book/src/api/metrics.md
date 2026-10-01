@@ -4,25 +4,24 @@
 GET /api/metrics
 ```
 
-Returns server metrics in Prometheus text format.
+Returns server metrics in Prometheus text exposition format (`text/plain; version=0.0.4`). Process metrics are read from `/proc`, so they are reported as `0` on non-Linux hosts.
 
 ## Available Metrics
 
 ### Process Metrics
-- `process_cpu_usage` — Current CPU usage percentage
-- `process_memory_bytes` — Resident memory in bytes
-- `process_uptime_seconds` — Time since server start
+- `process_cpu_seconds_total` *(counter)* — Total user and system CPU time, in seconds
+- `process_resident_memory_bytes` *(gauge)* — Resident memory (RSS) in bytes
+- `process_virtual_memory_bytes` *(gauge)* — Virtual memory size in bytes
+- `process_open_fds` *(gauge)* — Number of open file descriptors
+- `process_threads` *(gauge)* — Number of OS threads
+- `process_start_time_seconds` *(gauge)* — Process start time, Unix epoch seconds
+- `process_uptime_seconds` *(gauge)* — Seconds since the process started
 
 ### HTTP Metrics
-- `http_requests_total` — Total number of HTTP requests received
-- `http_errors_total` — Total number of HTTP error responses (4xx, 5xx)
+- `glove_http_requests_total` *(counter)* — Total number of HTTP requests served
+- `glove_http_errors_total` *(counter)* — Total number of HTTP error responses (4xx, 5xx)
 
-### GTFS Metrics
-- `gtfs_agencies` — Number of loaded agencies
-- `gtfs_routes` — Number of loaded routes
-- `gtfs_stops` — Number of loaded stops
-- `gtfs_trips` — Number of loaded trips
-- `gtfs_stop_times` — Number of loaded stop times
+GTFS statistics are not exported as metrics; read them from [`GET /api/gtfs/status`](./status.md#gtfs-status).
 
 ## Example
 
@@ -31,15 +30,33 @@ curl http://localhost:8080/api/metrics
 ```
 
 ```
-# HELP process_cpu_usage Current CPU usage
-# TYPE process_cpu_usage gauge
-process_cpu_usage 12.5
-# HELP process_memory_bytes Resident memory
-# TYPE process_memory_bytes gauge
-process_memory_bytes 524288000
-# HELP http_requests_total Total HTTP requests
-# TYPE http_requests_total counter
-http_requests_total 15423
+# HELP process_cpu_seconds_total Total user and system CPU time spent in seconds.
+# TYPE process_cpu_seconds_total counter
+process_cpu_seconds_total 12.640000
+# HELP process_resident_memory_bytes Resident memory size in bytes.
+# TYPE process_resident_memory_bytes gauge
+process_resident_memory_bytes 335790080
+# HELP process_virtual_memory_bytes Virtual memory size in bytes.
+# TYPE process_virtual_memory_bytes gauge
+process_virtual_memory_bytes 1042432000
+# HELP process_open_fds Number of open file descriptors.
+# TYPE process_open_fds gauge
+process_open_fds 49
+# HELP process_threads Number of OS threads.
+# TYPE process_threads gauge
+process_threads 11
+# HELP process_start_time_seconds Start time of the process since unix epoch in seconds.
+# TYPE process_start_time_seconds gauge
+process_start_time_seconds 1790895550.590277
+# HELP process_uptime_seconds Number of seconds since the process started.
+# TYPE process_uptime_seconds gauge
+process_uptime_seconds 832.843322
+# HELP glove_http_requests_total Total number of HTTP requests served.
+# TYPE glove_http_requests_total counter
+glove_http_requests_total 23
+# HELP glove_http_errors_total Total number of HTTP error responses (4xx + 5xx).
+# TYPE glove_http_errors_total counter
+glove_http_errors_total 0
 ```
 
 ## Prometheus Integration
@@ -55,6 +72,10 @@ scrape_configs:
     metrics_path: "/api/metrics"
 ```
 
+```admonish note
+`/api/metrics` is subject to the per-IP rate limit like the other API endpoints; a 15 s scrape interval stays well within it.
+```
+
 ## Frontend Metrics Panel
 
-The frontend includes a built-in metrics dashboard accessible from the sidebar. It displays live values for CPU, memory, uptime, request counts, and GTFS statistics, polling the `/api/metrics` and `/api/status` endpoints.
+The frontend includes a built-in metrics view accessible from the navigation rail. It polls `/api/metrics` and displays CPU time, resident and virtual memory, open file descriptors, threads, uptime, and the HTTP request and error counters.

@@ -5,8 +5,22 @@
 ```admonish info title="Requirements"
 - [Rust](https://rustup.rs/) 1.88+
 - [Node.js](https://nodejs.org/) 22+ (required by `swagger-client`, a transitive dependency of the API docs viewer)
-- [Docker](https://www.docker.com/) (optional, for Valhalla walk/bike/car routing)
+- [Docker](https://www.docker.com/) for Valhalla walk/bike/car routing — required by `bin/start.sh` (see [Start Valhalla](#start-valhalla)); only a manual `cargo run` works without it
 - [Caddy](https://caddyserver.com/docs/install) 2.6+ (HTTPS reverse proxy used by `bin/start.sh`)
+- `wget`, `unzip`, `gunzip` (used by `bin/download.sh`) and `curl` (used by `bin/start.sh` to wait for the backend)
+- [cargo-watch](https://crates.io/crates/cargo-watch) for `bin/start.sh --dev` (`cargo install cargo-watch`)
+```
+
+## Configuration
+
+`config.yaml` is local and git-ignored, since it may hold secrets (API keys). The repository ships `config.yaml.sample`; the `bin/` scripts copy it to `config.yaml` on first run, or do it yourself:
+
+```bash
+cp config.yaml.sample config.yaml
+```
+
+```admonish warning title="Development API key"
+`config.yaml.sample` ships `server.api_key: "glove"`, so a fresh copy enables `POST /api/gtfs/reload` and the disruption writes with a guessable key. Change it, set `GLOVE_API_KEY`, or empty it to disable those endpoints. The Docker API image blanks it (see [Docker](./docker.md)).
 ```
 
 ## Download Data
@@ -28,15 +42,21 @@ bin/download.sh traffic  # Sytadin road geometry (for the traffic overlay)
 By default, this downloads data for **Ile-de-France** (Paris region). You can change the data URLs in `config.yaml` to use GTFS feeds from other regions.
 ```
 
-## Start Valhalla (Optional)
+## Start Valhalla
 
-Valhalla provides walking, cycling, and driving directions. Without it, only public transit routing is available.
+Valhalla provides walking, cycling, and driving directions, and times the walks to and from stops.
 
 ```bash
-bin/valhalla.sh    # Pulls Docker image, builds tiles, starts on port 8002
+bin/valhalla.sh start     # Pulls the pinned image, builds tiles, starts on valhalla.port (8002)
+bin/valhalla.sh status    # Is the container running?
+bin/valhalla.sh stop      # Remove the container (tiles stay in data/valhalla)
 ```
 
-This creates a Docker container named `valhalla` that builds routing tiles from the downloaded OSM data.
+Without a subcommand the script only prints its usage. `start` creates a Docker container named `glove-valhalla` that builds routing tiles from the OSM data in `data/osm` (run `bin/download.sh osm` first) into `data/valhalla`.
+
+```admonish warning title="Not optional with bin/start.sh"
+`bin/start.sh` (production and `--dev` modes) runs `bin/valhalla.sh start` itself when the container is not running, and stops with an error if that fails — no Docker, or no `.pbf` in `data/osm`. To run without Valhalla (public transit only, with straight-line walk estimates), start the backend manually (see [Manual Start](#manual-start)). `--docker` mode brings its own Valhalla service.
+```
 
 ## Run
 
@@ -128,7 +148,7 @@ Builds and runs the `api`, `portal` and `valhalla` images with `docker/docker-co
 | `GLOVE_HTTPS_PORT` / `GLOVE_HTTP_PORT` | `443` / `80` | Caddy ports, e.g. `8443`/`8880` to run without privileged ports. URLs then carry the port (`https://portal.glove:8443`) |
 
 ```admonish warning title="CORS"
-The browser sends the portal's origin with every API call, and the backend only accepts origins listed in `server.cors_origins` (`config.yaml`, default `https://portal.glove`). After changing `GLOVE_PORTAL_HOST` or the HTTPS port, add the new origin there — e.g. `https://portal.glove:8443`.
+The browser sends the portal's origin with every API call, and the backend only accepts origins listed in `server.cors_origins` (`config.yaml`; empty by default, `config.yaml.sample` lists `https://portal.glove`). `bin/start.sh` warns when the portal origin is missing (except in `--docker` mode). After changing `GLOVE_PORTAL_HOST` or the HTTPS port, add the new origin there — e.g. `https://portal.glove:8443`.
 ```
 
 ### Manual Start

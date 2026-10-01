@@ -1,3 +1,6 @@
+# Local configuration (may hold secrets); config.yaml.sample is the template
+/config.yaml
+
 # Rust
 /target
 
@@ -26,3 +29,4 @@ Thumbs.db
 
 # Claude Code
 .claude
+results/

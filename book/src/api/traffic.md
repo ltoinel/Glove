@@ -60,7 +60,7 @@ The live snapshot, refreshed in the background every `traffic.refresh_secs`.
 | `states` | `fluid`, `jam` or `closed`. Segments reported as `Non renseigne` upstream, or missing from the geometry, are omitted rather than represented. |
 | `events` | `category` is normalized to `roadwork`, `accident`, `jam`, `weather` or `event`. `pos` is the midpoint of the event's first located segment. `end` is present only when the feed announces an expected end. |
 
-Responses use `503` with a `traffic_unavailable` error while the overlay is enabled but no snapshot has been fetched yet.
+`GET /api/traffic/states` answers `503` with a `traffic_unavailable` error while the overlay is enabled but no snapshot has been fetched yet. The geometry endpoint never does: it is ready as soon as the server starts.
 
 ## Behaviour when disabled
 

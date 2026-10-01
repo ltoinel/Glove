@@ -79,7 +79,9 @@ yaml_val() {
 
 # --- Prerequisites ---
 [ -n "$1" ] || usage
-[ -f "$CONFIG" ] || fail "Config file not found: $CONFIG"
+# shellcheck source=lib/ensure-config.sh
+. "$ROOT/bin/lib/ensure-config.sh"
+ensure_config "$ROOT"
 command -v wget >/dev/null || fail "wget not found. Install it first."
 command -v unzip >/dev/null || fail "unzip not found. Install it first."
 command -v gunzip >/dev/null || fail "gunzip not found. Install it first."

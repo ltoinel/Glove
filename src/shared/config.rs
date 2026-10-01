@@ -39,6 +39,10 @@ pub struct AppConfig {
     #[serde(default)]
     pub bike: BikeConfig,
 
+    /// Default pedestrian walking profile (first/last mile, walk directions).
+    #[serde(default)]
+    pub pedestrian: PedestrianConfig,
+
     /// Wheelchair accessibility routing options.
     #[serde(default)]
     pub wheelchair: WheelchairConfig,
@@ -203,7 +207,9 @@ pub struct RoutingConfig {
     #[serde(default = "default_max_journeys")]
     pub max_journeys: usize,
 
-    /// Maximum number of transfers (vehicle changes) allowed in a journey.
+    /// Maximum number of transfers (vehicle changes) allowed in a journey. Each
+    /// one is a RAPTOR round, and the per-thread search tables grow with it
+    /// (`(max_transfers + 2) × stops` entries each).
     #[serde(default = "default_max_transfers")]
     pub max_transfers: usize,
 
@@ -211,15 +217,43 @@ pub struct RoutingConfig {
     #[serde(default = "default_transfer_time")]
     pub default_transfer_time: u32,
 
+    /// Seconds to change between two train/RER/metro vehicles at one stop.
+    /// IDFM merges every platform of a station into a single stop with no
+    /// transfer time of its own, so without this a change at Gare du Nord or
+    /// Châtelet would cost only `default_transfer_time`. Default: 300.
+    #[serde(default = "default_rail_change_time")]
+    pub rail_change_time: u32,
+
     /// Maximum journey duration in seconds.
     #[serde(default = "default_max_duration")]
     pub max_duration: u32,
+
+    /// Seconds after midnight at which the service day starts. A query before
+    /// it is answered on the previous day's services, shifted by 24 h, since
+    /// GTFS files night runs under the day they started (25:30:00). Default:
+    /// 14400 (04:00).
+    #[serde(default = "default_service_day_start")]
+    pub service_day_start: u32,
 
     /// Maximum walking distance to reach the nearest stop (meters).
     /// Coordinates beyond this radius will be rejected.
     /// Default: 1500 m (~20 min at 5 km/h).
     #[serde(default = "default_max_nearest_stop_distance")]
     pub max_nearest_stop_distance: u32,
+
+    /// Radius (meters) of a second search, run only when an address origin or
+    /// destination found no journey within `max_nearest_stop_distance` — the
+    /// rural case, where the nearest useful stop is a long walk away. Equal to
+    /// or below `max_nearest_stop_distance` disables it. Default: 2500.
+    #[serde(default = "default_fallback_stop_distance")]
+    pub fallback_stop_distance: u32,
+
+    /// How many of the nearest candidate stops get their walk from an address
+    /// timed by Valhalla before routing. The farther ones keep the straight-line
+    /// estimate, scaled by the detour Valhalla measured on the near ones. Bounds
+    /// the matrix request, whose cost grows with the stop count. Default: 30.
+    #[serde(default = "default_walk_matrix_stops")]
+    pub walk_matrix_stops: usize,
 
     /// Line-level diversity for alternatives. When `true`, the iterative search
     /// excludes the whole head line (all patterns of its route) after each
@@ -234,6 +268,12 @@ pub struct RoutingConfig {
     #[serde(default = "default_prefer_rail")]
     pub prefer_rail: bool,
 
+    /// `prefer_rail` only applies when a rail/metro/tram stop lies within this
+    /// many seconds of walk of both the origin and the destination. Otherwise
+    /// forbidding buses just trades a feeder bus for a long walk. Default: 600.
+    #[serde(default = "default_prefer_rail_max_walk")]
+    pub prefer_rail_max_walk: u32,
+
     /// Include turn-by-turn maneuvers (Valhalla) in walk/bike/car and transfer
     /// sections. Server-controlled only — not overridable per request. Default: `false`.
     #[serde(default = "default_maneuvers")]
@@ -246,10 +286,15 @@ impl Default for RoutingConfig {
             max_journeys: default_max_journeys(),
             max_transfers: default_max_transfers(),
             default_transfer_time: default_transfer_time(),
+            rail_change_time: default_rail_change_time(),
             max_duration: default_max_duration(),
+            service_day_start: default_service_day_start(),
             max_nearest_stop_distance: default_max_nearest_stop_distance(),
+            fallback_stop_distance: default_fallback_stop_distance(),
+            walk_matrix_stops: default_walk_matrix_stops(),
             diverse_lines: default_diverse_lines(),
             prefer_rail: default_prefer_rail(),
+            prefer_rail_max_walk: default_prefer_rail_max_walk(),
             maneuvers: default_maneuvers(),
         }
     }
@@ -276,6 +321,21 @@ fn default_diverse_lines() -> bool {
 fn default_prefer_rail() -> bool {
     false
 }
+fn default_service_day_start() -> u32 {
+    4 * 3600
+}
+fn default_fallback_stop_distance() -> u32 {
+    2500
+}
+fn default_rail_change_time() -> u32 {
+    300
+}
+fn default_walk_matrix_stops() -> usize {
+    30
+}
+fn default_prefer_rail_max_walk() -> u32 {
+    600
+}
 fn default_maneuvers() -> bool {
     false
 }
@@ -293,6 +353,14 @@ pub struct ValhallaConfig {
     /// Valhalla routing engine port.
     #[serde(default = "default_valhalla_port")]
     pub port: u16,
+
+    /// Budget (seconds) for each pedestrian call made while answering a public
+    /// transport search: walk matrices and first/last-mile legs. Kept short so
+    /// a slow Valhalla degrades to estimates and missing shapes rather than a
+    /// stalled search. Bike and car directions use the HTTP client's own
+    /// timeout. Default: 5.
+    #[serde(default = "default_valhalla_pedestrian_timeout_secs")]
+    pub pedestrian_timeout_secs: u64,
 }
 
 impl Default for ValhallaConfig {
@@ -300,7 +368,20 @@ impl Default for ValhallaConfig {
         Self {
             host: default_valhalla_host(),
             port: default_valhalla_port(),
+            pedestrian_timeout_secs: default_valhalla_pedestrian_timeout_secs(),
         }
+    }
+}
+
+impl ValhallaConfig {
+    /// Base URL of the Valhalla HTTP API, without a trailing slash.
+    pub fn base_url(&self) -> String {
+        format!("http://{}:{}", self.host, self.port)
+    }
+
+    /// [`Self::pedestrian_timeout_secs`] as a [`std::time::Duration`].
+    pub fn pedestrian_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.pedestrian_timeout_secs)
     }
 }
 
@@ -310,12 +391,60 @@ fn default_valhalla_host() -> String {
 fn default_valhalla_port() -> u16 {
     8002
 }
+fn default_valhalla_pedestrian_timeout_secs() -> u64 {
+    5
+}
+
+// ---------------------------------------------------------------------------
+// Pedestrian
+// ---------------------------------------------------------------------------
+
+/// Valhalla pedestrian costing for an ordinary walker. The wheelchair profile
+/// ([`WheelchairConfig`]) replaces it when the request asks for one.
+#[derive(Debug, Deserialize)]
+pub struct PedestrianConfig {
+    /// Walking speed in km/h when the request gives none. Used both for the
+    /// straight-line estimates that pick candidate stops and for Valhalla, so
+    /// the two agree. Default: 5.0.
+    #[serde(default = "default_pedestrian_walking_speed")]
+    pub walking_speed: f64,
+
+    /// Valhalla penalty (seconds) per flight of stairs: a traveller may carry
+    /// luggage or a pushchair. Station transfers ignore it. Default: 30.
+    #[serde(default = "default_pedestrian_step_penalty")]
+    pub step_penalty: f64,
+
+    /// Valhalla penalty (seconds) for taking an elevator — mostly the wait.
+    /// Station transfers ignore it. Default: 60.
+    #[serde(default = "default_pedestrian_elevator_penalty")]
+    pub elevator_penalty: f64,
+}
+
+impl Default for PedestrianConfig {
+    fn default() -> Self {
+        Self {
+            walking_speed: default_pedestrian_walking_speed(),
+            step_penalty: default_pedestrian_step_penalty(),
+            elevator_penalty: default_pedestrian_elevator_penalty(),
+        }
+    }
+}
+
+fn default_pedestrian_walking_speed() -> f64 {
+    5.0
+}
+fn default_pedestrian_step_penalty() -> f64 {
+    30.0
+}
+fn default_pedestrian_elevator_penalty() -> f64 {
+    60.0
+}
 
 // ---------------------------------------------------------------------------
 // Map
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct MapConfig {
     /// Map center latitude.
     #[serde(default = "default_map_center_lat")]
@@ -346,13 +475,41 @@ pub struct MapConfig {
     pub bounds_ne_lon: f64,
 
     /// Upstream tile server URL template for tile caching proxy.
-    /// Placeholders: `{s}` (subdomain), `{z}`, `{x}`, `{y}`, `{r}` (retina).
+    /// Placeholders: `{s}` (subdomain), `{z}`, `{x}`, `{y}`, `{r}` (retina),
+    /// `{key}` ([`Self::tile_api_key`]).
     #[serde(default = "default_tile_url")]
     pub tile_url: String,
+
+    /// API key of the tile provider, substituted for `{key}` in `tile_url`.
+    /// Only the server's proxy uses it, so it never reaches the browser.
+    #[serde(default)]
+    pub tile_api_key: String,
 
     /// Browser cache duration for tiles, in seconds.
     #[serde(default = "default_tile_cache_duration")]
     pub tile_cache_duration: u32,
+}
+
+/// Hand-written so that `info!(?config)` at startup cannot print the tile
+/// API key, nor a key written directly into `tile_url`.
+impl std::fmt::Debug for MapConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MapConfig")
+            .field("center_lat", &self.center_lat)
+            .field("center_lon", &self.center_lon)
+            .field("zoom", &self.zoom)
+            .field("bounds_sw_lat", &self.bounds_sw_lat)
+            .field("bounds_sw_lon", &self.bounds_sw_lon)
+            .field("bounds_ne_lat", &self.bounds_ne_lat)
+            .field("bounds_ne_lon", &self.bounds_ne_lon)
+            .field(
+                "tile_url",
+                &crate::shared::util::redact_query(&self.tile_url),
+            )
+            .field("tile_api_key_set", &!self.tile_api_key.is_empty())
+            .field("tile_cache_duration", &self.tile_cache_duration)
+            .finish()
+    }
 }
 
 impl Default for MapConfig {
@@ -366,6 +523,7 @@ impl Default for MapConfig {
             bounds_ne_lat: default_bounds_ne_lat(),
             bounds_ne_lon: default_bounds_ne_lon(),
             tile_url: default_tile_url(),
+            tile_api_key: String::new(),
             tile_cache_duration: default_tile_cache_duration(),
         }
     }
@@ -698,7 +856,10 @@ impl AppConfig {
             }
         }
 
-        info!("No config file found at {}, using defaults", path.display());
+        info!(
+            "No config file found at {}, using defaults (template: config.yaml.sample)",
+            path.display()
+        );
         let mut config = Self::default();
         config.apply_env_overrides(|key| std::env::var(key).ok());
         config
@@ -718,6 +879,13 @@ impl AppConfig {
             info!("server.api_key overridden by GLOVE_API_KEY");
             self.server.api_key = key;
         }
+        if let Some(key) = lookup("GLOVE_TILE_API_KEY") {
+            info!("map.tile_api_key overridden by GLOVE_TILE_API_KEY");
+            self.map.tile_api_key = key;
+        }
+        if !self.map.tile_api_key.is_empty() && !self.map.tile_url.contains("{key}") {
+            tracing::warn!("map.tile_api_key is set but map.tile_url has no {{key}} placeholder");
+        }
         if let Some(host) = lookup("GLOVE_VALHALLA_HOST").filter(|h| !h.is_empty()) {
             info!("valhalla.host overridden by GLOVE_VALHALLA_HOST: {host}");
             self.valhalla.host = host;
@@ -735,6 +903,55 @@ impl AppConfig {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn every_routing_setting_is_read_from_yaml() {
+        // Unknown keys are ignored, so a misspelt key would silently keep its
+        // default: set every field away from it and check each one lands.
+        let yaml = "
+            max_journeys: 7
+            max_transfers: 2
+            default_transfer_time: 90
+            rail_change_time: 240
+            max_duration: 3600
+            service_day_start: 10800
+            max_nearest_stop_distance: 1000
+            fallback_stop_distance: 3000
+            walk_matrix_stops: 12
+            diverse_lines: true
+            prefer_rail: true
+            prefer_rail_max_walk: 420
+            maneuvers: true
+        ";
+        let routing: super::RoutingConfig = serde_yaml::from_str(yaml).expect("valid routing");
+        assert_eq!(routing.max_journeys, 7);
+        assert_eq!(routing.max_transfers, 2);
+        assert_eq!(routing.default_transfer_time, 90);
+        assert_eq!(routing.rail_change_time, 240);
+        assert_eq!(routing.max_duration, 3600);
+        assert_eq!(routing.service_day_start, 10800);
+        assert_eq!(routing.max_nearest_stop_distance, 1000);
+        assert_eq!(routing.fallback_stop_distance, 3000);
+        assert_eq!(routing.walk_matrix_stops, 12);
+        assert!(routing.diverse_lines);
+        assert!(routing.prefer_rail);
+        assert_eq!(routing.prefer_rail_max_walk, 420);
+        assert!(routing.maneuvers);
+    }
+
+    #[test]
+    fn the_sample_config_loads() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("config.yaml.sample");
+        let content = std::fs::read_to_string(path).expect("config.yaml.sample is tracked");
+        let config: super::AppConfig = serde_yaml::from_str(&content).expect("sample parses");
+        assert_eq!(config.routing.rail_change_time, 300);
+        assert_eq!(config.routing.walk_matrix_stops, 30);
+        assert_eq!(config.routing.service_day_start, 4 * 3600);
+        assert_eq!(config.valhalla.pedestrian_timeout_secs, 5);
+        assert_eq!(config.pedestrian.walking_speed, 5.0);
+        assert_eq!(config.pedestrian.step_penalty, 30.0);
+        assert_eq!(config.pedestrian.elevator_penalty, 60.0);
+    }
 
     #[test]
     fn env_overrides_replace_valhalla_host_and_port() {
@@ -757,6 +974,26 @@ mod tests {
 
         cfg.apply_env_overrides(|key| (key == "GLOVE_API_KEY").then(String::new));
         assert!(cfg.server.api_key.is_empty());
+    }
+
+    #[test]
+    fn env_override_replaces_tile_api_key() {
+        let mut cfg = AppConfig::default();
+        cfg.apply_env_overrides(|key| (key == "GLOVE_TILE_API_KEY").then(|| "carto".into()));
+        assert_eq!(cfg.map.tile_api_key, "carto");
+    }
+
+    #[test]
+    fn map_config_debug_hides_tile_api_key() {
+        let map = MapConfig {
+            tile_url: "https://tiles.example/{z}/{x}/{y}.png?key=inline-secret".into(),
+            tile_api_key: "config-secret".into(),
+            ..MapConfig::default()
+        };
+        let printed = format!("{map:?}");
+        assert!(!printed.contains("config-secret"));
+        assert!(!printed.contains("inline-secret"));
+        assert!(printed.contains("tile_api_key_set: true"));
     }
 
     #[test]

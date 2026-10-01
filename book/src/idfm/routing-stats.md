@@ -4,7 +4,7 @@ This page presents routing statistics for the IDFM GTFS dataset processed by Glo
 
 ## RAPTOR Index
 
-After loading and pre-processing the GTFS data, Glove builds a RAPTOR index with the following characteristics:
+After loading and pre-processing the GTFS data, Glove builds a RAPTOR index with the following characteristics (dataset loaded on 2026-09-28):
 
 | Metric | Value |
 |--------|------:|
@@ -45,6 +45,10 @@ python3 scripts/benchmark.py --rounds 10 --concurrency 1 --datetime 20261006T083
 ## Indoor Routing Coverage
 
 Valhalla pedestrian routing enriches transfer sections with indoor maneuvers when OSM data is available.
+
+```admonish warning title="Earlier dataset"
+These indoor figures date from April 2026 and were not regenerated with the current data: the dataset loaded on 2026-09-28 has **96,240 unique transfer pairs**, not 71,479. Regenerate them with `python3 scripts/check_indoor.py` (Valhalla on port 8002; one route request per pair, so it takes a while). Details in [Indoor Routing Coverage](./indoor-coverage.md).
+```
 
 | Metric | Value |
 |--------|------:|

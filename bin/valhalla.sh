@@ -3,6 +3,9 @@ set -e
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CONFIG="$ROOT/config.yaml"
+# shellcheck source=lib/ensure-config.sh
+. "$ROOT/bin/lib/ensure-config.sh"
+ensure_config "$ROOT"
 OSM_DIR="$ROOT/data/osm"
 VALHALLA_DIR="$ROOT/data/valhalla"
 CONTAINER_NAME="glove-valhalla"
