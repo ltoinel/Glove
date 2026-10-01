@@ -31,8 +31,6 @@ use crate::transit::realtime::index::{PatternDeltas, RealtimeIndex};
 
 /// Sentinel value representing an unreachable stop.
 const INFINITY: u32 = u32::MAX;
-/// Maximum number of RAPTOR rounds (max_transfers + 1).
-const MAX_ROUNDS: usize = 8;
 
 // ---------------------------------------------------------------------------
 // Data structures
@@ -1070,6 +1068,11 @@ pub struct QueryOptions<'a> {
     pub targets: &'a [(usize, u32)],
     /// Upper bound on journey duration in seconds; [`INFINITY`] disables it.
     pub max_duration: u32,
+    /// Seconds needed to change vehicles at the stop just alighted at. Foot
+    /// transfers carry their own duration; this covers the change that has no
+    /// transfer at all, which a station merged into a single stop makes
+    /// common (every RER line at Gare du Nord shares one stop).
+    pub change_times: ChangeTimes,
     /// Real-time overlay. `None` searches the published schedule alone.
     pub realtime: Option<&'a RealtimeIndex>,
     /// Operator-authored disruptions in force at the query instant. `None`
@@ -1095,6 +1098,7 @@ impl<'a> QueryOptions<'a> {
             wheelchair,
             targets: &[],
             max_duration: INFINITY,
+            change_times: ChangeTimes::default(),
             realtime: None,
             disruptions: None,
         }
@@ -1155,7 +1159,9 @@ pub fn raptor_query_bounded(
     options: &QueryOptions<'_>,
 ) -> RaptorResult {
     let n = data.stops.len();
-    let rounds = options.max_transfers.min(MAX_ROUNDS - 1) + 1;
+    // One round per vehicle boarded. `routing.max_transfers` is the only
+    // bound: the per-thread tables are sized `(rounds + 1) × stops`.
+    let rounds = options.max_transfers + 1;
 
     // Inclusive horizon: a journey arriving exactly at departure + max_duration
     // is still valid (the post-filter keeps `duration <= max_duration`).
@@ -1346,68 +1352,164 @@ fn scan_pattern(
             current_trip = None;
         }
 
-        // A closed stop serves nobody: no boarding, and no alighting below.
+        // A closed stop serves nobody: no alighting, and no boarding below.
         let stop_blocked = options.stop_blocked(stop_idx);
 
-        // Try to board an earlier trip at this stop
-        if !stop_blocked
-            && buf.tau[k - 1][stop_idx] != INFINITY
-            && (!fifo
-                || can_catch_earlier_trip(pattern, current_trip, pos, buf.tau[k - 1][stop_idx]))
+        // Alight before boarding, as in the reference RAPTOR: the trip held
+        // here was boarded at an earlier stop. Boarding first would let the
+        // trip just boarded "arrive" at its own boarding stop — at its arrival
+        // time, which precedes its departure by the dwell — so the traveller
+        // would gain the dwell and catch a vehicle that has already left.
+        if let Some(trip_idx) = current_trip
+            && !stop_blocked
         {
-            let board_time = buf.tau[k - 1][stop_idx];
-            if let Some(trip_idx) = find_earliest_trip(pattern, pos, board_time, options, rt) {
-                match current_trip {
-                    None => {
+            let ride = Ride {
+                pat_idx,
+                trip_idx,
+                board_pos,
+            };
+            alight(data, &ride, pos, k, options, buf);
+        }
+
+        // Try to board an earlier trip at this stop
+        let reached = buf.tau[k - 1][stop_idx];
+        if stop_blocked || reached == INFINITY {
+            continue;
+        }
+        let board_time = reached.saturating_add(change_time(
+            data,
+            buf.labels[k - 1][stop_idx],
+            pat_idx,
+            pos,
+            &options.change_times,
+        ));
+        if (!fifo || can_catch_earlier_trip(pattern, current_trip, pos, board_time))
+            && let Some(trip_idx) = find_earliest_trip(pattern, pos, board_time, options, rt)
+        {
+            match current_trip {
+                None => {
+                    current_trip = Some(trip_idx);
+                    board_pos = pos;
+                }
+                Some(curr) => {
+                    // Compare real arrivals, not scheduled ones: a delayed
+                    // trip must not look better than it is. A skipped call
+                    // is not an improvement, so it is compared as "never"
+                    // rather than through `Option`'s ordering, which ranks
+                    // `None` first.
+                    let curr_arr = trip_arrival(pattern, rt, curr, pos).unwrap_or(INFINITY);
+                    let new_arr = trip_arrival(pattern, rt, trip_idx, pos).unwrap_or(INFINITY);
+                    if new_arr < curr_arr {
                         current_trip = Some(trip_idx);
                         board_pos = pos;
-                    }
-                    Some(curr) => {
-                        // Compare real arrivals, not scheduled ones: a delayed
-                        // trip must not look better than it is. A skipped call
-                        // is not an improvement, so it is compared as "never"
-                        // rather than through `Option`'s ordering, which ranks
-                        // `None` first.
-                        let curr_arr = trip_arrival(pattern, rt, curr, pos).unwrap_or(INFINITY);
-                        let new_arr = trip_arrival(pattern, rt, trip_idx, pos).unwrap_or(INFINITY);
-                        if new_arr < curr_arr {
-                            current_trip = Some(trip_idx);
-                            board_pos = pos;
-                        }
                     }
                 }
             }
         }
+    }
+}
 
-        // If on a trip, update arrival time at this stop
-        let Some(trip_idx) = current_trip else {
-            continue;
-        };
-        if stop_blocked {
-            continue;
-        }
-        if options.wheelchair && data.stops[stop_idx].wheelchair_boarding == 2 {
-            continue;
-        }
-        // A call the feed reports as skipped cannot be alighted at.
-        let Some(arr) = trip_arrival(pattern, rt, trip_idx, pos) else {
-            continue;
-        };
-        // Target / max-duration pruning: skip stops that can no longer improve
-        // the journey to a target. We must NOT `break` here — a later stop may
-        // re-board an earlier trip and bring the arrival back under the bound —
-        // so we only skip the relaxation (and thus the marking + transfers).
-        if arr < buf.best[stop_idx] && arr < buf.cutoff {
-            buf.set_arrival(k, stop_idx, arr);
-            buf.labels[k][stop_idx] = Some(Label::Trip {
-                pattern_idx: label_idx(pat_idx),
-                trip_idx: label_idx(trip_idx),
-                board_pos: label_idx(board_pos),
-                alight_pos: label_idx(pos),
-            });
-            buf.new_marked[stop_idx] = true;
-            buf.trip_improved.push(stop_idx);
-        }
+/// Seconds to change vehicles at a single stop.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ChangeTimes {
+    /// Any change that is not between two heavy-rail vehicles.
+    pub default: u32,
+    /// Between two train, RER or metro vehicles. Their platforms are minutes
+    /// apart in a large station, and IDFM merges them into a single stop that
+    /// `transfers.txt` gives no time of its own (`routing.rail_change_time`).
+    pub rail: u32,
+}
+
+/// GTFS route types whose vehicles stop at platforms deep inside a station:
+/// metro (1), rail (2) and their extended codes (100–199 railway, 400–499
+/// urban railway). Tram and bus stop at the kerb.
+fn is_heavy_rail(route_type: u16) -> bool {
+    matches!(route_type, 1 | 2 | 100..=199 | 400..=499)
+}
+
+/// Seconds to allow before boarding pattern `pat_idx` at `pos`, given how the
+/// stop was reached in the previous round.
+///
+/// Zero after walking there (the foot transfer already counts the time) or
+/// from the origin. Otherwise the traveller is stepping off one vehicle onto
+/// another at the same stop, which takes [`ChangeTimes::rail`] between two
+/// heavy-rail vehicles and [`ChangeTimes::default`] otherwise — unless the
+/// vehicle simply carries on: GTFS feeds split some runs into two trip ids at
+/// an intermediate stop, the first ending where the second starts on the same
+/// route, and staying aboard costs nothing.
+fn change_time(
+    data: &RaptorData,
+    arrived_by: Option<Label>,
+    pat_idx: usize,
+    pos: usize,
+    change_times: &ChangeTimes,
+) -> u32 {
+    let Some(Label::Trip {
+        pattern_idx: arrived_idx,
+        alight_pos,
+        ..
+    }) = arrived_by
+    else {
+        return 0;
+    };
+    let arrived_idx = arrived_idx as usize;
+    let arrived_on = &data.patterns[arrived_idx];
+    let continues_same_run = pos == 0
+        && alight_pos as usize + 1 == arrived_on.stops.len()
+        && arrived_on.route_id == data.patterns[pat_idx].route_id;
+    if continues_same_run {
+        return 0;
+    }
+    let route_types = data.pattern_route_types();
+    let heavy_rail = |idx: usize| route_types[idx].is_some_and(is_heavy_rail);
+    if heavy_rail(arrived_idx) && heavy_rail(pat_idx) {
+        change_times.rail
+    } else {
+        change_times.default
+    }
+}
+
+/// The vehicle trip held while scanning a pattern, and where it was boarded.
+struct Ride {
+    pat_idx: usize,
+    trip_idx: usize,
+    board_pos: usize,
+}
+
+/// Record the arrival at `pos` of a ride boarded at an earlier position, when
+/// it improves on the best known arrival there.
+fn alight(
+    data: &RaptorData,
+    ride: &Ride,
+    pos: usize,
+    k: usize,
+    options: &QueryOptions<'_>,
+    buf: &mut RaptorBuffers,
+) {
+    let pattern = &data.patterns[ride.pat_idx];
+    let stop_idx = pattern.stops[pos];
+    if options.wheelchair && data.stops[stop_idx].wheelchair_boarding == 2 {
+        return;
+    }
+    // A call the feed reports as skipped cannot be alighted at.
+    let rt = options.pattern_deltas(ride.pat_idx);
+    let Some(arr) = trip_arrival(pattern, rt, ride.trip_idx, pos) else {
+        return;
+    };
+    // Target / max-duration pruning: skip stops that can no longer improve
+    // the journey to a target. The caller must NOT stop scanning — a later stop
+    // may re-board an earlier trip and bring the arrival back under the bound —
+    // so only the relaxation (and thus the marking + transfers) is skipped.
+    if arr < buf.best[stop_idx] && arr < buf.cutoff {
+        buf.set_arrival(k, stop_idx, arr);
+        buf.labels[k][stop_idx] = Some(Label::Trip {
+            pattern_idx: label_idx(ride.pat_idx),
+            trip_idx: label_idx(ride.trip_idx),
+            board_pos: label_idx(ride.board_pos),
+            alight_pos: label_idx(pos),
+        });
+        buf.new_marked[stop_idx] = true;
+        buf.trip_improved.push(stop_idx);
     }
 }
 
@@ -2587,6 +2689,238 @@ mod tests {
     }
 
     #[test]
+    fn boarding_never_yields_an_arrival_at_the_boarding_stop() {
+        // Every call dwells one minute: the trip leaving S1 at 08:00 reaches
+        // S2 at 08:10 and leaves it at 08:11. Boarding it at S2 at 08:11 must
+        // not record an "arrival" at S2 at 08:10 — that minute would let the
+        // traveller catch any vehicle leaving S2 in between.
+        let data = RaptorData::build(test_support::timetabled_gtfs(&[28800]), 120);
+        let s2 = data.stop_index["S2"];
+        let departure = 28800 + 660;
+        let active = data.active_services("20260406");
+        let result = raptor_query(
+            &data,
+            &[(s2, 0)],
+            departure,
+            &active,
+            3,
+            &FxHashSet::default(),
+            false,
+        );
+        for (k, tau) in result.buf.tau.iter().enumerate() {
+            assert!(
+                tau[s2] >= departure,
+                "round {k} reaches S2 at {} before leaving it at {departure}",
+                tau[s2]
+            );
+        }
+    }
+
+    /// Add a trip to `gtfs` calling at `calls` — `(stop_id, arrival, departure)`.
+    fn add_trip(
+        gtfs: &mut gtfs::GtfsData,
+        trip_id: &str,
+        route_id: &str,
+        calls: &[(&str, &str, &str)],
+    ) {
+        gtfs.routes
+            .entry(route_id.to_string())
+            .or_insert_with(|| gtfs::Route {
+                route_id: route_id.to_string(),
+                agency_id: "A1".to_string(),
+                route_short_name: route_id.to_string(),
+                route_long_name: String::new(),
+                route_type: 1,
+                route_color: String::new(),
+                route_text_color: String::new(),
+            });
+        gtfs.trips.insert(
+            trip_id.to_string(),
+            gtfs::Trip {
+                route_id: route_id.to_string(),
+                service_id: "SVC1".to_string(),
+                trip_id: trip_id.to_string(),
+                trip_headsign: String::new(),
+                wheelchair_accessible: 0,
+            },
+        );
+        for (sequence, (stop_id, arrival, departure)) in calls.iter().enumerate() {
+            gtfs.stop_times.push(gtfs::StopTime {
+                trip_id: trip_id.to_string(),
+                arrival_time: (*arrival).to_string(),
+                departure_time: (*departure).to_string(),
+                stop_id: (*stop_id).to_string(),
+                stop_sequence: sequence as u32,
+                ..Default::default()
+            });
+        }
+    }
+
+    /// Add a stop of its own, outside any station, so that only vehicles reach it.
+    fn add_lone_stop(gtfs: &mut gtfs::GtfsData, stop_id: &str) {
+        gtfs.stops.insert(
+            stop_id.to_string(),
+            gtfs::Stop {
+                stop_id: stop_id.to_string(),
+                stop_name: stop_id.to_string(),
+                stop_lon: 2.30,
+                stop_lat: 48.80,
+                parent_station: String::new(),
+                wheelchair_boarding: 0,
+            },
+        );
+    }
+
+    /// Arrival at `to` leaving `from` at 07:55 with the given change time.
+    fn arrival_with_change_time(
+        data: &RaptorData,
+        from: &str,
+        to: &str,
+        change: u32,
+    ) -> Option<u32> {
+        let active = data.active_services("20260406");
+        let excluded = FxHashSet::default();
+        let target = data.stop_index[to];
+        let options = QueryOptions {
+            change_times: ChangeTimes {
+                default: change,
+                rail: change,
+            },
+            ..QueryOptions::new(&active, 3, &excluded, false)
+        };
+        let result = raptor_query_bounded(data, &[(data.stop_index[from], 0)], 28500, &options);
+        reconstruct_journeys(data, &result, &[(target, 0)], None)
+            .last()
+            .and_then(|sections| sections.last())
+            .map(|section| section.arrival_time)
+    }
+
+    /// Line R1 reaches S2 at 08:10 (test fixture); line R2 leaves S2 for S5 at
+    /// 08:11 and at 08:20.
+    fn change_at_s2_gtfs() -> gtfs::GtfsData {
+        let mut gtfs = make_test_gtfs();
+        gtfs.transfers.clear();
+        add_lone_stop(&mut gtfs, "S5");
+        add_trip(
+            &mut gtfs,
+            "X1",
+            "R2",
+            &[
+                ("S2", "08:11:00", "08:11:00"),
+                ("S5", "08:30:00", "08:30:00"),
+            ],
+        );
+        add_trip(
+            &mut gtfs,
+            "X2",
+            "R2",
+            &[
+                ("S2", "08:20:00", "08:20:00"),
+                ("S5", "08:39:00", "08:39:00"),
+            ],
+        );
+        gtfs
+    }
+
+    #[test]
+    fn changing_vehicles_at_one_stop_takes_the_change_time() {
+        let data = RaptorData::build(change_at_s2_gtfs(), 120);
+        // One minute after alighting is too short for a 120 s change.
+        assert_eq!(
+            arrival_with_change_time(&data, "S1", "S5", 120),
+            Some(8 * 3600 + 39 * 60)
+        );
+    }
+
+    #[test]
+    fn a_zero_change_time_keeps_the_tight_connection() {
+        let data = RaptorData::build(change_at_s2_gtfs(), 120);
+        assert_eq!(
+            arrival_with_change_time(&data, "S1", "S5", 0),
+            Some(8 * 3600 + 30 * 60)
+        );
+    }
+
+    /// Arrival at S5 from S1 at 07:55 when line R2 also leaves S2 at 08:13 —
+    /// three minutes after line R1 (metro) gets there — with R2 of the given
+    /// GTFS route type, a 120 s default change and a 300 s rail change.
+    fn arrival_changing_to(route_type: u16) -> Option<u32> {
+        let mut gtfs = change_at_s2_gtfs();
+        add_trip(
+            &mut gtfs,
+            "X3",
+            "R2",
+            &[
+                ("S2", "08:13:00", "08:13:00"),
+                ("S5", "08:32:00", "08:32:00"),
+            ],
+        );
+        if let Some(route) = gtfs.routes.get_mut("R2") {
+            route.route_type = route_type;
+        }
+        let data = RaptorData::build(gtfs, 120);
+        let active = data.active_services("20260406");
+        let excluded = FxHashSet::default();
+        let options = QueryOptions {
+            change_times: ChangeTimes {
+                default: 120,
+                rail: 300,
+            },
+            ..QueryOptions::new(&active, 3, &excluded, false)
+        };
+        let target = data.stop_index["S5"];
+        let result = raptor_query_bounded(&data, &[(data.stop_index["S1"], 0)], 28500, &options);
+        reconstruct_journeys(&data, &result, &[(target, 0)], None)
+            .last()
+            .and_then(|sections| sections.last())
+            .map(|section| section.arrival_time)
+    }
+
+    #[test]
+    fn a_change_between_two_trains_takes_the_rail_change_time() {
+        // Metro to metro: three minutes is short of 300 s, so the 08:20 run.
+        assert_eq!(arrival_changing_to(1), Some(8 * 3600 + 39 * 60));
+    }
+
+    #[test]
+    fn a_change_to_a_bus_takes_the_default_change_time() {
+        // Metro to bus: three minutes clears 120 s, so the 08:13 run.
+        assert_eq!(arrival_changing_to(3), Some(8 * 3600 + 32 * 60));
+    }
+
+    #[test]
+    fn a_run_split_into_two_trips_continues_without_a_change() {
+        // Same route: one trip ends at S2 when the next one starts there, 30 s
+        // later. Ahead of line R1's 08:10 arrival, so it is the label kept at S2.
+        let mut gtfs = make_test_gtfs();
+        gtfs.transfers.clear();
+        add_lone_stop(&mut gtfs, "S5");
+        add_trip(
+            &mut gtfs,
+            "A1",
+            "R3",
+            &[
+                ("S1", "08:00:00", "08:00:00"),
+                ("S2", "08:09:00", "08:09:00"),
+            ],
+        );
+        add_trip(
+            &mut gtfs,
+            "A2",
+            "R3",
+            &[
+                ("S2", "08:09:30", "08:09:30"),
+                ("S5", "08:25:00", "08:25:00"),
+            ],
+        );
+        let data = RaptorData::build(gtfs, 120);
+        assert_eq!(
+            arrival_with_change_time(&data, "S1", "S5", 120),
+            Some(8 * 3600 + 25 * 60)
+        );
+    }
+
+    #[test]
     fn raptor_query_no_service() {
         let data = build_test_data();
         let source = data.stop_index["S1"];
@@ -3161,6 +3495,7 @@ mod tests {
                 wheelchair: false,
                 targets: &[(target, 0)],
                 max_duration: INFINITY,
+                change_times: ChangeTimes::default(),
                 realtime: rt,
                 disruptions: None,
             },
@@ -3224,6 +3559,7 @@ mod tests {
                 wheelchair: false,
                 targets: &[(target, 0)],
                 max_duration: INFINITY,
+                change_times: ChangeTimes::default(),
                 realtime: Some(&rt),
                 disruptions: None,
             },

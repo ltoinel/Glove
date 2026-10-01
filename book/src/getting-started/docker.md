@@ -55,7 +55,7 @@ docker run -d --name portal --network glove-net \
   glove-portal
 ```
 
-Then open **http://localhost:3000**. The backend:
+Then open **http://localhost:3000**. Valhalla is not part of this manual setup: the container reads `valhalla.host` (`localhost`, i.e. the container itself) unless you add `-e GLOVE_VALHALLA_HOST=<host> -e GLOVE_VALHALLA_PORT=<port>` pointing at a reachable Valhalla — or use Compose, which wires it for you. The backend:
 - Exposes port **8080** (API only)
 - Needs the `data/` directory mounted with GTFS data
 - Uses the `config.yaml` baked into the image unless one is mounted; the baked copy has an **empty `api_key`**, so reload and disruption writes stay disabled until `GLOVE_API_KEY` is set
@@ -67,24 +67,21 @@ Then open **http://localhost:3000**. The backend:
 For walk/bike/car routing, Valhalla runs as a separate container:
 
 ```bash
-bin/valhalla.sh
+bin/valhalla.sh start     # also: status, stop
 ```
 
-This script:
+`start`:
 1. Pulls the `ghcr.io/gis-ops/docker-valhalla/valhalla` Docker image, pinned by digest (the last upstream build, Valhalla 3.5.1)
-2. Builds routing tiles from the downloaded OSM data
-3. Starts the container on port **8002**
+2. Starts a container named `glove-valhalla` on `valhalla.port` from `config.yaml` (**8002** by default)
+3. Builds routing tiles from the OSM data in `data/osm` into `data/valhalla` (follow with `docker logs -f glove-valhalla`)
 
-The Valhalla configuration includes:
-- `include_platforms=True` to import platform/indoor data from OSM
-- `step_penalty` and `elevator_penalty` in pedestrian costing to fine-tune indoor routing preferences
-- Indoor maneuver support (elevator, stairs, escalator, enter/exit building) when OSM data is available
+The container is started with `include_platforms=True` to import platform/indoor data from OSM, plus elevation, admin and time-zone data (`build_elevation`, `build_admins`, `build_time_zones`). Indoor maneuvers (elevator, stairs, escalator, enter/exit building) appear when the OSM data carries them. The stair and elevator penalties are not container settings: Glove sends them with each pedestrian request (`pedestrian.*` and `wheelchair.*` in [Configuration](./configuration.md)).
 
 Make sure `config.yaml` points to the Valhalla host:
 
 ```yaml
 valhalla:
-  host: "localhost"    # or the Docker container name if using Docker networking
+  host: "localhost"    # or the container name (glove-valhalla) on a shared Docker network
   port: 8002
 ```
 
@@ -100,13 +97,18 @@ The portal's nginx config (`docker/nginx.conf`) proxies `/api` to the `api` serv
 
 - **Ports** are published on `127.0.0.1` only (`8080` for the API, `3000` for the portal): Caddy or a local browser reach them, the network does not.
 - **Valhalla** uses the same image, options and data (`data/osm`, `data/valhalla`) as `bin/valhalla.sh`, so the routing tiles are shared rather than rebuilt. Its port is not published — the API reaches it over the Compose network — so it does not collide with a `bin/valhalla.sh` container on `8002`.
-- **`config.yaml`** is the host's own file, mounted read-only. Only the Valhalla address differs inside Compose, and the `api` service overrides it through the environment:
+- **`config.yaml`** is the host's own file, mounted read-only. Create it first (`cp config.yaml.sample config.yaml`, which `bin/start.sh` does for you): otherwise Docker mounts an empty directory in its place. Only the Valhalla address differs inside Compose, and the `api` service overrides it through the environment:
 
 | Variable | Overrides | Compose value |
 |----------|-----------|---------------|
 | `GLOVE_VALHALLA_HOST` | `valhalla.host` | `valhalla` |
 | `GLOVE_VALHALLA_PORT` | `valhalla.port` | `8002` |
 | `GLOVE_API_KEY` | `server.api_key` | passed through from the caller's environment when set |
+| `GLOVE_TILE_API_KEY` | `map.tile_api_key` | passed through from the caller's environment when set |
+
+```admonish warning title="bin/start.sh --docker with sudo"
+When the user is not in the `docker` group, `bin/start.sh --docker` runs Compose through `sudo`, which resets the environment. It forwards `GLOVE_UID`, `GLOVE_GID` and `GLOVE_API_KEY` explicitly, but **not** `GLOVE_TILE_API_KEY`: in that case set `map.tile_api_key` in `config.yaml` instead, or run `docker compose` yourself.
+```
 
 ## Security
 

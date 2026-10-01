@@ -136,33 +136,15 @@ fn build_walk_request(
     to_lat: f64,
     to_lon: f64,
 ) -> RouteRequest {
-    let wheelchair = query.wheelchair.unwrap_or(false);
-    let mut opts = if wheelchair {
-        let wc = &config.wheelchair;
-        serde_json::json!({
-            "pedestrian": {
-                "step_penalty": wc.step_penalty,
-                "max_grade": wc.max_grade,
-                "use_hills": wc.use_hills,
-                "elevator_penalty": wc.elevator_penalty
-            }
-        })
-    } else {
-        serde_json::json!({
-            "pedestrian": {
-                "step_penalty": 30,
-                "elevator_penalty": 60
-            }
-        })
+    let walker = super::valhalla::Walker {
+        pedestrian: &config.pedestrian,
+        wheelchair: query
+            .wheelchair
+            .unwrap_or(false)
+            .then_some(&config.wheelchair),
+        requested_speed: query.walking_speed,
     };
-    let effective_speed = if wheelchair {
-        Some(config.wheelchair.walking_speed)
-    } else {
-        query.walking_speed
-    };
-    if let Some(speed) = effective_speed {
-        opts["pedestrian"]["walking_speed"] = serde_json::json!(speed.clamp(0.5, 25.5));
-    }
+    let opts = super::valhalla::pedestrian_costing(&walker, false);
 
     RouteRequest {
         locations: vec![
@@ -282,8 +264,14 @@ mod tests {
         let req = build_walk_request(&query, &cfg, 48.8, 2.3, 48.9, 2.4);
         assert_eq!(req.costing, "pedestrian");
         let opts = req.costing_options.as_ref().unwrap();
-        assert_eq!(opts["pedestrian"]["step_penalty"], 30);
-        assert_eq!(opts["pedestrian"]["elevator_penalty"], 60);
+        assert_eq!(
+            opts["pedestrian"]["step_penalty"],
+            cfg.pedestrian.step_penalty
+        );
+        assert_eq!(
+            opts["pedestrian"]["elevator_penalty"],
+            cfg.pedestrian.elevator_penalty
+        );
         assert_eq!(opts["pedestrian"]["walking_speed"], 4.5);
         assert_eq!(req.directions_options.units, "kilometers");
         assert_eq!(req.directions_options.language.as_deref(), Some("fr-FR"));

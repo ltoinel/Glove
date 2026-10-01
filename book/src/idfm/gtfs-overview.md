@@ -12,9 +12,11 @@ All GTFS data is loaded into memory at startup. There is no database — the ent
 
 ## Dataset at a Glance
 
+All figures on this page come from the IDFM dataset downloaded on 2026-09-28 (the `loaded_at` reported by `GET /api/gtfs/status`). They change with every IDFM release.
+
 | File | Records | What it contains |
 |------|--------:|-----------------|
-| **agencies** | 62 | Transit operators (RATP, SNCF, local bus companies...) |
+| **agencies** | 62 | Transit operators (RATP, RER, Transilien, local bus companies...) |
 | **routes** | 2,025 | Transit lines — each bus line, metro line, or RER line is a route |
 | **stops** | 53,446 | Physical locations where passengers board or alight |
 | **trips** | 496,393 | Individual vehicle runs — one bus doing its morning route is one trip |
@@ -47,9 +49,9 @@ A **route** is a transit line as passengers know it — "Metro line 4", "Bus 72"
 ### Stops
 
 A **stop** is a physical place where passengers board or leave a vehicle. GTFS has three levels:
-- **Stop points** (35,806) — the actual boarding location, like a specific platform or bus bay. "RER A, platform 1, Gare de Lyon" is a stop point.
-- **Stations** (15,381) — a group of stop points. "Gare de Lyon" is a station that contains stop points for RER A, RER D, metro 1, metro 14, and several bus lines.
-- **Entrances** (2,518) — physical entry/exit points to a station, like a specific stairway or elevator from street level.
+- **Stop points** (35,540) — the actual boarding location, like a specific platform or bus bay. "RER A, platform 1, Gare de Lyon" is a stop point.
+- **Stations** (15,390) — a group of stop points. "Gare de Lyon" is a station that contains stop points for RER A, RER D, metro 1, metro 14, and several bus lines.
+- **Entrances** (2,516) — physical entry/exit points to a station, like a specific stairway or elevator from street level.
 
 ### Trips
 
@@ -71,12 +73,12 @@ A **transfer** defines a walking connection between two stops, with a minimum tr
 
 | Mode | GTFS Type | Routes | Description |
 |------|----------:|-------:|-------------|
-| Bus | 3 | 1,952 | Urban and suburban bus lines |
+| Bus | 3 | 1,966 | Urban and suburban bus lines |
 | Rail | 2 | 24 | RER, Transilien, and TER regional trains |
 | Tramway | 0 | 17 | Tramway lines and automated shuttles |
 | Métro | 1 | 16 | Paris underground metro |
 | Funiculaire | 7 | 1 | Montmartre funicular |
-| Navette | 6 | 1 | Automated shuttle |
+| Câble (aerial lift) | 6 | 1 | Câble C1 cable car (Créteil – Villeneuve-Saint-Georges) |
 
 Bus routes represent **97%** of all routes by count, but metro and RER carry the majority of daily passengers. Glove routes across all modes.
 
@@ -152,33 +154,35 @@ GTFS organizes stops in a three-level hierarchy:
 
 | Level | Count | What it represents |
 |-------|------:|-------------------|
-| **Stop points** | 35,806 | The exact spot where you board — a platform, a bus bay, a specific door |
-| **Stations** | 15,381 | A named place grouping multiple stop points — "Gare du Nord" contains platforms for metro 4, metro 5, RER B, RER D, RER E, Transilien H, and bus stops |
-| **Entrances** | 2,518 | Physical ways into a station — a stairway, an elevator, a specific street-level door |
+| **Stop points** | 35,540 | The exact spot where you board — a platform, a bus bay, a specific door |
+| **Stations** | 15,390 | A named place grouping multiple stop points — "Gare du Nord" contains platforms for metro 4, metro 5, RER B, RER D, RER E, Transilien H, and bus stops |
+| **Entrances** | 2,516 | Physical ways into a station — a stairway, an elevator, a specific street-level door |
 
 This hierarchy is important for routing: when you search for "Gare du Nord", Glove finds the station and then considers all its stop points to find the best boarding platform for your journey.
 
 ## Top 15 Transit Operators
 
+Ranked by number of routes (`agency_id` in `routes.txt`):
+
 | Operator | Routes | Coverage |
 |----------|-------:|----------|
-| RATP | 246 | Metro, RER A/B, tramways, Paris buses |
-| Centre et Sud Yvelines | 109 | Bus network in southern Yvelines |
+| Centre et Sud Yvelines | 106 | Bus network in southern Yvelines |
+| RATP | 101 | All 16 metro lines, 8 tramway lines, Orlyval, the Montmartre funicular, 75 bus lines |
 | Poissy - Les Mureaux | 88 | Bus network in northern Yvelines |
-| Coeur d'Essonne | 66 | Bus network in central Essonne |
+| Cœur d'Essonne | 66 | Bus network in central Essonne |
+| Brie et 2 Morin | 65 | Bus network in eastern Seine-et-Marne |
+| Roissy Ouest | 65 | Bus network near CDG airport |
 | Mantois | 64 | Bus network around Mantes-la-Jolie |
-| Brie et 2 Morin | 64 | Bus network in eastern Seine-et-Marne |
-| Roissy Ouest | 63 | Bus network near CDG airport |
-| Meaux et Ourcq | 55 | Bus network around Meaux |
+| Marne et Brie | 62 | Bus network |
+| Meaux et Ourcq | 56 | Bus network around Meaux |
 | Pays Briard | 55 | Bus network in southern Seine-et-Marne |
 | Paris Saclay | 53 | Bus network around the Saclay plateau |
 | Argenteuil - Boucles de Seine | 53 | Bus network in northern Hauts-de-Seine |
 | Saint-Quentin-en-Yvelines | 51 | Bus network around SQY |
+| Fontainebleau - Moret | 50 | Bus network around Fontainebleau |
 | Provinois - Brie et Seine | 48 | Bus network in far eastern Seine-et-Marne |
-| Fontainebleau - Moret | 47 | Bus network around Fontainebleau |
-| Essonne Sud Ouest | 47 | Bus network in southwestern Essonne |
 
-RATP is by far the largest operator, running all metro lines, RER A and B, most tramway lines, and a massive bus network covering Paris and the near suburbs. The remaining 60 operators are organized by geographic zone and operate bus-only networks.
+Counted by routes, bus-heavy zone networks dominate: RATP is second, although it runs the whole metro and about half of the tramway lines. The feed does not attach rail lines to their operating companies: the 5 RER lines belong to an agency named **RER**, the 9 Transilien lines to **Transilien** and the 10 TER routes to **TER**. Of the 62 agencies, 52 run buses only; besides RATP and those three rail agencies, a few zone operators also run a fixed-guideway line — STRETTO (T4, T11, T14), RATP Cap Arc Sud et Ouest (T12, T13), Seine Orly (T9), Bièvre (T10), ADP (CDG VAL) and Marne et Seine (Câble C1).
 
 ## Data Source
 

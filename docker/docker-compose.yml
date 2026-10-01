@@ -40,6 +40,7 @@ services:
       # Passed through only when set in the caller's environment; otherwise
       # the api_key of the mounted config.yaml applies.
       - GLOVE_API_KEY
+      - GLOVE_TILE_API_KEY
     depends_on:
       - valhalla
     restart: unless-stopped

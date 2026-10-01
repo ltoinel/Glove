@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::shared::config::WheelchairConfig;
+use crate::shared::config::{PedestrianConfig, ValhallaConfig, WheelchairConfig};
 
 // ---------------------------------------------------------------------------
 // Valhalla request / response types
@@ -118,9 +118,144 @@ pub struct WalkLeg {
 // Pedestrian route helper
 // ---------------------------------------------------------------------------
 
-/// Budget for one pedestrian leg. A journey is enriched with several of them,
-/// so a slow Valhalla degrades to missing shapes rather than a stalled search.
-const PEDESTRIAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// Who is walking: the costing profile and speed of one request.
+#[derive(Clone, Copy)]
+pub struct Walker<'a> {
+    /// Default pedestrian profile (`pedestrian` in `config.yaml`).
+    pub pedestrian: &'a PedestrianConfig,
+    /// Wheelchair profile, replacing the pedestrian one — speed included —
+    /// when the request asks for accessible routing.
+    pub wheelchair: Option<&'a WheelchairConfig>,
+    /// Walking speed the request asked for (km/h), if any.
+    pub requested_speed: Option<f64>,
+}
+
+impl Walker<'_> {
+    /// Walking speed in km/h: the wheelchair profile's, else the requested
+    /// one, else the configured default.
+    pub fn speed_kmh(&self) -> f64 {
+        match self.wheelchair {
+            Some(wc) => wc.walking_speed,
+            None => self
+                .requested_speed
+                .unwrap_or(self.pedestrian.walking_speed),
+        }
+    }
+}
+
+/// Pedestrian costing options shared by every walk Glove asks Valhalla for,
+/// so a walk is timed the same way whether RAPTOR is choosing a stop, the
+/// journey is being drawn, or the walk endpoint answers.
+///
+/// `indoor_friendly` is for station transfers: stairs, escalators and
+/// elevators are the normal path through underground passages, so they cost
+/// nothing extra.
+pub fn pedestrian_costing(walker: &Walker<'_>, indoor_friendly: bool) -> serde_json::Value {
+    let mut opts = if let Some(wc) = walker.wheelchair {
+        // Wheelchair mode: avoid stairs, prefer elevators, limit grade
+        serde_json::json!({
+            "pedestrian": {
+                "step_penalty": wc.step_penalty,
+                "max_grade": wc.max_grade,
+                "use_hills": wc.use_hills,
+                "elevator_penalty": wc.elevator_penalty
+            }
+        })
+    } else if indoor_friendly {
+        serde_json::json!({
+            "pedestrian": {
+                "step_penalty": 0,
+                "elevator_penalty": 0,
+                "use_tunnels": 1.0
+            }
+        })
+    } else {
+        serde_json::json!({
+            "pedestrian": {
+                "step_penalty": walker.pedestrian.step_penalty,
+                "elevator_penalty": walker.pedestrian.elevator_penalty
+            }
+        })
+    };
+    opts["pedestrian"]["walking_speed"] = serde_json::json!(walker.speed_kmh().clamp(0.5, 25.5));
+    opts
+}
+
+#[derive(Serialize)]
+struct MatrixRequest {
+    sources: Vec<Location>,
+    targets: Vec<Location>,
+    costing: String,
+    costing_options: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+struct MatrixResponse {
+    sources_to_targets: Vec<Vec<MatrixCell>>,
+}
+
+#[derive(Deserialize)]
+struct MatrixCell {
+    /// Seconds; `null` when Valhalla finds no path between the two points.
+    time: Option<f64>,
+}
+
+/// Walking-time matrix between two sets of `(lon, lat)` points, for first and
+/// last-mile walks.
+///
+/// Row `i`, column `j` is the walk from `sources[i]` to `targets[j]` in
+/// seconds, `None` where Valhalla finds no path. The whole call is `None` when
+/// Valhalla is unreachable or rejects the request (too many locations), so the
+/// caller can keep its own estimate.
+pub async fn pedestrian_durations(
+    valhalla: &ValhallaConfig,
+    sources: &[(f64, f64)],
+    targets: &[(f64, f64)],
+    walker: &Walker<'_>,
+) -> Option<Vec<Vec<Option<u32>>>> {
+    let locations = |points: &[(f64, f64)]| -> Vec<Location> {
+        points
+            .iter()
+            .map(|&(lon, lat)| Location { lat, lon })
+            .collect()
+    };
+    let req = MatrixRequest {
+        sources: locations(sources),
+        targets: locations(targets),
+        costing: "pedestrian".to_string(),
+        costing_options: pedestrian_costing(walker, false),
+    };
+
+    let url = format!("{}/sources_to_targets", valhalla.base_url());
+    let resp = crate::shared::http::client()
+        .post(&url)
+        .timeout(valhalla.pedestrian_timeout())
+        .json(&req)
+        .send()
+        .await
+        .inspect_err(|e| tracing::debug!("Valhalla matrix unreachable: {e}"))
+        .ok()?;
+    if !resp.status().is_success() {
+        tracing::debug!("Valhalla matrix returned {}", resp.status());
+        return None;
+    }
+    let matrix: MatrixResponse = resp
+        .json()
+        .await
+        .inspect_err(|e| tracing::debug!("Invalid Valhalla matrix response: {e}"))
+        .ok()?;
+    Some(
+        matrix
+            .sources_to_targets
+            .into_iter()
+            .map(|row| {
+                row.into_iter()
+                    .map(|cell| cell.time.map(|t| t.ceil() as u32))
+                    .collect()
+            })
+            .collect(),
+    )
+}
 
 /// Compute a pedestrian route between two coordinates via Valhalla.
 ///
@@ -130,54 +265,14 @@ const PEDESTRIAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5
 ///
 /// Returns `None` if Valhalla is unreachable or returns an error.
 pub async fn pedestrian_route(
-    valhalla_base: &str,
+    valhalla: &ValhallaConfig,
     from: (f64, f64), // (lon, lat)
     to: (f64, f64),   // (lon, lat)
-    walking_speed: Option<f64>,
+    walker: &Walker<'_>,
     indoor_friendly: bool,
     language: Option<&str>,
-    wheelchair_config: Option<&WheelchairConfig>,
 ) -> Option<WalkLeg> {
-    let costing_options = {
-        let mut opts = if let Some(wc) = wheelchair_config {
-            // Wheelchair mode: avoid stairs, prefer elevators, limit grade
-            serde_json::json!({
-                "pedestrian": {
-                    "step_penalty": wc.step_penalty,
-                    "max_grade": wc.max_grade,
-                    "use_hills": wc.use_hills,
-                    "elevator_penalty": wc.elevator_penalty
-                }
-            })
-        } else if indoor_friendly {
-            // For station transfers: no penalty for stairs/elevators/escalators
-            // since they are the expected path through underground passages
-            serde_json::json!({
-                "pedestrian": {
-                    "step_penalty": 0,
-                    "elevator_penalty": 0,
-                    "use_tunnels": 1.0
-                }
-            })
-        } else {
-            // For first/last mile: penalize stairs (user may have luggage)
-            serde_json::json!({
-                "pedestrian": {
-                    "step_penalty": 30,
-                    "elevator_penalty": 60
-                }
-            })
-        };
-        let effective_speed = if let Some(wc) = wheelchair_config {
-            Some(wc.walking_speed)
-        } else {
-            walking_speed
-        };
-        if let Some(speed) = effective_speed {
-            opts["pedestrian"]["walking_speed"] = serde_json::json!(speed.clamp(0.5, 25.5));
-        }
-        Some(opts)
-    };
+    let costing_options = Some(pedestrian_costing(walker, indoor_friendly));
 
     let req = RouteRequest {
         locations: vec![
@@ -198,10 +293,10 @@ pub async fn pedestrian_route(
         },
     };
 
-    let url = format!("{valhalla_base}/route");
+    let url = format!("{}/route", valhalla.base_url());
     let resp = crate::shared::http::client()
         .post(&url)
-        .timeout(PEDESTRIAN_TIMEOUT)
+        .timeout(valhalla.pedestrian_timeout())
         .json(&req)
         .send()
         .await
@@ -282,6 +377,47 @@ pub mod test_support {
         HttpResponse::Ok().json(ok_height_body())
     }
 
+    /// Every pair is a 300 s walk, except identical points (0 s, as Valhalla
+    /// answers when an address sits on the stop) and any point at longitude 0,
+    /// which Valhalla "cannot route" (`null`).
+    #[post("/sources_to_targets")]
+    async fn matrix_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
+        let points = |key: &str| body[key].as_array().cloned().unwrap_or_default();
+        let unroutable = |p: &serde_json::Value| p["lon"].as_f64() == Some(0.0);
+        let rows: Vec<Vec<serde_json::Value>> = points("sources")
+            .iter()
+            .map(|source| {
+                points("targets")
+                    .iter()
+                    .map(|target| {
+                        let time = if unroutable(source) || unroutable(target) {
+                            serde_json::Value::Null
+                        } else if source == target {
+                            serde_json::json!(0.0)
+                        } else {
+                            serde_json::json!(300.0)
+                        };
+                        serde_json::json!({ "time": time, "distance": 0.4 })
+                    })
+                    .collect()
+            })
+            .collect();
+        HttpResponse::Ok().json(serde_json::json!({ "sources_to_targets": rows }))
+    }
+
+    /// A Valhalla configuration pointing at `base` (`http://host:port`).
+    pub fn valhalla_at(base: &str) -> crate::shared::config::ValhallaConfig {
+        let (host, port) = base
+            .trim_start_matches("http://")
+            .split_once(':')
+            .expect("base is http://host:port");
+        crate::shared::config::ValhallaConfig {
+            host: host.to_string(),
+            port: port.parse().expect("numeric port"),
+            ..Default::default()
+        }
+    }
+
     /// Spawn an actix mock server on a free port and return its base URL.
     /// The server keeps running until the test process exits.
     pub fn spawn_mock_valhalla() -> String {
@@ -294,12 +430,16 @@ pub mod test_support {
         std::thread::spawn(move || {
             let sys = actix_web::rt::System::new();
             sys.block_on(async {
-                let server =
-                    HttpServer::new(|| App::new().service(route_handler).service(height_handler))
-                        .listen(listener)
-                        .expect("listen")
-                        .workers(1)
-                        .run();
+                let server = HttpServer::new(|| {
+                    App::new()
+                        .service(route_handler)
+                        .service(height_handler)
+                        .service(matrix_handler)
+                })
+                .listen(listener)
+                .expect("listen")
+                .workers(1)
+                .run();
                 let _ = server.await;
             });
         });
@@ -316,70 +456,71 @@ mod tests {
     use super::*;
     use crate::shared::config::AppConfig;
 
-    // All four flag combinations of pedestrian_route reach the request-build
-    // stage, exercising the three costing_options branches and the speed
-    // clamp; the actual HTTP call will fail against the unreachable URL,
-    // confirming the None return path too.
-
-    fn unreachable_base() -> &'static str {
-        "http://127.0.0.1:1"
+    fn walker<'a>(
+        cfg: &'a AppConfig,
+        requested_speed: Option<f64>,
+        wheelchair: bool,
+    ) -> Walker<'a> {
+        Walker {
+            pedestrian: &cfg.pedestrian,
+            wheelchair: wheelchair.then_some(&cfg.wheelchair),
+            requested_speed,
+        }
     }
 
-    #[actix_web::test]
-    async fn pedestrian_route_outdoor_default() {
-        let out = pedestrian_route(
-            unreachable_base(),
-            (2.3, 48.8),
-            (2.4, 48.9),
-            Some(5.0),
-            false,
-            None,
-            None,
-        )
-        .await;
-        assert!(out.is_none());
+    #[test]
+    fn outdoor_costing_uses_the_configured_pedestrian_profile() {
+        let mut cfg = AppConfig::default();
+        cfg.pedestrian.step_penalty = 45.0;
+        cfg.pedestrian.elevator_penalty = 90.0;
+        cfg.pedestrian.walking_speed = 4.2;
+        let opts = pedestrian_costing(&walker(&cfg, None, false), false);
+        assert_eq!(opts["pedestrian"]["step_penalty"], 45.0);
+        assert_eq!(opts["pedestrian"]["elevator_penalty"], 90.0);
+        assert_eq!(opts["pedestrian"]["walking_speed"], 4.2);
     }
 
-    #[actix_web::test]
-    async fn pedestrian_route_indoor_friendly() {
-        let out = pedestrian_route(
-            unreachable_base(),
-            (2.3, 48.8),
-            (2.4, 48.9),
-            None,
-            true,
-            Some("fr-FR"),
-            None,
-        )
-        .await;
-        assert!(out.is_none());
-    }
-
-    #[actix_web::test]
-    async fn pedestrian_route_wheelchair_overrides_speed() {
+    #[test]
+    fn a_requested_speed_beats_the_default_and_is_clamped() {
         let cfg = AppConfig::default();
-        let out = pedestrian_route(
-            unreachable_base(),
-            (2.3, 48.8),
-            (2.4, 48.9),
-            Some(99.0), // ignored because wheelchair_config is set
-            false,
-            None,
-            Some(&cfg.wheelchair),
-        )
-        .await;
-        assert!(out.is_none());
+        let opts = pedestrian_costing(&walker(&cfg, Some(6.0), false), false);
+        assert_eq!(opts["pedestrian"]["walking_speed"], 6.0);
+        let opts = pedestrian_costing(&walker(&cfg, Some(99.0), false), false);
+        assert_eq!(opts["pedestrian"]["walking_speed"], 25.5);
+    }
+
+    #[test]
+    fn indoor_costing_ignores_stairs_and_elevators() {
+        let cfg = AppConfig::default();
+        let opts = pedestrian_costing(&walker(&cfg, None, false), true);
+        assert_eq!(opts["pedestrian"]["step_penalty"], 0);
+        assert_eq!(opts["pedestrian"]["elevator_penalty"], 0);
+    }
+
+    #[test]
+    fn the_wheelchair_profile_replaces_penalties_and_speed() {
+        let cfg = AppConfig::default();
+        let opts = pedestrian_costing(&walker(&cfg, Some(99.0), true), false);
+        assert_eq!(
+            opts["pedestrian"]["step_penalty"],
+            cfg.wheelchair.step_penalty
+        );
+        assert_eq!(
+            opts["pedestrian"]["walking_speed"],
+            cfg.wheelchair.walking_speed
+        );
     }
 
     #[actix_web::test]
-    async fn pedestrian_route_clamps_walking_speed() {
+    async fn pedestrian_route_is_none_when_valhalla_is_down() {
+        let cfg = AppConfig::default();
+        let valhalla = test_support::valhalla_at("http://127.0.0.1:1");
         let out = pedestrian_route(
-            unreachable_base(),
+            &valhalla,
             (2.3, 48.8),
             (2.4, 48.9),
-            Some(99.0),
+            &walker(&cfg, None, false),
             false,
-            None,
             None,
         )
         .await;
@@ -388,14 +529,14 @@ mod tests {
 
     #[actix_web::test]
     async fn pedestrian_route_success_against_mock_valhalla() {
-        let base = test_support::spawn_mock_valhalla();
+        let cfg = AppConfig::default();
+        let valhalla = test_support::valhalla_at(&test_support::spawn_mock_valhalla());
         let leg = pedestrian_route(
-            &base,
+            &valhalla,
             (2.3, 48.8),
             (2.4, 48.9),
-            Some(5.0),
+            &walker(&cfg, Some(5.0), false),
             false,
-            None,
             None,
         )
         .await

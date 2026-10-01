@@ -17,6 +17,9 @@ set -e
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
+# shellcheck source=lib/ensure-config.sh
+. "$ROOT/bin/lib/ensure-config.sh"
+ensure_config "$ROOT"
 
 PORTAL_HOST="${GLOVE_PORTAL_HOST:-portal.glove}"
 API_HOST="${GLOVE_API_HOST:-api.glove}"

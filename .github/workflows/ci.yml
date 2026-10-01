@@ -43,7 +43,7 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'deny.toml'
-              - 'config.yaml'
+              - 'config.yaml.sample'
               - '.github/workflows/ci.yml'
             portal:
               - 'portal/**'
@@ -54,7 +54,7 @@ jobs:
               - 'portal/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
-              - 'config.yaml'
+              - 'config.yaml.sample'
               - '.dockerignore'
               - '.github/workflows/ci.yml'
 

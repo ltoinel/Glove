@@ -4,206 +4,137 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Glove is a public transit journey planner. Rust backend (Actix-web) with the RAPTOR algorithm, React frontend (MUI + Leaflet), GTFS data, and optional Valhalla for walking routes.
+Glove is a public transit journey planner: Rust backend (Actix-web) running the RAPTOR algorithm on GTFS data, React portal (MUI + Leaflet), Valhalla for walk/bike/car routing and first/last-mile walks. User and contributor documentation lives in the mdBook under `book/src/` — update it when behavior or settings change.
 
 ## Build & Run Commands
 
-### Backend (Rust)
 ```bash
-cargo build --release        # Build release binary
-cargo build                  # Build debug
-cargo test                   # Run all tests
-cargo clippy -- -D warnings  # Lint (CI enforced)
-cargo fmt --check            # Format check (CI enforced)
-cargo fmt                    # Auto-format
-```
+# Backend
+cargo build [--release]
+cargo test
+cargo clippy -- -D warnings  # CI enforced
+cargo fmt --check            # CI enforced
 
-### Frontend (React)
-```bash
-cd portal
-npm install                  # Install dependencies
+# Frontend
+cd portal && npm install
 npm run dev                  # Vite dev server with HMR
-npm run build                # Production build
-npx eslint src/              # Lint (CI enforced)
-```
+npm run build
+npm run lint                 # eslint . (config files included) — CI enforced
+npm test                     # vitest run
 
-### Full Stack
-```bash
-bin/download.sh              # Download GTFS + OSM + BAN + traffic data (reads config.yaml)
-bin/valhalla.sh              # Start Valhalla Docker container (port 8002)
-bin/build.sh                 # Build release artifacts: backend binary + portal SPA
-bin/start.sh                 # Production: Caddy + backend, run only (auto-runs build.sh if artifacts missing)
+# Full stack
+bin/download.sh              # GTFS + OSM + BAN + traffic data (reads config.yaml)
+bin/valhalla.sh start        # Valhalla container glove-valhalla on :8002 (stop|status)
+bin/build.sh                 # Release backend binary + portal SPA
+bin/start.sh                 # Prod: Caddy + backend (runs build.sh if artifacts are missing)
 bin/start.sh --dev           # Dev: Caddy + cargo-watch + Vite HMR
-bin/start.sh --docker        # Docker: Caddy + api/portal/valhalla images (docker/docker-compose.yml)
+bin/start.sh --docker        # Caddy + api/portal/valhalla images (docker/docker-compose.yml)
+
+# Engine quality vs Hove (Navitia via PRIM) on random BAN addresses
+PRIM_API_KEY=... python3 scripts/compare_engines.py --pairs 100 --seed 42
 ```
 
 ## Architecture
 
 ### Module Layout (`src/`)
-Domain modules hold the business logic; `api/` is the only HTTP layer. Dependencies
-flow one way — `api/` → domains → `shared/` — and no domain depends on another.
+Domain modules hold the business logic; `api/` is the only HTTP layer. Dependencies flow one way — `api/` → domains → `shared/` — and no domain depends on another.
 
 ```
 src/
 ├── main.rs        bootstrap: config load, index build, server wiring, OpenAPI
-├── shared/        cross-cutting: config.rs, text.rs, util.rs
+├── shared/        cross-cutting: config.rs, http.rs, text.rs, util.rs
 ├── transit/       DOMAIN public transport: gtfs.rs, raptor.rs, realtime/,
-│                                            disruptions/
+│                  disruptions/, validation/
 ├── geocoding/     DOMAIN addresses: ban.rs
 ├── traffic/       DOMAIN road traffic: sytadin.rs
-└── api/           HTTP layer: journeys/, places.rs, gtfs.rs, traffic.rs,
-                   realtime.rs, disruptions.rs, lines.rs, status.rs,
-                   metrics.rs, tiles.rs
+└── api/           HTTP layer: journeys/ (public_transport, walk, bike, car,
+                   valhalla), places, gtfs, traffic, realtime, disruptions,
+                   lines, status, metrics, tiles
 ```
 
-`realtime/` and `disruptions/` live inside `transit/` rather than beside it:
-both name stops and lines of the loaded GTFS, neither means anything without
-it, and `raptor` reads both overlays at query time. `text.rs`
-sits in `shared/` because both `transit::raptor` (stop search) and
-`geocoding::ban` (address search) normalize with it.
+`realtime/` and `disruptions/` live inside `transit/`: both name stops and lines of the loaded GTFS, and `raptor` reads both overlays at query time. `text.rs` is in `shared/` because `transit::raptor` (stop search) and `geocoding::ban` (address search) both normalize with it. `main.rs` aliases domain entry points (`use transit::{gtfs, raptor, realtime};`).
 
-`main.rs` aliases the domain entry points (`use transit::{gtfs, raptor, realtime};`)
-so the bootstrap reads by concept rather than by module path.
+### Serving
+Actix serves the REST API only (:8080) — never the SPA. `bin/start.sh` runs Caddy (`deploy/Caddyfile`, local CA) on `https://portal.glove` (static build, or Vite in dev) and `https://api.glove` (proxy to :8080); `GLOVE_PORTAL_HOST` / `GLOVE_API_HOST` / `GLOVE_HTTPS_PORT` override them. The portal calls the API through `apiUrl()` (`portal/src/api.js`), origin baked from `VITE_API_URL` by `bin/build.sh`; left empty, calls stay same-origin (Vite or nginx proxy `/api`). Cross-origin calls need the portal origin in `server.cors_origins`. Docker images (`docker/`) run non-root with a read-only fs, digest-pinned bases, Trivy-scanned in CI. Env overrides: `GLOVE_VALHALLA_HOST`/`_PORT`, `GLOVE_API_KEY` (the API image blanks the baked key), `GLOVE_TILE_API_KEY`.
 
-### RAPTOR Algorithm (`src/transit/raptor.rs`)
-Core of the application. Round-based public transit routing with:
-- **Pre-processing** (10-30s on startup): builds stop index, interns service IDs, groups trips into patterns (identical stop sequences), builds transfer graph
-- **Query**: runs rounds (each = one additional vehicle trip), with calendar-aware service filtering and pattern exclusion for route diversity
-- **Reconstruction**: traces labels backward, sanitizes sections, returns Pareto-optimal journeys
-- Fuzzy stop search with French diacritics normalization (exact > prefix > word-prefix > substring ranking)
-
-### Data Flow
-1. `src/main.rs` loads config (`src/shared/config.rs`) and GTFS CSVs (`src/transit/gtfs.rs`)
-2. Builds `RaptorData` index, wraps in `ArcSwap` for lock-free hot-reload
-3. Actix-web serves the REST API only (port 8080). The React portal is **separate**: `bin/start.sh` runs Caddy (`deploy/Caddyfile`) on two HTTPS domains — `https://portal.glove` (static build in prod, Vite dev server in dev) and `https://api.glove` (reverse proxy to :8080). Certificates come from Caddy's local CA (`tls internal`); `GLOVE_PORTAL_HOST` / `GLOVE_API_HOST` / `GLOVE_HTTPS_PORT` override names and ports. `--docker` runs the images from `docker/` instead (`Dockerfile.api`, `Dockerfile.portal`), Caddy proxying to their loopback ports; in containers `GLOVE_VALHALLA_HOST` / `GLOVE_VALHALLA_PORT` override `valhalla.*` from the mounted `config.yaml`. `GLOVE_API_KEY` overrides `server.api_key` anywhere; the API image blanks the key of its baked `config.yaml`. Both images run non-root (`glove`, `nginx-unprivileged` on 8080) with a read-only root fs, no capabilities and `no-new-privileges`; base images are pinned by digest and CI scans them with Trivy
-4. The portal reaches the API through `apiUrl()` (`portal/src/api.js`): the origin comes from `VITE_API_URL`, baked in at build time by `bin/build.sh` (`https://api.glove`). Left empty, calls stay same-origin — a bare `npm run dev` proxies `/api` (`portal/vite.config.js`), and the Docker portal image proxies it through nginx. Cross-origin calls require the portal origin in `server.cors_origins`
-
-### API Endpoints
-- `GET /api/journeys/public_transport` — RAPTOR journey planning
-- `GET /api/journeys/walk` — Walking directions via Valhalla
-- `GET /api/journeys/bike` — Cycling directions via Valhalla (city, ebike, road profiles)
-- `GET /api/journeys/car` — Driving directions via Valhalla
-- `GET /api/places` — Stop autocomplete (fuzzy search)
-- `GET /api/status` — engine health (dependencies) and map defaults only (no GTFS data)
-- `GET /api/gtfs/status` — GTFS data statistics and last load timestamp
-- `GET /api/gtfs/validate` — GTFS data quality validation (19 checks)
-- `POST /api/gtfs/reload` — Hot-reload GTFS data without downtime (atomic swap via ArcSwap)
-- `GET /api/metrics` — Prometheus-format metrics (HTTP counters, CPU, memory)
-- `GET /api/realtime/status` — Real-time transit feed health + schedule-matching counters
-- `GET /api/lines` — Line catalogue for the back-office pickers (`?q=` name filter)
-- `GET|POST /api/disruptions`, `GET|PUT|DELETE /api/disruptions/{id}` — Operator-authored disruption CRUD (writes need `X-Api-Key`)
-- `GET /api/disruptions/active` — Blocking disruptions in force now, resolved to map coordinates (closed stops + cut segments)
-- `GET /api/traffic/geometry` — Road-network polylines for the traffic overlay (static, cacheable 24 h)
-- `GET /api/traffic/states` — Live segment states + events, no coordinates (joined client-side on segment id)
-- `GET /api/tiles/{z}/{x}/{y}.png` — Map tile proxy with local disk cache
-- `GET /api-docs/openapi.json` — Auto-generated OpenAPI specification
+### API
+Endpoint reference: `/api-docs/openapi.json` (utoipa, generated) and `book/src/api/`. Writes — `POST /api/gtfs/reload` and disruption `POST`/`PUT`/`DELETE` — require the `X-Api-Key` header (`server.api_key`; empty disables them). `/api/status` carries engine health and map defaults only, no GTFS data.
 
 ### Frontend (`portal/`)
-Single-page app: vertical nav rail (56px) + sidebar (450px) + Leaflet map. Dark theme with cached CARTO tiles. i18n for FR/EN in `i18n.jsx`. Queries all endpoints in parallel (PT, walk, bike, car). Views: search (default), GTFS validation, disruptions back office, dataset, swagger, metrics. The disruption admin screen is `components/DisruptionsPanel.jsx` (lazy-loaded) and keeps the API key in `localStorage`. Two map overlays sit top-right, each polled only while displayed: road traffic and current blockages (`DisruptionLayer`). Pure utility functions in `utils.js`, tested with vitest.
+SPA: 56px nav rail + 450px sidebar + Leaflet map. Views: search, GTFS validation, disruptions back office (`components/DisruptionsPanel.jsx`, lazy, API key in `localStorage`), dataset, swagger, metrics. Queries PT, walk, bike and car in parallel. Two top-right map overlays, each polled only while shown: road traffic and current blockages (`DisruptionLayer`). i18n FR/EN in `i18n.jsx`; pure helpers in `utils.js`, tested with vitest.
 
-### Real-time transit (`src/transit/realtime/`)
-Delays and cancellations applied at query time, never by rebuilding the index.
-- `model.rs` — connector-agnostic pivot model (`TripUpdate`, `StopTimeUpdate`). GTFS-RT vocabulary, because SIRI maps onto it cleanly and not the reverse
-- `source.rs` — `RealtimeSource` trait (object-safe, boxed future). Adding a format = one file
-- `protobuf.rs` — minimal wire-format reader (~150 lines, zero deps). `prost-build` would require `protoc`, absent from CI
-- `gtfs_rt.rs` — GTFS-Realtime connector; `VehiclePosition`/`Alert` entities are skipped as unknown fields
-- `index.rs` — resolves feeds against the schedule into a `RealtimeIndex` overlay keyed by `(pattern_idx, trip_idx)`
+### Real-time (`src/transit/realtime/`)
+Delays and cancellations applied at query time as an overlay, never by rebuilding the index.
+- `model.rs` — connector-agnostic pivot (`TripUpdate`, `StopTimeUpdate`), GTFS-RT vocabulary (SIRI maps onto it, not the reverse)
+- `source.rs` — `RealtimeSource` trait; a new format is one file
+- `protobuf.rs` — minimal wire-format reader, zero deps (`prost-build` would need `protoc`, absent from CI)
+- `gtfs_rt.rs` — GTFS-RT connector; `VehiclePosition`/`Alert` skipped
+- `index.rs` — resolves feeds into a `RealtimeIndex` keyed by `(pattern_idx, trip_idx)`
 - `service.rs` — one polling task per feed, `ArcSwapOption` publication, per-feed health
 
-**Phase 1 scope**: delays + cancellations on scheduled trips. `ADDED` trips are counted as unsupported (injecting unscheduled stop sequences into patterns is separate work).
+Phase 1: delays + cancellations of scheduled trips; `ADDED` trips are counted as unsupported.
 
 ### Disruptions (`src/transit/disruptions/`)
-Works, incidents and closures entered by hand in the back office, applied at
-query time like the real-time overlay.
-- `model.rs` — what an operator declares: `Scope` (`Stop` / `Line` / `LineSection`), `Severity` (`Blocking` / `Info`), `Period` (start + optional end, absent = ongoing)
-- `store.rs` — the catalog: one JSON document, `ArcSwap` for lock-free reads, a mutex for the rare writes, temp-file + rename for atomic persistence
-- `overlay.rs` — resolves identifiers into stop/pattern indices for the disruptions in force at a given instant, maps a reconstructed journey to the disruptions touching it, and (`blocked_geometry`) turns what is removed into stops + deduplicated edges for the map overlay
+Operator-authored works and closures, applied at query time like real-time.
+- `model.rs` — `Scope` (`Stop` / `Line` / `LineSection`), `Severity` (`Blocking` / `Info`), `Period` (end absent = ongoing)
+- `store.rs` — one JSON document (`{data.dir}/disruptions/disruptions.json`), `ArcSwap` reads, mutex-guarded writes, temp-file + rename
+- `overlay.rs` — resolves ids to stop/pattern indices at an instant, maps journeys to the disruptions touching them, builds the map geometry (`blocked_geometry`)
 
-**Routing effects**: a blocked *stop* is neutralized entirely (no boarding, no
-alighting, no transfer) while vehicles still run through it; a blocked *line*
-is unioned into the router's `excluded_patterns`; a blocked *section* cuts
-rides between its endpoints, in both directions, leaving the rest of the line
-usable. `Info` severity annotates without removing anything.
+Effects: a blocked *stop* allows no boarding, alighting or transfer (vehicles still pass); a blocked *line* joins `excluded_patterns`; a blocked *section* cuts rides between its endpoints, both directions. `Info` only annotates.
 
 ### Key Design Decisions
-- **All in-memory**: no database, GTFS loaded from CSV at startup
-- **Lock-free hot-reload**: `ArcSwap` swaps entire RAPTOR index atomically
-- **Pattern grouping**: trips with identical stop sequences share a pattern (memory + speed)
-- **Iterative diverse search**: runs RAPTOR multiple times with pattern exclusion for varied alternatives. Optional `routing.diverse_lines` additionally excludes the whole head line between iterations so each alternative departs on a different line. Optional `routing.prefer_rail` runs a first tier with buses forbidden so rail journeys are found first, buses filling only remaining slots (`collect_alternatives` tiers in `run_iterative_search`)
-- **Server-controlled routing settings**: number of journeys (`max_journeys`), transfers (`max_transfers`), `diverse_lines`, `prefer_rail` and `maneuvers` are config-only (`config.yaml`), intentionally NOT overridable via request parameters
-- **One pooled HTTP client per worker thread** (`src/shared/http.rs`): Valhalla and tile calls reuse keep-alive connections instead of building a `reqwest::Client` per call. Per thread, not global: a pooled connection is driven by the runtime that opened it
-- **RAPTOR search buffers are pooled per thread**: the `rounds × stops` tables (arrival times, labels) are handed back by `RaptorResult`'s `Drop` and reused by the next query on that thread, reset only where the query wrote (or with a plain fill past `DENSE_RESET_RATIO`). Labels store `u32` indices to halve the largest table
-- **FIFO boarding pruning**: on a pattern whose trips never overtake (`Pattern::fifo`, computed at build), a stop reached after the held trip's departure skips the boarding search — standard RAPTOR. Disabled when a real-time overlay touches the pattern, since delays can reorder vehicles
-- **RAPTOR runs off the async executor**: the journey handler moves the search passes to `web::block`, so a slow search never stalls the other requests multiplexed on that worker
-- **Tile caching proxy**: map tiles fetched from upstream once, cached to `data/tiles/` on disk
-- **Indoor-aware transfers**: Valhalla pedestrian routing with zero step/elevator penalties for intra-station walks
-- **Traffic overlay, split by lifetime**: the Sytadin MIF/MID geometry is parsed once at startup (Lambert II étendu → WGS84, `src/traffic/sytadin.rs`) and served as an immutable ~860 kB body cached 24 h by the browser; only the states (~175 kB, no coordinates) are polled and re-published via `ArcSwapOption` (`src/api/traffic.rs`). Both bodies are serialized once, never per request. Disabled by default, degrades to `enabled: false` when the geometry is missing
-- **Real-time as an overlay, not a rebuild**: pre-processing takes 10-30 s and feeds refresh every 30 s, so predictions are resolved into a `RealtimeIndex` and swapped atomically. The router reads schedule + overlay; `RaptorData` is never touched
-- **Calls matched by `stop_id`, not `stop_sequence`**: `build_patterns` sorts calls by `stop_sequence` but discards the values, so a position cannot be recovered from it. A forward-only cursor keeps loop routes in order
-- **Trip boarding uses exact offset bounds, not a look-back window**: trips are sorted by first-stop departure, and each pattern stores, per position, the min/max of `departure(pos) - departure(0)` over its trips (`Pattern::departure_offsets`). The binary search and the early break are therefore exact at any position, even with overtaking trips. Real-time widens both bounds by the pattern's largest published offset (`PatternDeltas::max_abs_delta`) — otherwise a delayed vehicle is invisible. Changing a serialized struct means bumping `CACHE_FORMAT_VERSION` in `raptor.rs`
-- **Trips that skip a call are set aside like cancellations**: a dropped call no longer matches the pattern's stop sequence, and re-splitting patterns per refresh is exactly the pre-processing the overlay exists to avoid. Pessimistic for that trip's other passengers, safe for everyone
-- **Feed identifiers are the integration risk**: a feed can answer 200 with a valid body and match nothing when its namespace differs from the GTFS. `MatchStats` on `/api/realtime/status` makes that visible
-- **After-midnight routing**: queries before 4h use previous day's GTFS services with +86400s offset
-- **Station-aware stop resolution**: stop IDs resolve to the stop itself + child stops sharing the same parent_station
-- **Disruptions are authored, so they are persisted**: everything else is rebuilt from a source file on startup; a disruption cannot be. That is a JSON document rewritten whole (temp file + rename), not a database — operators author tens to hundreds of them
-- **A blocked journey is returned, not hidden**: "the fastest route is closed, here is why" beats silently offering a slower alternative with no explanation. When a blocking disruption is in force, a second *undisrupted* RAPTOR pass recovers the journey the traveller would have taken; it comes back with `status: "blocked"` and the disruptions explaining it. It has to be a second pass: once a stop leaves the graph, the journey through it leaves no trace to report
-- **A blocked journey never wins a quality tag**: `tag_journeys` computes its minima over usable journeys only, so "fastest" cannot land on something nobody can take
-- **Disruption periods are wall-clock**: resolved against the query datetime *before* the early-morning day shift, so a 01:00 query is not matched against the previous day at 25:00
-- **Closing a stop closes its station**: `expand_station` widens a stop id upward to its parent and downward to every child, so an operator closes "Châtelet" without listing its platforms
-- **The blockage overlay ships edges, not stop sequences**: a line closure blocks every ride of every pattern of that route, and those patterns overlap heavily. `blocked_geometry` collapses them to a direction-normalized, deduplicated edge set, so the payload is bounded by the network's topology rather than its pattern count
-- **Blockage segments are schematic**: they join consecutive stops in a straight line. GTFS `shapes.txt` is not loaded, so the overlay shows *what* is cut, not the exact track alignment
+Each is load-bearing; the book (`book/src/architecture/raptor.md`, `book/src/idfm/engine-comparison.md`) has the measurements behind them.
+
+**Data & concurrency**
+- All in-memory, no database. The RAPTOR index is swapped whole through `ArcSwap` on hot-reload; the real-time and disruption overlays are swapped beside it and `RaptorData` is never mutated
+- Changing a serialized struct means bumping `CACHE_FORMAT_VERSION` in `raptor.rs`
+- Disruptions are the only authored state, hence the only persisted state (a JSON file, not a database)
+- One pooled HTTP client per worker thread (`shared/http.rs`) — per thread because a pooled connection is driven by the runtime that opened it
+- RAPTOR runs on `web::block`, off the async executor. Its `rounds × stops` buffers are pooled per thread (returned on `RaptorResult` drop, reset sparsely or past `DENSE_RESET_RATIO`); labels store `u32` indices
+
+**RAPTOR correctness**
+- `scan_pattern` alights (trip held from an earlier stop) *before* boarding at each stop. Boarding first let a trip "arrive" at its own boarding stop at its arrival time, gaining the dwell and catching vehicles already gone
+- Re-boarding at the stop just alighted at costs `routing.default_transfer_time`, or `routing.rail_change_time` between two train/RER/metro vehicles (`QueryOptions::change_times`): IDFM merges a station's platforms into one stop with no transfer time of its own. A run split into two trip ids on one route (terminus → first stop) continues free
+- Boarding search uses exact per-position offset bounds (`Pattern::departure_offsets`), not a look-back window; real-time widens them by `PatternDeltas::max_abs_delta`, or a delayed vehicle is invisible
+- FIFO boarding pruning (`Pattern::fifo`) is disabled on patterns a real-time overlay touches: delays can reorder vehicles
+- Calls are matched by `stop_id`, not `stop_sequence` (`build_patterns` discards sequence values); a forward-only cursor keeps loop routes in order
+- Trips that skip a call are set aside like cancellations — re-splitting patterns per refresh is what the overlay exists to avoid
+- Queries before `routing.service_day_start` (04:00) run on the previous day's services, +86400 s; disruption periods are resolved against wall-clock time *before* that shift
+
+**Journey search** (`api/journeys/public_transport.rs`)
+- Address endpoints: the walk to the `routing.walk_matrix_stops` nearest stops is timed by one Valhalla `sources_to_targets` matrix per endpoint *before* RAPTOR; the others keep the straight-line estimate scaled by the **largest** measured detour. Straight lines undershoot streets by a third or more, which made RAPTOR board unreachable trains
+- No journey for an address → one retry within `routing.fallback_stop_distance`
+- Iterative diverse search with pattern exclusion; `routing.diverse_lines` excludes the whole head line; `routing.prefer_rail` adds a bus-free first tier, only when a rail/metro/tram stop is within `routing.prefer_rail_max_walk` of both ends
+- Routing settings (journeys, transfers, change times, radii, diversity, rail preference, maneuvers) are config-only, never request parameters
+- A journey blocked by a disruption is returned with `status: "blocked"` and its causes, found by a second *undisrupted* pass; it never wins a quality tag (`tag_journeys` ranks usable journeys only)
+- Closing a stop closes its station (`expand_station` widens to parent and children)
+
+**Other**
+- Transfers are always shaped by Valhalla, intra-station ones with zero step/elevator penalties; `routing.maneuvers` only controls whether turn-by-turn steps are attached
+- Traffic overlay split by lifetime: Sytadin geometry parsed once (Lambert II → WGS84) and served immutable, cached 24 h; only the states are polled and re-published via `ArcSwapOption`. Both bodies serialized once
+- Blockage overlay ships deduplicated, direction-normalized edges (bounded by topology, not pattern count), drawn as straight segments — `shapes.txt` is not loaded
+- A real-time feed can answer 200 and match nothing when its ids use another namespace: check `MatchStats` on `/api/realtime/status`
 
 ## Configuration
 
-`config.yaml` at repo root. Real-time feeds live under `realtime.feeds` (`type`, `url`, `refresh_secs`, `timeout_secs`, `headers`); `FeedConfig`'s `Debug` impl redacts header values and URL query strings so `info!(?config)` cannot log API keys. Key settings: `data_dir` (GTFS path), `valhalla_host`/`valhalla_port` (walking router), `max_journeys`, `max_transfers`, `default_transfer_time` (seconds), `max_duration` (seconds), `workers` (0 = auto), `map.tile_url` (upstream tile server URL template with `{s}`, `{z}`, `{x}`, `{y}`, `{r}` placeholders), `traffic.enabled`/`traffic.base_url`/`traffic.refresh_secs` (Sytadin road traffic overlay). `server.api_key` guards both `POST /api/gtfs/reload` and every disruption write; the catalog lives at `{data.dir}/disruptions/disruptions.json`.
+`config.yaml` at repo root is git-ignored; the tracked template is `config.yaml.sample` (copied on first run by `bin/lib/ensure-config.sh`, baked into the API image). **Add every new setting to the sample, to `src/shared/config.rs` with a serde default, and to `book/src/getting-started/configuration.md`.** Unknown keys are silently ignored, so a misspelt key keeps its default. Tunable engine values (speeds, penalties, timeouts, radii, change times) belong in config, not in constants. `FeedConfig`'s `Debug` impl redacts header values and URL query strings so logging the config cannot leak API keys.
 
-## Clean Code Principles
+## Code Rules
 
-This codebase follows Clean Code practices (Robert C. Martin). All contributions must respect:
+**Rust**
+- No `unwrap()` in production code; no silently swallowed errors (log at `warn!`/`debug!`); return `Result` rather than sentinel values
+- Functions ~40 lines max, ≤ 3 parameters (bundle related ones in a struct), one level of abstraction
+- One term per concept across the codebase (`stop_idx` everywhere)
+- Shared helpers: `shared/util.rs` (`parse_coord`, `parse_from_to`, `dir_fingerprint`), Valhalla types and pedestrian costing in `api/journeys/valhalla.rs` — extract anything repeated 3+ times
+- `///` doc comments on public items; comments explain why, not what
+- GTFS route types (0 tram, 1 metro, 2 rail, 3 bus…) are commented where used
 
-### Naming
-- **Descriptive names**: functions, variables, and types must be self-explanatory (`build_stop_index`, not `bsi`)
-- **Consistent vocabulary**: use the same term for the same concept across the codebase (e.g. `stop_idx` everywhere, not `stop_index` in one place and `idx` in another)
-
-### Functions
-- **Small and focused**: each function does one thing. Target ~40 lines max
-- **Few parameters**: prefer 3 or fewer. Bundle related params into structs when needed
-- **One level of abstraction**: a function should not mix high-level orchestration with low-level details
-
-### DRY (Don't Repeat Yourself)
-- **Shared utilities** in `src/shared/util.rs`: `parse_coord`, `parse_from_to`, `dir_fingerprint`
-- **Shared Valhalla types** in `src/api/journeys/valhalla.rs`: `Location`, `RouteRequest`, `RouteResponse`, etc.
-- **No copy-pasted blocks**: if the same pattern appears 3+ times, extract a function
-
-### Error Handling
-- **No `unwrap()` in production code** — use `?`, `unwrap_or_else`, or explicit error handling
-- **No silent swallowing** — log at `warn!` or `debug!` level when ignoring errors
-- **Propagate errors** with `Result<T, E>` instead of returning sentinel values (0, empty vec)
-
-### Single Responsibility
-- Each module has a clear scope (see Architecture section)
-- `src/transit/raptor.rs` build logic is split into sub-functions: `build_stop_index`, `intern_services`, `build_patterns`, `build_transfers`, `build_search_index`
-- API handlers delegate to helper functions for enrichment and tagging
-
-### Constants over Magic Numbers
-- Named constants for thresholds and limits (`INFINITY`, `MAX_ROUNDS`, `ELEVATION_SAMPLE_LIMIT`)
-- GTFS route types (0=tram, 1=metro, etc.) are documented inline where used
-
-### Comments
-- **Explain why, not what** — code should be self-documenting for the "what"
-- **Doc comments** (`///`) on all public types and functions
-- **Algorithm comments** for non-obvious logic (Dijkstra, RAPTOR rounds, polyline decoding)
-
-### React / Frontend
-- **All user-facing strings** must use `t()` from `useI18n()` — no hardcoded text
-- **`useCallback`** on event handlers passed to children (`search`, `swap`, `handleFromChange`, `refreshStatus`)
-- **Safe localStorage** — always wrap `JSON.parse()` in try-catch
-- **Accessibility** — all `IconButton` must have `aria-label`; prefer semantic `<button>` over `<div onClick>`
-- **Error handling** — fetch `.catch()` must log with `console.warn`, never silently swallow
-- **Next step**: split `App.jsx` into component files (`components/`) when test coverage allows safe refactoring
+**React**
+- Every user-facing string goes through `t()` from `useI18n()`
+- `useCallback` on handlers passed to children; every `IconButton` has an `aria-label`; prefer `<button>` over `<div onClick>`
+- `JSON.parse` of `localStorage` always in try/catch; fetch `.catch()` logs with `console.warn`
+- Next step: split `App.jsx` into `components/` when test coverage allows
 
 ## CI
 
-GitHub Actions (`.github/workflows/ci.yml`), jobs gated by a paths filter: Rust fmt + clippy + test; MSRV `cargo check` on 1.88; `cargo deny check` (`deny.toml`); tarpaulin coverage; portal ESLint (`npm run lint`, i.e. `eslint .` — config files included, not just `src/`) + vitest + build + `npm audit`; Docker build of both images. CI uses the latest stable Rust, so a newer Clippy can flag code that passes locally. Actions are SHA-pinned and kept current by Dependabot (`.github/dependabot.yml`). `docs.yml` builds the book on PRs and deploys from master; `docker.yml` publishes both images on release. `deny.toml` carries a deliberate, documented license exception for `actix-governor` (GPL-3.0) pending a maintainer decision.
-
-Pre-commit hook `.githooks/pre-commit` (enable: `git config core.hooksPath .githooks`) runs the same lint steps for the staged areas.
+`.github/workflows/ci.yml`, jobs gated by a paths filter: Rust fmt + clippy + test; MSRV `cargo check` on 1.88; `cargo deny check` (`deny.toml`, with a documented GPL-3.0 exception for `actix-governor` pending a maintainer decision); tarpaulin coverage; portal lint + vitest + build + `npm audit`; Docker build and Trivy scan of both images. CI uses the latest stable Rust, so a newer Clippy can flag code that passes locally. Actions are SHA-pinned, kept current by Dependabot. `docs.yml` builds the book on PRs and deploys from master; `docker.yml` publishes images on release. Pre-commit hook: `git config core.hooksPath .githooks`.

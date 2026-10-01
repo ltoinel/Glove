@@ -33,7 +33,11 @@ Benchmark across 12 origin/destination pairs covering Ile-de-France (10 rounds, 
 | Invalides → Nanterre Préfecture | 298 ms | 542 ms | 7 |
 
 ```admonish note
-These are **end-to-end** API times (iterative diverse search + Valhalla transfer enrichment), not the bare RAPTOR scan. The cost follows the **number of alternatives**: routes that settle on 1–2 journeys answer in tens of milliseconds, while those returning 5–7 distinct journeys re-run RAPTOR several times and enrich each transfer through Valhalla, landing in the 200–300 ms range. Lowering `max_journeys` reduces response time further. The first round is slower (~230 ms avg) while the walk-leg cache and Valhalla warm up.
+These are **end-to-end** API times (iterative diverse search + Valhalla transfer enrichment), not the bare RAPTOR scan. The cost follows the **number of alternatives**: routes that settle on 1–2 journeys answer in tens of milliseconds, while those returning 5–7 distinct journeys re-run RAPTOR several times and enrich each transfer through Valhalla, landing in the 200–300 ms range. Lowering `max_journeys` reduces response time further. The first round is slower (~230 ms avg) while Valhalla, the pooled HTTP connections and the per-thread search buffers warm up.
+```
+
+```admonish warning title="Stop-to-stop only"
+These pairs use stop ids as origin and destination, and were measured before the access-walk and change-time changes of 2026-10-02. An **address** origin or destination adds one Valhalla pedestrian matrix per endpoint (both in parallel, `routing.walk_matrix_stops` stops each): on 100 random address pairs, Glove answers in **263 ms p50 / 444 ms p95** (release build, local Valhalla) — see [Glove vs Hove](../idfm/engine-comparison.md).
 ```
 
 ```admonish info title="Previous run (2026-05-30)"
@@ -55,7 +59,7 @@ On 4 vCPUs shared by the RAPTOR workers, Valhalla and the load generator, concur
 ## Running Benchmarks
 
 ```bash
-python3 scripts/benchmark.py --rounds 10 --concurrency 1 --datetime 20261006T083000 \\
+python3 scripts/benchmark.py --rounds 10 --concurrency 1 --datetime 20261006T083000 \
   --output book/src/images/benchmark.png
 ```
 
@@ -73,8 +77,8 @@ Pick a `--datetime` that falls inside the loaded GTFS service window (otherwise 
 ### Binary Search in Trip Lookup
 The `find_earliest_trip` function uses binary search (O(log n)) to find the first trip departing after a given time within a pattern, instead of linear scan.
 
-### Pre-Allocated Buffers
-Label arrays and working buffers are allocated once and reused across RAPTOR rounds, eliminating per-round allocation overhead.
+### Pooled Search Buffers
+The `rounds × stops` tables (arrival times, labels) are pooled per worker thread: dropping a `RaptorResult` hands them back, and the next query on that thread reuses them, resetting only the entries the previous query wrote (or doing a plain fill past `DENSE_RESET_RATIO`). Neither rounds nor queries allocate these tables after the first query on each thread. Labels store `u32` indices to halve the largest table.
 
 ### FxHashMap
 Uses `rustc-hash`'s FxHashMap throughout both `GtfsData` and `RaptorData`, replacing all standard library `HashMap` instances. FxHash is significantly faster than the default SipHash for integer and string keys.
@@ -88,11 +92,16 @@ ArcSwap provides atomic pointer swaps with zero contention. Readers never block,
 ### Early Termination in Diversity Loop
 The RAPTOR diversity loop (which re-runs the algorithm with pattern exclusion to find alternative journeys) terminates early when a round produces no new journeys, avoiding unnecessary iterations.
 
-### Arc&lt;WalkLeg&gt; Cache
-Walking leg results from Valhalla are wrapped in `Arc<WalkLeg>` and cached, avoiding deep cloning of polyline coordinates when the same walk leg is referenced by multiple journeys.
+### Deduplicated, Parallel Valhalla Calls
+Within one request, alternatives often share walks, so each distinct walk is asked of Valhalla once and the calls run concurrently (`join_all`):
 
-### Batch Valhalla Calls
-Transfer enrichment requests to Valhalla are dispatched in parallel using `futures::join_all`, rather than sequentially, reducing latency for journeys with multiple transfers.
+- **First/last mile** (address endpoints): one leg per distinct first or last stop, kept in a per-request map of `Arc<WalkLeg>` so journeys sharing a stop share the leg without deep-cloning its polyline. Both ends are fetched in parallel.
+- **Transfers**: identical transfers (same stops, same indoor/outdoor kind) across alternatives are sent once and the result is copied to each journey.
+
+Nothing is cached across requests: every query asks Valhalla again.
+
+### Bounded Walk Matrix
+For an address endpoint, only the `routing.walk_matrix_stops` (30) nearest candidate stops are sent to the Valhalla `sources_to_targets` matrix. Its cost grows with the stop count — up to 2 s for several hundred stops in central Paris — and capping it brought address queries from 396 ms to 257 ms p50 with no journey made infeasible. Each pedestrian call is bounded by `valhalla.pedestrian_timeout_secs` (5 s).
 
 ### Pareto-Optimal Exploitation
 All Pareto-optimal journeys from a single RAPTOR run are collected before the algorithm is re-run with pattern exclusion. This avoids redundant computation.

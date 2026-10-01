@@ -20,6 +20,7 @@
 - [Journey Planning](./api/journeys.md)
 - [Places & Autocomplete](./api/places.md)
 - [Status & Reload](./api/status.md)
+- [Disruptions & Real-Time](./api/disruptions.md)
 - [Road Traffic](./api/traffic.md)
 - [Metrics](./api/metrics.md)
 
@@ -37,6 +38,7 @@
 
 - [GTFS Data Overview](./idfm/gtfs-overview.md)
 - [Routing Statistics](./idfm/routing-stats.md)
+- [Glove vs Hove](./idfm/engine-comparison.md)
 - [Indoor Routing Coverage](./idfm/indoor-coverage.md)
 
 # Sytadin

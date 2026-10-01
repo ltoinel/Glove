@@ -3,7 +3,11 @@
 This report analyses the availability of indoor pedestrian routing data in Valhalla tiles for GTFS transfer pairs in Ile-de-France. Indoor maneuvers (elevators, stairs, escalators, building entrances/exits) enable accurate turn-by-turn instructions for station transfers.
 
 ```admonish info title="How this report was generated"
-The `bin/check_indoor.py` script queries Valhalla's pedestrian route API for each unique GTFS transfer pair and checks whether the response contains indoor maneuver types (39-43). See [Development Setup](../contributing/development.md) for usage.
+The `scripts/check_indoor.py` script queries Valhalla's pedestrian route API for each unique GTFS transfer pair and checks whether the response contains indoor maneuver types (39-43). See [Development Setup](../contributing/development.md) for usage.
+```
+
+```admonish warning title="Figures from an earlier dataset"
+The figures on this page were produced in April 2026 (first published 2026-04-07), on the IDFM GTFS and OSM extract of that time. They have not been regenerated since: the dataset loaded on 2026-09-28 has 192,366 rows in `transfers.txt`, which make **96,240 unique transfer pairs** (against 71,479 here). Treat the proportions as indicative, and regenerate the report (see the end of this page) before relying on exact counts.
 ```
 
 ## Summary
@@ -30,7 +34,7 @@ Escalators are the most commonly mapped indoor element, followed by stairs and e
 
 ## Top 25 Stations by Indoor Coverage
 
-Stations ranked by **indoor score** (total count of indoor maneuvers across all transfer pairs involving the station).
+Stations ranked by **indoor score**: the total count of indoor maneuvers (elevators, stairs, escalators, building enter/exit) across all transfer pairs involving the station. A pair whose two stops belong to the same station counts twice for it.
 
 | Station | Score | Ratio | Elevators | Stairs | Escalators |
 |---------|------:|------:|----------:|-------:|-----------:|
@@ -91,11 +95,13 @@ Metro stations have lower coverage. **Opera** (34%), **Republique** (32%), and *
 
 ## How Glove Uses This Data
 
-Glove only displays transfer maneuvers when Valhalla returns indoor routing data. For the **94.8%** of transfers without indoor data, the transfer section shows only the duration and stop names — no potentially misleading outdoor walking route is displayed.
+Every transfer section of a public transport journey is routed through Valhalla, whether or not indoor data exists:
 
-This ensures that:
-- Users at **Gare Saint-Lazare** see: *"Take the escalator to Level 2"*
-- Users at **Chatelet** see only: *"Transfer 3 min"* (no false outdoor route)
+- A transfer between two stops of the **same parent station** is tagged `transfer_type: "indoor"` and routed with **zero step and elevator penalties**, so stairs, escalators and lifts are used freely inside the station. Any other transfer is tagged `"outdoor"` and uses the configured pedestrian penalties.
+- The Valhalla shape and distance are attached to the section in both cases. Where OSM has no indoor ways, that shape follows the nearest mapped paths — often the street — so its geometry is only as good as the local mapping.
+- Turn-by-turn **maneuvers** are included only when `routing.maneuvers: true` in `config.yaml` (server-controlled, `false` by default), and then for every transfer, indoor data or not.
+
+The portal draws every transfer's shape on the map, or a straight line between the two stops when Valhalla returned none. When maneuvers are present, indoor ones (elevator, stairs, escalator) are placed as markers along the shape. The indoor coverage measured above therefore decides how realistic the drawn transfer is, not whether one is drawn.
 
 ## Improving Coverage
 
@@ -119,6 +125,6 @@ Tools for editing indoor data:
 After updating Valhalla tiles with new OSM data, regenerate the CSV files:
 
 ~~~bash
-python3 bin/check_indoor.py --output data/indoor_report.csv --summary data/indoor_summary.csv
+python3 scripts/check_indoor.py --output data/indoor_report.csv --summary data/indoor_summary.csv
 ~~~
 ```

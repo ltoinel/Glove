@@ -25,7 +25,7 @@ Each family also ships an XSD that documents its fields, which is the authoritat
 
 ## Static geometry
 
-Downloaded once by `bin/download.sh traffic`, parsed once at startup by `src/traffic.rs`.
+Downloaded once by `bin/download.sh traffic`, parsed once at startup by `src/traffic/sytadin.rs`.
 
 ### MIF/MID pairing
 
@@ -87,7 +87,7 @@ The two halves have opposite lifetimes, and were split accordingly.
 
 Sending both together meant re-transmitting the polylines each cycle: **1 010 kB per refresh instead of 175 kB**. Neither body is ever serialized per request — a snapshot spans thousands of segments, which would otherwise dominate the handler's cost. The states body is swapped atomically through `ArcSwapOption`, the same lock-free approach as the RAPTOR index hot-reload.
 
-Failure is always degradation, never an outage: missing geometry, unreadable files or an unreachable feed leave the server running and the endpoints answering `enabled: false`.
+Failure is always degradation, never an outage. With `traffic.enabled: false`, or when the geometry is missing or unreadable, both endpoints answer `enabled: false`. An unreachable feed does not disable the overlay: until the first successful refresh, `/api/traffic/states` answers `503` (`traffic_unavailable`); after that, a failed refresh is logged at `warn` and the last snapshot keeps being served until the next one succeeds.
 
 ## Rendering
 
