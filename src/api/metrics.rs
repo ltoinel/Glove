@@ -237,8 +237,8 @@ mod tests {
     #[test]
     fn write_metric_float() {
         let mut out = String::new();
-        write_metric(&mut out, "my_gauge", "A gauge.", "gauge", 3.14);
-        assert!(out.contains("my_gauge 3.14"));
+        write_metric(&mut out, "my_gauge", "A gauge.", "gauge", 2.5);
+        assert!(out.contains("my_gauge 2.5"));
     }
 
     #[test]
