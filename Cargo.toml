@@ -20,7 +20,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde_yaml = "0.9"
 arc-swap = "1"
-utoipa = { version = "5", features = ["actix_extras"] }
+utoipa = { version = "6", features = ["actix_extras"] }
 # rustls rather than the default native-tls: no OpenSSL system dependency, so
 # the binary builds and cross-compiles without C toolchain setup.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
