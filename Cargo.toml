@@ -29,7 +29,7 @@ rustc-hash = "2"
 # pull futures-executor, futures-sink and futures-channel.
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 actix-cors = "0.7"
-actix-governor = "0.7"
+actix-governor = "0.10"
 quick-xml = "0.42"
 proj4rs = "0.2"
 
